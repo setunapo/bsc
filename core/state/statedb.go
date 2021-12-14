@@ -67,6 +67,24 @@ func (n *proofList) Delete(key []byte) error {
 	panic("not supported")
 }
 
+type StateKeys map[common.Hash]struct{}
+
+type StateObjectSyncMap struct {
+	sync.Map
+}
+
+func (s *StateObjectSyncMap) LoadStateObject(addr common.Address) (*StateObject, bool) {
+	stateObject, ok := s.Load(addr)
+	if !ok {
+		return nil, ok
+	}
+	return stateObject.(*StateObject), ok
+}
+
+func (s *StateObjectSyncMap) StoreStateObject(addr common.Address, stateObject *StateObject) {
+	s.Store(addr, stateObject)
+}
+
 // StateDB structs within the ethereum protocol are used to store anything
 // within the merkle trie. StateDBs take care of caching and storing
 // nested states. It's the general query interface to retrieve:
@@ -97,9 +115,34 @@ type StateDB struct {
 	snapStorage   map[common.Address]map[string][]byte
 
 	// This map holds 'live' objects, which will get modified while processing a state transition.
-	stateObjects        map[common.Address]*StateObject
+	stateObjects        *StateObjectSyncMap
 	stateObjectsPending map[common.Address]struct{} // State objects finalized but not yet written to the trie
 	stateObjectsDirty   map[common.Address]struct{} // State objects modified in the current execution
+
+	// parallel start
+	isSlotDB                  bool
+	baseTxIndex               int // slotDB is created base on this tx index.
+	SlotIndex                 int // debug purpose, will be removed
+	dirtiedStateObjectsInSlot map[common.Address]*StateObject
+	// for conflict check
+	balanceChangedInSlot map[common.Address]struct{} // the address's balance has been changed
+	balanceReadsInSlot   map[common.Address]struct{} // the address's balance has been read and used.
+	codeReadInSlot       map[common.Address]struct{}
+	codeChangeInSlot     map[common.Address]struct{}
+	stateReadsInSlot     map[common.Address]StateKeys
+	stateChangedInSlot   map[common.Address]StateKeys // no need record value
+	// Actions such as SetCode, Suicide will change address's state.
+	// Later call like Exist(), Empty(), HasSuicided() depond on the address's state.
+	addrStateReadInSlot   map[common.Address]struct{}
+	addrStateChangeInSlot map[common.Address]struct{}
+	stateObjectSuicided   map[common.Address]struct{}
+	// Transaction will pay gas fee to system address.
+	// Parallel execution will clear system address's balance at first, in order to maintain transaction's
+	// gas fee value. Normal transaction will access system address twice, otherwise it means the transaction
+	// needs real system address's balance, the transaction will be marked redo with keepSystemAddressBalance = true
+	systemAddress            common.Address
+	systemAddressCount       int
+	keepSystemAddressBalance bool
 
 	// DB error.
 	// State objects are used by the consensus core and VM which are
@@ -147,18 +190,71 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) 
 	return newStateDB(root, db, snaps)
 }
 
+// With parallel, each execute slot would have its own stateDB.
+// NewSlotDB creates a new slot stateDB base on the provided stateDB.
+func NewSlotDB(db *StateDB, systemAddr common.Address, txIndex int, keepSystem bool) *StateDB {
+	slotDB := db.CopyForSlot()
+	slotDB.originalRoot = db.originalRoot
+	slotDB.baseTxIndex = txIndex
+	slotDB.systemAddress = systemAddr
+	slotDB.systemAddressCount = 0
+	slotDB.keepSystemAddressBalance = keepSystem
+
+	// clear the slotDB's validator's balance first
+	// for slotDB, systemAddr's value is the tx's gas fee
+	if !keepSystem {
+		slotDB.SetBalance(systemAddr, big.NewInt(0))
+	}
+
+	return slotDB
+}
+
+// to avoid new slotDB for each Tx, slotDB should be valid and merged
+func ReUseSlotDB(slotDB *StateDB, keepSystem bool) *StateDB {
+	if !keepSystem {
+		slotDB.SetBalance(slotDB.systemAddress, big.NewInt(0))
+	}
+	slotDB.logs = make(map[common.Hash][]*types.Log, defaultNumOfSlots)
+	slotDB.logSize = 0
+	slotDB.systemAddressCount = 0
+	slotDB.keepSystemAddressBalance = keepSystem
+	slotDB.stateObjectSuicided = make(map[common.Address]struct{}, defaultNumOfSlots)
+	slotDB.codeReadInSlot = make(map[common.Address]struct{}, defaultNumOfSlots)
+	slotDB.codeChangeInSlot = make(map[common.Address]struct{}, defaultNumOfSlots)
+	slotDB.stateChangedInSlot = make(map[common.Address]StateKeys, defaultNumOfSlots)
+	slotDB.stateReadsInSlot = make(map[common.Address]StateKeys, defaultNumOfSlots)
+	slotDB.balanceChangedInSlot = make(map[common.Address]struct{}, defaultNumOfSlots)
+	slotDB.balanceReadsInSlot = make(map[common.Address]struct{}, defaultNumOfSlots)
+	slotDB.addrStateReadInSlot = make(map[common.Address]struct{}, defaultNumOfSlots)
+	slotDB.addrStateChangeInSlot = make(map[common.Address]struct{}, defaultNumOfSlots)
+
+	slotDB.stateObjectsDirty = make(map[common.Address]struct{}, defaultNumOfSlots)
+	slotDB.stateObjectsPending = make(map[common.Address]struct{}, defaultNumOfSlots)
+
+	return slotDB
+}
+
 func newStateDB(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) {
 	sdb := &StateDB{
-		db:                  db,
-		originalRoot:        root,
-		snaps:               snaps,
-		stateObjects:        make(map[common.Address]*StateObject, defaultNumOfSlots),
-		stateObjectsPending: make(map[common.Address]struct{}, defaultNumOfSlots),
-		stateObjectsDirty:   make(map[common.Address]struct{}, defaultNumOfSlots),
-		logs:                make(map[common.Hash][]*types.Log, defaultNumOfSlots),
-		preimages:           make(map[common.Hash][]byte),
-		journal:             newJournal(),
-		hasher:              crypto.NewKeccakState(),
+		db:                    db,
+		originalRoot:          root,
+		snaps:                 snaps,
+		stateObjects:          &StateObjectSyncMap{},
+		stateObjectSuicided:   make(map[common.Address]struct{}, defaultNumOfSlots),
+		codeReadInSlot:        make(map[common.Address]struct{}, defaultNumOfSlots),
+		codeChangeInSlot:      make(map[common.Address]struct{}, defaultNumOfSlots),
+		stateChangedInSlot:    make(map[common.Address]StateKeys, defaultNumOfSlots),
+		stateReadsInSlot:      make(map[common.Address]StateKeys, defaultNumOfSlots),
+		balanceChangedInSlot:  make(map[common.Address]struct{}, defaultNumOfSlots),
+		balanceReadsInSlot:    make(map[common.Address]struct{}, defaultNumOfSlots),
+		addrStateReadInSlot:   make(map[common.Address]struct{}, defaultNumOfSlots),
+		addrStateChangeInSlot: make(map[common.Address]struct{}, defaultNumOfSlots),
+		stateObjectsPending:   make(map[common.Address]struct{}, defaultNumOfSlots),
+		stateObjectsDirty:     make(map[common.Address]struct{}, defaultNumOfSlots),
+		logs:                  make(map[common.Hash][]*types.Log, defaultNumOfSlots),
+		preimages:             make(map[common.Hash][]byte),
+		journal:               newJournal(),
+		hasher:                crypto.NewKeccakState(),
 	}
 	if sdb.snaps != nil {
 		if sdb.snap = sdb.snaps.Snapshot(root); sdb.snap != nil {
@@ -176,6 +272,119 @@ func newStateDB(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, 
 	}
 	sdb.trie = tr
 	return sdb, nil
+}
+
+func (s *StateDB) getStateObjectFromStateObjects(addr common.Address) (*StateObject, bool) {
+	if s.isSlotDB {
+		obj, ok := s.dirtiedStateObjectsInSlot[addr]
+		if ok {
+			return obj, ok
+		}
+	}
+	return s.stateObjects.LoadStateObject(addr)
+}
+
+// MergeSlotDB is for Parallel TX, when the TX is finalized(dirty -> pending)
+// A bit similar to StateDB.Copy(),
+// mainly copy stateObjects, since slotDB has been finalized.
+// return: objSuicided, stateChanges, balanceChanges, codeChanges
+func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt) (map[common.Address]struct{}, map[common.Address]StateKeys, map[common.Address]struct{}, map[common.Address]struct{}, map[common.Address]struct{}) {
+	// receipt.Logs with unified log Index within a block
+	// align slotDB's logs Index to the block stateDB's logSize
+	for _, l := range slotReceipt.Logs {
+		l.Index += s.logSize
+	}
+	s.logSize += slotDb.logSize
+
+	// before merge, do validator reward first: AddBalance to consensus.SystemAddress
+	// object of SystemAddress is take care specially
+	systemAddress := slotDb.systemAddress
+	if slotDb.keepSystemAddressBalance {
+		s.SetBalance(systemAddress, slotDb.GetBalance(systemAddress))
+	} else {
+		s.AddBalance(systemAddress, slotDb.GetBalance(systemAddress))
+	}
+
+	// only merge dirty objects
+	for addr := range slotDb.stateObjectsDirty {
+		if _, exist := s.stateObjectsDirty[addr]; !exist {
+			s.stateObjectsDirty[addr] = struct{}{}
+		}
+
+		if addr == systemAddress {
+			continue
+		}
+
+		// stateObjects: KV, balance, nonce...
+		if obj, ok := slotDb.getStateObjectFromStateObjects(addr); ok {
+			s.stateObjects.StoreStateObject(addr, obj.deepCopyForSlot(s))
+		}
+	}
+
+	for addr := range slotDb.stateObjectsPending {
+		if _, exist := s.stateObjectsPending[addr]; !exist {
+			s.stateObjectsPending[addr] = struct{}{}
+		}
+	}
+
+	for addr, obj := range slotDb.dirtiedStateObjectsInSlot {
+		if addr == systemAddress {
+			continue
+		}
+
+		if _, exist := s.stateObjects.LoadStateObject(addr); !exist {
+			s.stateObjects.StoreStateObject(addr, obj.deepCopyForSlot(s))
+		}
+	}
+
+	// slotDb.logs: logs will be kept in receipts, no need to do merge
+
+	// Fixed: preimages should be merged not overwrite
+	for hash, preimage := range slotDb.preimages {
+		s.preimages[hash] = preimage
+	}
+	// Fixed: accessList should be merged not overwrite
+	if s.accessList != nil {
+		s.accessList = slotDb.accessList.Copy()
+	}
+	if slotDb.snaps != nil {
+		for k, v := range slotDb.snapDestructs {
+			s.snapDestructs[k] = v
+		}
+		for k, v := range slotDb.snapAccounts {
+			s.snapAccounts[k] = v
+		}
+		for k, v := range slotDb.snapStorage {
+			temp := make(map[string][]byte)
+			for kk, vv := range v {
+				temp[kk] = vv
+			}
+			s.snapStorage[k] = temp
+		}
+	}
+
+	objectSuicided := make(map[common.Address]struct{}, len(slotDb.stateObjectSuicided))
+	for addr := range slotDb.stateObjectSuicided {
+		objectSuicided[addr] = struct{}{}
+	}
+	stateChanges := make(map[common.Address]StateKeys, len(slotDb.stateChangedInSlot)) // must be a deep copy, since
+	for addr, storage := range slotDb.stateChangedInSlot {
+		stateChanges[addr] = storage
+	}
+	balanceChanges := make(map[common.Address]struct{}, len(slotDb.balanceChangedInSlot)) // must be a deep copy, since
+	for addr := range slotDb.balanceChangedInSlot {
+		balanceChanges[addr] = struct{}{}
+	}
+	codeChanges := make(map[common.Address]struct{}, len(slotDb.codeChangeInSlot))
+	for addr := range slotDb.codeChangeInSlot {
+		codeChanges[addr] = struct{}{}
+	}
+	addrStateChanges := make(map[common.Address]struct{}, len(slotDb.addrStateChangeInSlot))
+	for addr := range slotDb.addrStateChangeInSlot {
+		addrStateChanges[addr] = struct{}{}
+	}
+
+	return objectSuicided, stateChanges, balanceChanges, codeChanges, addrStateChanges
 }
 
 // StartPrefetcher initializes a new trie prefetcher to pull in nodes from the
@@ -323,6 +532,9 @@ func (s *StateDB) SubRefund(gas uint64) {
 // Exist reports whether the given account address exists in the state.
 // Notably this also returns true for suicided accounts.
 func (s *StateDB) Exist(addr common.Address) bool {
+	if s.isSlotDB {
+		s.addrStateReadInSlot[addr] = struct{}{}
+	}
 	return s.getStateObject(addr) != nil
 }
 
@@ -330,11 +542,20 @@ func (s *StateDB) Exist(addr common.Address) bool {
 // or empty according to the EIP161 specification (balance = nonce = code = 0)
 func (s *StateDB) Empty(addr common.Address) bool {
 	so := s.getStateObject(addr)
+	if s.isSlotDB {
+		s.addrStateReadInSlot[addr] = struct{}{}
+	}
 	return so == nil || so.empty()
 }
 
 // GetBalance retrieves the balance from the given address or 0 if object not found
 func (s *StateDB) GetBalance(addr common.Address) *big.Int {
+	if s.isSlotDB {
+		s.balanceReadsInSlot[addr] = struct{}{}
+		if addr == s.systemAddress {
+			s.systemAddressCount++
+		}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.Balance()
@@ -361,7 +582,35 @@ func (s *StateDB) BlockHash() common.Hash {
 	return s.bhash
 }
 
+// BaseTxIndex returns the tx index that slot db based.
+func (s *StateDB) BaseTxIndex() int {
+	return s.baseTxIndex
+}
+
+func (s *StateDB) CodeReadInSlot() map[common.Address]struct{} {
+	return s.codeReadInSlot
+}
+
+func (s *StateDB) AddressReadInSlot() map[common.Address]struct{} {
+	return s.addrStateReadInSlot
+}
+
+func (s *StateDB) StateReadsInSlot() map[common.Address]StateKeys {
+	return s.stateReadsInSlot
+}
+
+func (s *StateDB) BalanceReadsInSlot() map[common.Address]struct{} {
+	return s.balanceReadsInSlot
+}
+func (s *StateDB) SystemAddressRedo() bool {
+	return s.systemAddressCount > 2
+}
+
 func (s *StateDB) GetCode(addr common.Address) []byte {
+	if s.isSlotDB {
+		s.codeReadInSlot[addr] = struct{}{}
+	}
+
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.Code(s.db)
@@ -370,6 +619,10 @@ func (s *StateDB) GetCode(addr common.Address) []byte {
 }
 
 func (s *StateDB) GetCodeSize(addr common.Address) int {
+	if s.isSlotDB {
+		s.codeReadInSlot[addr] = struct{}{} // code size is part of code
+	}
+
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.CodeSize(s.db)
@@ -378,6 +631,10 @@ func (s *StateDB) GetCodeSize(addr common.Address) int {
 }
 
 func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
+	if s.isSlotDB {
+		s.codeReadInSlot[addr] = struct{}{} // code hash is part of code
+	}
+
 	stateObject := s.getStateObject(addr)
 	if stateObject == nil {
 		return common.Hash{}
@@ -387,6 +644,13 @@ func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
 
 // GetState retrieves a value from the given account's storage trie.
 func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
+	if s.isSlotDB {
+		if s.stateReadsInSlot[addr] == nil {
+			s.stateReadsInSlot[addr] = make(map[common.Hash]struct{}, defaultNumOfSlots)
+		}
+		s.stateReadsInSlot[addr][hash] = struct{}{}
+	}
+
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.GetState(s.db, hash)
@@ -459,6 +723,10 @@ func (s *StateDB) StorageTrie(addr common.Address) Trie {
 
 func (s *StateDB) HasSuicided(addr common.Address) bool {
 	stateObject := s.getStateObject(addr)
+
+	if s.isSlotDB {
+		s.addrStateReadInSlot[addr] = struct{}{} // address suicided.
+	}
 	if stateObject != nil {
 		return stateObject.suicided
 	}
@@ -471,45 +739,134 @@ func (s *StateDB) HasSuicided(addr common.Address) bool {
 
 // AddBalance adds amount to the account associated with addr.
 func (s *StateDB) AddBalance(addr common.Address, amount *big.Int) {
+	if s.isSlotDB {
+		// just in case other tx creates this account, we will miss this if we only add this account when found
+		s.balanceChangedInSlot[addr] = struct{}{}
+		s.balanceReadsInSlot[addr] = struct{}{} // add balance will perform a read operation first
+		if addr == s.systemAddress {
+			s.systemAddressCount++
+		}
+	}
+
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
-		stateObject.AddBalance(amount)
+		if s.isSlotDB {
+			if _, ok := s.dirtiedStateObjectsInSlot[addr]; !ok {
+				newStateObject := stateObject.deepCopy(s)
+				newStateObject.AddBalance(amount)
+				s.dirtiedStateObjectsInSlot[addr] = newStateObject
+			} else {
+				stateObject.AddBalance(amount)
+			}
+		} else {
+			stateObject.AddBalance(amount)
+		}
 	}
 }
 
 // SubBalance subtracts amount from the account associated with addr.
 func (s *StateDB) SubBalance(addr common.Address, amount *big.Int) {
+	if s.isSlotDB {
+		// just in case other tx creates this account, we will miss this if we only add this account when found
+		s.balanceChangedInSlot[addr] = struct{}{}
+		s.balanceReadsInSlot[addr] = struct{}{}
+		if addr == s.systemAddress {
+			s.systemAddressCount++
+		}
+	}
+
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
-		stateObject.SubBalance(amount)
+		if s.isSlotDB {
+			if _, ok := s.dirtiedStateObjectsInSlot[addr]; !ok {
+				newStateObject := stateObject.deepCopy(s)
+				newStateObject.SubBalance(amount)
+				s.dirtiedStateObjectsInSlot[addr] = newStateObject
+			} else {
+				stateObject.SubBalance(amount)
+			}
+		} else {
+			stateObject.SubBalance(amount)
+		}
 	}
 }
 
 func (s *StateDB) SetBalance(addr common.Address, amount *big.Int) {
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
-		stateObject.SetBalance(amount)
+		if s.isSlotDB {
+			if _, ok := s.dirtiedStateObjectsInSlot[addr]; !ok {
+				newStateObject := stateObject.deepCopy(s)
+				newStateObject.SetBalance(amount)
+				s.dirtiedStateObjectsInSlot[addr] = newStateObject
+			} else {
+				stateObject.SetBalance(amount)
+			}
+			s.balanceChangedInSlot[addr] = struct{}{}
+			if addr == s.systemAddress {
+				s.systemAddressCount++
+			}
+		} else {
+			stateObject.SetBalance(amount)
+		}
 	}
 }
 
 func (s *StateDB) SetNonce(addr common.Address, nonce uint64) {
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
-		stateObject.SetNonce(nonce)
+		if s.isSlotDB {
+			if _, ok := s.dirtiedStateObjectsInSlot[addr]; !ok {
+				newStateObject := stateObject.deepCopy(s)
+				newStateObject.SetNonce(nonce)
+				s.dirtiedStateObjectsInSlot[addr] = newStateObject
+			} else {
+				stateObject.SetNonce(nonce)
+			}
+		} else {
+			stateObject.SetNonce(nonce)
+		}
 	}
 }
 
 func (s *StateDB) SetCode(addr common.Address, code []byte) {
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
-		stateObject.SetCode(crypto.Keccak256Hash(code), code)
+		if s.isSlotDB {
+			if _, ok := s.dirtiedStateObjectsInSlot[addr]; !ok {
+				newStateObject := stateObject.deepCopy(s)
+				newStateObject.SetCode(crypto.Keccak256Hash(code), code)
+				s.dirtiedStateObjectsInSlot[addr] = newStateObject
+			} else {
+				stateObject.SetCode(crypto.Keccak256Hash(code), code)
+			}
+
+			s.codeChangeInSlot[addr] = struct{}{}
+		} else {
+			stateObject.SetCode(crypto.Keccak256Hash(code), code)
+		}
 	}
 }
 
 func (s *StateDB) SetState(addr common.Address, key, value common.Hash) {
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
-		stateObject.SetState(s.db, key, value)
+		if s.isSlotDB {
+			if _, ok := s.dirtiedStateObjectsInSlot[addr]; !ok {
+				newStateObject := stateObject.deepCopy(s)
+				newStateObject.SetState(s.db, key, value)
+				s.dirtiedStateObjectsInSlot[addr] = newStateObject
+			} else {
+				stateObject.SetState(s.db, key, value)
+			}
+
+			if s.stateChangedInSlot[addr] == nil {
+				s.stateChangedInSlot[addr] = make(StateKeys, defaultNumOfSlots)
+			}
+			s.stateChangedInSlot[addr][key] = struct{}{}
+		} else {
+			stateObject.SetState(s.db, key, value)
+		}
 	}
 }
 
@@ -529,9 +886,16 @@ func (s *StateDB) SetStorage(addr common.Address, storage map[common.Hash]common
 // getStateObject will return a non-nil account after Suicide.
 func (s *StateDB) Suicide(addr common.Address) bool {
 	stateObject := s.getStateObject(addr)
+	// fixme: should add read stateobject record
 	if stateObject == nil {
+		log.Warn("StateDB Suicide stateObject not found", "slot", s.SlotIndex, "addr", addr)
 		return false
 	}
+	if s.isSlotDB {
+		s.stateObjectSuicided[addr] = struct{}{}
+		s.addrStateChangeInSlot[addr] = struct{}{} // address suicided.
+	}
+
 	s.journal.append(suicideChange{
 		account:     &addr,
 		prev:        stateObject.suicided,
@@ -669,7 +1033,7 @@ func (s *StateDB) preloadStateObject(address []common.Address) []*StateObject {
 // destructed object instead of wiping all knowledge about the state object.
 func (s *StateDB) getDeletedStateObject(addr common.Address) *StateObject {
 	// Prefer live objects if any is available
-	if obj := s.stateObjects[addr]; obj != nil {
+	if obj, _ := s.getStateObjectFromStateObjects(addr); obj != nil {
 		return obj
 	}
 	// If no live objects are available, attempt to use snapshots
@@ -734,7 +1098,11 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *StateObject {
 }
 
 func (s *StateDB) SetStateObject(object *StateObject) {
-	s.stateObjects[object.Address()] = object
+	if s.isSlotDB {
+		s.dirtiedStateObjectsInSlot[object.Address()] = object
+	} else {
+		s.stateObjects.StoreStateObject(object.Address(), object)
+	}
 }
 
 // GetOrNewStateObject retrieves a state object or create a new state object if nil.
@@ -742,6 +1110,9 @@ func (s *StateDB) GetOrNewStateObject(addr common.Address) *StateObject {
 	stateObject := s.getStateObject(addr)
 	if stateObject == nil {
 		stateObject, _ = s.createObject(addr)
+		if s.isSlotDB {
+			s.addrStateChangeInSlot[addr] = struct{}{} // address created.
+		}
 	}
 	return stateObject
 }
@@ -786,18 +1157,21 @@ func (s *StateDB) CreateAccount(addr common.Address) {
 	newObj, prev := s.createObject(addr)
 	if prev != nil {
 		newObj.setBalance(prev.data.Balance)
+	} else if s.isSlotDB {
+		s.addrStateChangeInSlot[addr] = struct{}{} // new account created
 	}
+
 }
 
-func (db *StateDB) ForEachStorage(addr common.Address, cb func(key, value common.Hash) bool) error {
-	so := db.getStateObject(addr)
+func (s *StateDB) ForEachStorage(addr common.Address, cb func(key, value common.Hash) bool) error {
+	so := s.getStateObject(addr)
 	if so == nil {
 		return nil
 	}
-	it := trie.NewIterator(so.getTrie(db.db).NodeIterator(nil))
+	it := trie.NewIterator(so.getTrie(s.db).NodeIterator(nil))
 
 	for it.Next() {
-		key := common.BytesToHash(db.trie.GetKey(it.Key))
+		key := common.BytesToHash(s.trie.GetKey(it.Key))
 		if value, dirty := so.dirtyStorage[key]; dirty {
 			if !cb(key, value) {
 				return nil
@@ -825,7 +1199,7 @@ func (s *StateDB) Copy() *StateDB {
 	state := &StateDB{
 		db:                  s.db,
 		trie:                s.db.CopyTrie(s.trie),
-		stateObjects:        make(map[common.Address]*StateObject, len(s.journal.dirties)),
+		stateObjects:        &StateObjectSyncMap{},
 		stateObjectsPending: make(map[common.Address]struct{}, len(s.stateObjectsPending)),
 		stateObjectsDirty:   make(map[common.Address]struct{}, len(s.journal.dirties)),
 		refund:              s.refund,
@@ -834,6 +1208,18 @@ func (s *StateDB) Copy() *StateDB {
 		preimages:           make(map[common.Hash][]byte, len(s.preimages)),
 		journal:             newJournal(),
 		hasher:              crypto.NewKeccakState(),
+
+		isSlotDB:                  false,
+		stateObjectSuicided:       make(map[common.Address]struct{}, defaultNumOfSlots),
+		codeReadInSlot:            make(map[common.Address]struct{}, defaultNumOfSlots),
+		codeChangeInSlot:          make(map[common.Address]struct{}, defaultNumOfSlots),
+		stateChangedInSlot:        make(map[common.Address]StateKeys, defaultNumOfSlots),
+		stateReadsInSlot:          make(map[common.Address]StateKeys, defaultNumOfSlots),
+		balanceChangedInSlot:      make(map[common.Address]struct{}, defaultNumOfSlots),
+		balanceReadsInSlot:        make(map[common.Address]struct{}, defaultNumOfSlots),
+		addrStateReadInSlot:       make(map[common.Address]struct{}, defaultNumOfSlots),
+		addrStateChangeInSlot:     make(map[common.Address]struct{}, defaultNumOfSlots),
+		dirtiedStateObjectsInSlot: make(map[common.Address]*StateObject, defaultNumOfSlots),
 	}
 	// Copy the dirty states, logs, and preimages
 	for addr := range s.journal.dirties {
@@ -841,11 +1227,11 @@ func (s *StateDB) Copy() *StateDB {
 		// and in the Finalise-method, there is a case where an object is in the journal but not
 		// in the stateObjects: OOG after touch on ripeMD prior to Byzantium. Thus, we need to check for
 		// nil
-		if object, exist := s.stateObjects[addr]; exist {
+		if object, exist := s.getStateObjectFromStateObjects(addr); exist {
 			// Even though the original object is dirty, we are not copying the journal,
 			// so we need to make sure that anyside effect the journal would have caused
 			// during a commit (or similar op) is already applied to the copy.
-			state.stateObjects[addr] = object.deepCopy(state)
+			state.stateObjects.StoreStateObject(addr, object.deepCopy(state))
 
 			state.stateObjectsDirty[addr] = struct{}{}   // Mark the copy dirty to force internal (code/state) commits
 			state.stateObjectsPending[addr] = struct{}{} // Mark the copy pending to force external (account) commits
@@ -855,14 +1241,16 @@ func (s *StateDB) Copy() *StateDB {
 	// loop above will be a no-op, since the copy's journal is empty.
 	// Thus, here we iterate over stateObjects, to enable copies of copies
 	for addr := range s.stateObjectsPending {
-		if _, exist := state.stateObjects[addr]; !exist {
-			state.stateObjects[addr] = s.stateObjects[addr].deepCopy(state)
+		if _, exist := state.getStateObjectFromStateObjects(addr); !exist {
+			object, _ := s.getStateObjectFromStateObjects(addr)
+			state.stateObjects.StoreStateObject(addr, object.deepCopy(state))
 		}
 		state.stateObjectsPending[addr] = struct{}{}
 	}
 	for addr := range s.stateObjectsDirty {
-		if _, exist := state.stateObjects[addr]; !exist {
-			state.stateObjects[addr] = s.stateObjects[addr].deepCopy(state)
+		if _, exist := state.getStateObjectFromStateObjects(addr); !exist {
+			object, _ := s.getStateObjectFromStateObjects(addr)
+			state.stateObjects.StoreStateObject(addr, object.deepCopy(state))
 		}
 		state.stateObjectsDirty[addr] = struct{}{}
 	}
@@ -892,6 +1280,69 @@ func (s *StateDB) Copy() *StateDB {
 	if s.prefetcher != nil {
 		state.prefetcher = s.prefetcher.copy()
 	}
+	if s.snaps != nil {
+		// In order for the miner to be able to use and make additions
+		// to the snapshot tree, we need to copy that aswell.
+		// Otherwise, any block mined by ourselves will cause gaps in the tree,
+		// and force the miner to operate trie-backed only
+		state.snaps = s.snaps
+		state.snap = s.snap
+		// deep copy needed
+		state.snapDestructs = make(map[common.Address]struct{})
+		for k, v := range s.snapDestructs {
+			state.snapDestructs[k] = v
+		}
+		state.snapAccounts = make(map[common.Address][]byte)
+		for k, v := range s.snapAccounts {
+			state.snapAccounts[k] = v
+		}
+		state.snapStorage = make(map[common.Address]map[string][]byte)
+		for k, v := range s.snapStorage {
+			temp := make(map[string][]byte)
+			for kk, vv := range v {
+				temp[kk] = vv
+			}
+			state.snapStorage[k] = temp
+		}
+	}
+	return state
+}
+
+func (s *StateDB) CopyForSlot() *StateDB {
+	// Copy all the basic fields, initialize the memory ones
+	state := &StateDB{
+		db:                    s.db,
+		trie:                  s.db.CopyTrie(s.trie),
+		stateObjects:          s.stateObjects,
+		stateObjectsPending:   make(map[common.Address]struct{}, defaultNumOfSlots),
+		stateObjectsDirty:     make(map[common.Address]struct{}, defaultNumOfSlots),
+		refund:                s.refund,
+		logs:                  make(map[common.Hash][]*types.Log, defaultNumOfSlots),
+		logSize:               0,
+		preimages:             make(map[common.Hash][]byte, len(s.preimages)),
+		journal:               newJournal(),
+		hasher:                crypto.NewKeccakState(),
+		snapDestructs:         make(map[common.Address]struct{}),
+		snapAccounts:          make(map[common.Address][]byte),
+		snapStorage:           make(map[common.Address]map[string][]byte),
+		stateObjectSuicided:   make(map[common.Address]struct{}, defaultNumOfSlots),
+		codeReadInSlot:        make(map[common.Address]struct{}, defaultNumOfSlots),
+		codeChangeInSlot:      make(map[common.Address]struct{}, defaultNumOfSlots),
+		stateChangedInSlot:    make(map[common.Address]StateKeys, defaultNumOfSlots),
+		stateReadsInSlot:      make(map[common.Address]StateKeys, defaultNumOfSlots),
+		balanceChangedInSlot:  make(map[common.Address]struct{}, defaultNumOfSlots),
+		balanceReadsInSlot:    make(map[common.Address]struct{}, defaultNumOfSlots),
+		addrStateReadInSlot:   make(map[common.Address]struct{}, defaultNumOfSlots),
+		addrStateChangeInSlot: make(map[common.Address]struct{}, defaultNumOfSlots),
+
+		isSlotDB:                  true,
+		dirtiedStateObjectsInSlot: make(map[common.Address]*StateObject, defaultNumOfSlots),
+	}
+
+	for hash, preimage := range s.preimages {
+		state.preimages[hash] = preimage
+	}
+
 	if s.snaps != nil {
 		// In order for the miner to be able to use and make additions
 		// to the snapshot tree, we need to copy that aswell.
@@ -966,7 +1417,7 @@ func (s *StateDB) WaitPipeVerification() error {
 func (s *StateDB) Finalise(deleteEmptyObjects bool) {
 	addressesToPrefetch := make([][]byte, 0, len(s.journal.dirties))
 	for addr := range s.journal.dirties {
-		obj, exist := s.stateObjects[addr]
+		obj, exist := s.getStateObjectFromStateObjects(addr)
 		if !exist {
 			// ripeMD is 'touched' at block 1714175, in tx 0x1237f737031e40bcde4a8b7e717b2d15e3ecadfe49bb1bbc71ee9deb09c6fcf2
 			// That tx goes out of gas, and although the notion of 'touched' does not exist there, the
@@ -1047,11 +1498,10 @@ func (s *StateDB) AccountsIntermediateRoot() {
 	// first, giving the account prefeches just a few more milliseconds of time
 	// to pull useful data from disk.
 	for addr := range s.stateObjectsPending {
-		if obj := s.stateObjects[addr]; !obj.deleted {
+		if obj, _ := s.getStateObjectFromStateObjects(addr); !obj.deleted {
 			wg.Add(1)
 			tasks <- func() {
 				obj.updateRoot(s.db)
-
 				// If state snapshotting is active, cache the data til commit. Note, this
 				// update mechanism is not symmetric to the deletion, because whereas it is
 				// enough to track account updates at commit time, deletions need tracking
@@ -1110,7 +1560,7 @@ func (s *StateDB) StateIntermediateRoot() common.Hash {
 	}
 	usedAddrs := make([][]byte, 0, len(s.stateObjectsPending))
 	for addr := range s.stateObjectsPending {
-		if obj := s.stateObjects[addr]; obj.deleted {
+		if obj, _ := s.getStateObjectFromStateObjects(addr); obj.deleted {
 			s.deleteStateObject(obj)
 		} else {
 			s.updateStateObject(obj)
@@ -1335,7 +1785,7 @@ func (s *StateDB) Commit(failPostCommitFunc func(), postCommitFuncs ...func() er
 
 			if s.snap != nil {
 				for addr := range s.stateObjectsDirty {
-					if obj := s.stateObjects[addr]; !obj.deleted {
+					if obj, _ := s.getStateObjectFromStateObjects(addr); !obj.deleted {
 						if obj.code != nil && obj.dirtyCode {
 							diffLayer.Codes = append(diffLayer.Codes, types.DiffCode{
 								Hash: common.BytesToHash(obj.CodeHash()),
@@ -1347,7 +1797,7 @@ func (s *StateDB) Commit(failPostCommitFunc func(), postCommitFuncs ...func() er
 			}
 
 			for addr := range s.stateObjectsDirty {
-				if obj := s.stateObjects[addr]; !obj.deleted {
+				if obj, _ := s.getStateObjectFromStateObjects(addr); !obj.deleted {
 					// Write any contract code associated with the state object
 					tasks <- func() {
 						// Write any storage changes in the state object to its storage trie
@@ -1418,7 +1868,7 @@ func (s *StateDB) Commit(failPostCommitFunc func(), postCommitFuncs ...func() er
 		func() error {
 			codeWriter := s.db.TrieDB().DiskDB().NewBatch()
 			for addr := range s.stateObjectsDirty {
-				if obj := s.stateObjects[addr]; !obj.deleted {
+				if obj, _ := s.getStateObjectFromStateObjects(addr); !obj.deleted {
 					if obj.code != nil && obj.dirtyCode {
 						rawdb.WriteCode(codeWriter, common.BytesToHash(obj.CodeHash()), obj.code)
 						obj.dirtyCode = false
