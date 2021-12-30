@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"math/rand"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +39,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -757,6 +759,7 @@ func (p *ParallelStateProcessor) doStaticDispatch(mainStatedb *state.StateDB, tx
 // do conflict detect
 func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, isStage2 bool) bool {
 	slotDB := txResult.slotDB
+
 	if txResult.err != nil {
 		return true
 	} else if slotDB.SystemAddressRedo() {
@@ -865,6 +868,7 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 			return nil
 		}
 	}
+	defer debug.Handler.StartRegionAuto("toConfirmTxIndex")()
 
 	for {
 		// handle a targetTxIndex in a loop
@@ -900,6 +904,7 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 		if !valid {
 			staticSlotIndex := targetResult.txReq.staticSlotIndex // it is better to run the TxReq in its static dispatch slot
 			if isStage2 {
+				defer debug.Handler.StartRegionAuto("conflict")()
 				atomic.CompareAndSwapInt32(&targetResult.txReq.runnable, 0, 1) // needs redo
 				p.debugConflictRedoNum++
 				// interrupt the slot's current routine, and switch to the other routine
@@ -907,6 +912,7 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 				return nil
 			}
 			if len(p.pendingConfirmResults[targetTxIndex]) == 0 { // this is the last result to check and it is not valid
+				defer debug.Handler.StartRegionAuto("conflict")()
 				atomic.CompareAndSwapInt32(&targetResult.txReq.runnable, 0, 1) // needs redo
 				p.debugConflictRedoNum++
 				// interrupt its current routine, and switch to the other routine
@@ -927,6 +933,7 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 // to confirm one txResult, return true if the result is valid
 // if it is in Stage 2 it is a likely result, not 100% sure
 func (p *ParallelStateProcessor) toConfirmTxIndexResult(txResult *ParallelTxResult, isStage2 bool) bool {
+	defer debug.Handler.StartRegionAuto("toConfirmTxIndexResult")()
 	txReq := txResult.txReq
 	if p.hasConflict(txResult, isStage2) {
 		return false
@@ -971,6 +978,11 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 		case <-wakeupChan:
 		}
 
+		traceMsg := "runSlotLoop " + strconv.Itoa(slotIndex)
+		if slotType == 1 {
+			traceMsg = traceMsg + " shadow"
+		}
+		region1 := debug.Handler.StartTrace(traceMsg)
 		interrupted := false
 		for _, txReq := range curSlot.pendingTxReqList {
 			if txReq.txIndex <= p.mergedTxIndex {
@@ -992,6 +1004,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 		}
 		// switched to the other slot.
 		if interrupted {
+			debug.Handler.EndTrace(region1)
 			continue
 		}
 
@@ -1011,12 +1024,15 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 				// not swapped: txReq.runnable == 0
 				continue
 			}
+			region1 := debug.Handler.StartTrace("for a stolen TxReq")
 			result := p.executeInSlot(slotIndex, stealTxReq)
+			debug.Handler.EndTrace(region1)
 			if result == nil { // fixme: code improve, nil means block processed, to be stopped
 				break
 			}
 			p.txResultChan <- result
 		}
+		debug.Handler.EndTrace(region1)
 	}
 }
 
@@ -1038,7 +1054,7 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			// log.Warn("runConfirmLoop drop merged txReq", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
 			continue
 		}
-
+		region := debug.Handler.StartTrace("runConfirmLoop")
 		if unconfirmedResult.err == nil {
 			if _, ok := p.txReqExecuteRecord[txIndex]; !ok {
 				p.txReqExecuteRecord[txIndex] = 0
@@ -1081,8 +1097,10 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 				unconfirmedResult.updateSlotDB = false
 				unconfirmedResult.prefetchAddr = true
 				p.txResultChan <- unconfirmedResult
+
 			}
 		}
+		debug.Handler.EndTrace(region)
 	}
 }
 */
@@ -1102,6 +1120,7 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 				<-p.confirmStage2Chan // drain the chan to get the latest merged txIndex
 			}
 		}
+		region := debug.Handler.StartTrace("runConfirmStage2Loop")
 		// stage 2,if all tx have been executed at least once, and its result has been recevied.
 		// in Stage 2, we will run check when merge is advanced.
 		// more aggressive tx result confirm, even for these Txs not in turn
@@ -1126,10 +1145,13 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 			// break
 			//}
 		}
+		region1 := debug.Handler.StartTrace("wakeup all slot")
 		// make sure all slots are wake up
 		for i := 0; i < p.parallelNum; i++ {
 			p.switchSlot(i)
 		}
+		debug.Handler.EndTrace(region1)
+		debug.Handler.EndTrace(region)
 	}
 
 }
@@ -1220,6 +1242,12 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	)
 	var receipts = make([]*types.Receipt, 0)
 	txNum := len(block.Transactions())
+
+	debug.Handler.EnableTraceCapture(block.Header().Number.Uint64(), "parallel")
+	debug.Handler.EnableTraceBigBlock(block.Header().Number.Uint64(), txNum, "parallel")
+	traceMsg := "ProcessParallel " + block.Header().Number.String()
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	p.resetState(txNum, statedb)
 	if txNum > 0 {
 		log.Info("ProcessParallel", "block", header.Number, "txNum", txNum)
@@ -1391,6 +1419,11 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	if txNum > 0 {
 		log.Info("Process", "block", header.Number, "txNum", txNum)
 	}
+	debug.Handler.EnableTraceBigBlock(block.Header().Number.Uint64(), txNum, "sequential")
+	debug.Handler.EnableTraceCapture(block.Header().Number.Uint64(), "sequential")
+	traceMsg := "Process " + block.Header().Number.String()
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	commonTxs := make([]*types.Transaction, 0, txNum)
 	// Iterate over and process the individual transactions
 	posa, isPoSA := p.engine.(consensus.PoSA)
@@ -1427,6 +1460,9 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 }
 
 func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainContext, author *common.Address, gp *GasPool, statedb *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, receiptProcessors ...ReceiptProcessor) (*types.Receipt, error) {
+	traceMsg := "applyTransaction"
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	// Create a new context to be used in the EVM environment.
 	txContext := NewEVMTxContext(msg)
 	evm.Reset(txContext, statedb)
@@ -1456,7 +1492,6 @@ func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainCon
 	}
 	receipt.TxHash = tx.Hash()
 	receipt.GasUsed = result.UsedGas
-
 	// If the transaction created a contract, store the creation address in the receipt.
 	if msg.To() == nil {
 		receipt.ContractAddress = crypto.CreateAddress(evm.TxContext.Origin, tx.Nonce())
@@ -1474,6 +1509,7 @@ func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainCon
 }
 
 func applyTransactionStageExecution(msg types.Message, gp *GasPool, statedb *state.ParallelStateDB, evm *vm.EVM) (*vm.EVM, *ExecutionResult, error) {
+	defer debug.Handler.StartRegionAuto("applyTransactionStageExecution")()
 	// Create a new context to be used in the EVM environment.
 	txContext := NewEVMTxContext(msg)
 	evm.Reset(txContext, statedb)
@@ -1488,6 +1524,7 @@ func applyTransactionStageExecution(msg types.Message, gp *GasPool, statedb *sta
 }
 
 func applyTransactionStageFinalization(evm *vm.EVM, result *ExecutionResult, msg types.Message, config *params.ChainConfig, statedb *state.ParallelStateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, receiptProcessors ...ReceiptProcessor) (*types.Receipt, error) {
+	defer debug.Handler.StartRegionAuto("applyTransactionStageFinalization")()
 	// Update the state with pending changes.
 	var root []byte
 	if config.IsByzantium(header.Number) {
