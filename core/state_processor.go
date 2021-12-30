@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"math/rand"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -459,6 +461,9 @@ func (p *ParallelStateProcessor) init() {
 // conflict check uses conflict window, it will check all state changes from (cfWindowStart + 1)
 // to the previous Tx, if any state in readDb is updated in changeList, then it is conflicted
 func (p *ParallelStateProcessor) hasStateConflict(readDb *state.StateDB, changeList state.SlotChangeList) bool {
+	// traceMsg := "hasStateConflict"
+	// defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	// check KV change
 	reads := readDb.StateReadsInSlot()
 	writes := changeList.StateChangeSet
@@ -744,6 +749,8 @@ func (p *ParallelStateProcessor) doStaticDispatch(mainStatedb *state.StateDB, tx
 
 // wait until the next Tx is executed and its result is merged to the main stateDB
 func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp *GasPool) *ParallelTxResult {
+	traceMsg := "waitUntilNextTxDone"
+	defer debug.Handler.StartRegionAuto(traceMsg)()
 	var result *ParallelTxResult
 	for {
 		result = <-p.txResultChan
@@ -772,6 +779,8 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 	resultSlotState := p.slotState[resultSlotIndex]
 	resultSlotState.pendingTxReqList = resultSlotState.pendingTxReqList[1:]
 
+	log.Debug("ProcessParallel a tx is done, merge to block stateDB",
+		"resultSlotIndex", resultSlotIndex, "resultTxIndex", resultTxIndex)
 	// Slot's mergedChangeList is produced by dispatcher, while consumed by slot.
 	// It is safe, since write and read is in sequential, do write -> notify -> read
 	// It is not good, but work right now.
@@ -790,6 +799,8 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 }
 
 func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxRequest) *ParallelTxResult {
+	traceMsg := "execInParallelSlot slot:" + strconv.Itoa(slotIndex) // + " txIndex:" + strconv.Itoa(txReq.txIndex)
+	defer debug.Handler.StartRegionAuto(traceMsg)()
 	slotDB := txReq.slotDB
 	slotDB.Prepare(txReq.tx.Hash(), txReq.block.Hash(), txReq.txIndex)
 	blockContext := NewEVMBlockContext(txReq.block.Header(), p.bc, nil) // can share blockContext within a block for efficiency
@@ -978,6 +989,10 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 
 // Implement BEP-130: Parallel Transaction Execution.
 func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (*state.StateDB, types.Receipts, []*types.Log, uint64, error) {
+	debug.Handler.EnableTraceCapture(block.Header().Number.Uint64())
+	traceMsg := "ProcessParallel " + block.Header().Number.String()
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	var (
 		usedGas = new(uint64)
 		header  = block.Header()
@@ -1124,6 +1139,11 @@ func (p *StateProcessor) postExecute(block *types.Block, statedb *state.StateDB,
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
 func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (*state.StateDB, types.Receipts, []*types.Log, uint64, error) {
+	debug.Handler.EnableTraceCapture(block.Header().Number.Uint64())
+	traceMsg := "Process " + block.Header().Number.String()
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+	debug.Handler.LogWhenTracing("StateProcessor." + traceMsg)
+
 	var (
 		usedGas = new(uint64)
 		header  = block.Header()
@@ -1131,6 +1151,9 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	)
 	var receipts = make([]*types.Receipt, 0)
 	txNum := len(block.Transactions())
+	if txNum > 0 {
+		log.Info("Process", "block num", block.Number())
+	}
 	commonTxs := make([]*types.Transaction, 0, txNum)
 	// Iterate over and process the individual transactions
 	posa, isPoSA := p.engine.(consensus.PoSA)
@@ -1167,6 +1190,10 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 }
 
 func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainContext, author *common.Address, gp *GasPool, statedb *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, receiptProcessors ...ReceiptProcessor) (*types.Receipt, error) {
+	traceMsg := "applyTransaction"
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+	debug.Handler.LogWhenTracing("applyTransaction " + tx.Hash().Hex())
+
 	// Create a new context to be used in the EVM environment.
 	txContext := NewEVMTxContext(msg)
 	evm.Reset(txContext, statedb)
@@ -1214,6 +1241,7 @@ func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainCon
 }
 
 func applyTransactionStageExecution(msg types.Message, gp *GasPool, statedb *state.StateDB, evm *vm.EVM) (*vm.EVM, *ExecutionResult, error) {
+	defer debug.Handler.StartRegionAuto("applyTransactionStageExecution")()
 	// Create a new context to be used in the EVM environment.
 	txContext := NewEVMTxContext(msg)
 	evm.Reset(txContext, statedb)
@@ -1228,6 +1256,7 @@ func applyTransactionStageExecution(msg types.Message, gp *GasPool, statedb *sta
 }
 
 func applyTransactionStageFinalization(evm *vm.EVM, result *ExecutionResult, msg types.Message, config *params.ChainConfig, statedb *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, receiptProcessors ...ReceiptProcessor) (*types.Receipt, error) {
+	defer debug.Handler.StartRegionAuto("applyTransactionStageFinalization")()
 	// Update the state with pending changes.
 	var root []byte
 	if config.IsByzantium(header.Number) {

@@ -20,6 +20,7 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 )
@@ -168,6 +169,7 @@ func (p *triePrefetcher) copy() *triePrefetcher {
 
 // prefetch schedules a batch of trie items to prefetch.
 func (p *triePrefetcher) prefetch(root common.Hash, keys [][]byte, accountHash common.Hash) {
+	defer debug.Handler.StartRegionAuto("triePrefetcher.prefetch")()
 	// If the prefetcher is an inactive one, bail out
 	if p.fetches != nil {
 		return
@@ -361,7 +363,7 @@ func (sf *subfetcher) loop() {
 
 				default:
 					// No termination request yet, prefetch the next entry
-					taskid := string(task)
+					taskid := string(task) //
 					if _, ok := sf.seen[taskid]; ok {
 						sf.dups++
 					} else {
