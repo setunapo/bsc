@@ -437,6 +437,7 @@ func (s *StateDB) Logs() []*types.Log {
 
 // AddPreimage records a SHA3 preimage seen by the VM.
 func (s *StateDB) AddPreimage(hash common.Hash, preimage []byte) {
+	log.Warn("StateDB.AddPreimage", "Slot", s.parallel.SlotIndex, "hash", hash.Hex())
 	if _, ok := s.preimages[hash]; !ok {
 		s.journal.append(addPreimageChange{hash: hash})
 		pi := make([]byte, len(preimage))
@@ -554,6 +555,7 @@ func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
 
 // GetState retrieves a value from the given account's storage trie.
 func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
+	defer debug.Handler.StartRegionAuto("GetState")()
 	stateObject := s.getStateObject(addr)
 	val := common.Hash{}
 	if stateObject != nil {
@@ -1422,6 +1424,7 @@ func (s *StateDB) Finalise(deleteEmptyObjects bool) { // fixme: concurrent safe.
 // It is called in between transactions to get the root hash that
 // goes into transaction receipts.
 func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
+	defer debug.Handler.StartRegionAuto("StateDB.IntermediateRoot")()
 	if s.lightProcessed {
 		s.StopPrefetcher()
 		return s.trie.Hash()
@@ -1433,6 +1436,7 @@ func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 }
 
 func (s *StateDB) AccountsIntermediateRoot() {
+	defer debug.Handler.StartRegionAuto("AccountsIntermediateRoot")()
 	tasks := make(chan func()) // use buffer chan?
 	finishCh := make(chan struct{})
 	defer close(finishCh)
@@ -1483,6 +1487,7 @@ func (s *StateDB) AccountsIntermediateRoot() {
 }
 
 func (s *StateDB) StateIntermediateRoot() common.Hash {
+	defer debug.Handler.StartRegionAuto("StateIntermediateRoot")()
 	// If there was a trie prefetcher operating, it gets aborted and irrevocably
 	// modified after we start retrieving tries. Remove it from the statedb after
 	// this round of use.
@@ -1718,6 +1723,7 @@ func (s *StateDB) LightCommit() (common.Hash, *types.DiffLayer, error) {
 
 // Commit writes the state to the underlying in-memory trie database.
 func (s *StateDB) Commit(failPostCommitFunc func(), postCommitFuncs ...func() error) (common.Hash, *types.DiffLayer, error) {
+	defer debug.Handler.StartRegionAuto("StateDB.Commit")()
 	if s.dbErr != nil {
 		return common.Hash{}, nil, fmt.Errorf("commit aborted due to earlier error: %v", s.dbErr)
 	}
@@ -2119,6 +2125,9 @@ func (s *StateDB) AddrPrefetch(slotDb *ParallelStateDB) {
 // merged back to the main StateDB.
 // And it will return and keep the slot's change list for later conflict detect.
 func (s *StateDB) MergeSlotDB(slotDb *ParallelStateDB, slotReceipt *types.Receipt, txIndex int) {
+	traceMsg := "MergeSlotDB"
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	// receipt.Logs use unified log index within a block
 	// align slotDB's log index to the block stateDB's logSize
 	for _, l := range slotReceipt.Logs {
@@ -2292,6 +2301,9 @@ type ParallelStateDB struct {
 // With parallel, each execution slot would have its own StateDB.
 func NewSlotDB(db *StateDB, systemAddr common.Address, txIndex int, baseTxIndex int, keepSystem bool,
 	unconfirmedDBs *sync.Map /*map[int]*ParallelStateDB*/) *ParallelStateDB {
+	traceMsg := "NewSlotDB" // + " txIndex:" + strconv.Itoa(txIndex)
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+	log.Debug("NewSlotDB", " baseTxIndex:", baseTxIndex, "keepSystem", keepSystem)
 	slotDB := db.CopyForSlot()
 	slotDB.txIndex = txIndex
 	slotDB.originalRoot = db.originalRoot
@@ -2728,6 +2740,7 @@ func (s *ParallelStateDB) GetCodeHash(addr common.Address) common.Hash {
 //   -> pending of main StateDB
 //   -> origin
 func (s *ParallelStateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
+	defer debug.Handler.StartRegionAuto("GetState")()
 	// 1.Try to get from dirty
 	if exist, ok := s.parallel.addrStateChangesInSlot[addr]; ok {
 		if !exist {
@@ -3442,6 +3455,8 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 		kvCheckLoopStarted = true
 		StartKvCheckLoop()
 	}
+	traceMsg := "IsParallelReadsValid"
+	defer debug.Handler.StartRegionAuto(traceMsg)()
 	slotDB := s
 	mainDB := slotDB.parallel.baseStateDB
 	// for nonce
