@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"math/rand"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -687,6 +689,8 @@ func (p *ParallelStateProcessor) doStaticDispatch(mainStatedb *state.StateDB, tx
 
 // wait until the next Tx is executed and its result is merged to the main stateDB
 func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp *GasPool) *ParallelTxResult {
+	traceMsg := "waitUntilNextTxDone"
+	defer debug.Handler.StartRegionAuto(traceMsg)()
 	var result *ParallelTxResult
 	for {
 		result = <-p.txResultChan
@@ -704,8 +708,8 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 		// ok, the tx result is valid and can be merged
 		break
 	}
-	// log.Info("waitUntilNextTxDone receive a result", "result.slotIndex", result.slotIndex,
-	//	"TxIndex", result.txReq.txIndex, "result.receipt.GasUsed", result.receipt.GasUsed)
+	log.Debug("waitUntilNextTxDone receive a result", "result.slotIndex", result.slotIndex,
+		"TxIndex", result.txReq.txIndex, "result.receipt.GasUsed", result.receipt.GasUsed)
 	if err := gp.SubGas(result.receipt.GasUsed); err != nil {
 		log.Error("gas limit reached", "block", result.txReq.block.Number(),
 			"txIndex", result.txReq.txIndex, "GasUsed", result.receipt.GasUsed, "gp.Gas", gp.Gas())
@@ -736,6 +740,9 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 }
 
 func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxRequest, slotDB *state.ParallelStateDB) *ParallelTxResult {
+	traceMsg := "executeInSlot:" + strconv.Itoa(slotIndex)
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	slotDB.Prepare(txReq.tx.Hash(), txReq.block.Hash(), txReq.txIndex)
 	blockContext := NewEVMBlockContext(txReq.block.Header(), p.bc, nil) // can share blockContext within a block for efficiency
 	vmenv := vm.NewEVM(blockContext, vm.TxContext{}, slotDB, p.config, txReq.vmConfig)
@@ -784,6 +791,9 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 
 /*
 func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *ParallelTxResult) *ParallelTxResult {
+	traceMsg := "in shawdow slot:" + strconv.Itoa(slotIndex)
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	txReq := txResult.txReq
 	txIndex := txReq.txIndex
 	slotDB := txReq.slotDB
@@ -873,6 +883,7 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 		unconfirmedResult := <-p.pendingConfirmChan
 		txIndex := unconfirmedResult.txReq.txIndex
 		p.pendingConfirmResults[txIndex] = append(p.pendingConfirmResults[txIndex], unconfirmedResult)
+		region := debug.Handler.StartTrace("runConfirmLoop")
 		targetTxIndex := p.mergedTxIndex + 1
 		if p.allTxReqProcessedOnce {
 			// more aggressive tx result confirm, even for these Txs not in turn
@@ -884,6 +895,7 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			p.toConfirmTxIndex(targetTxIndex)
 
 		}
+		debug.Handler.EndTrace(region)
 	}
 
 }
@@ -893,6 +905,7 @@ func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, hit boo
 	txReq := txResult.txReq
 	txIndex := txReq.txIndex
 	slotDB := txResult.slotDB
+
 	if txResult.err != nil {
 		log.Debug("redo, since in slot execute failed", "err", txResult.err)
 		return true
@@ -915,14 +928,16 @@ func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, hit boo
 
 // to confirm a serial TxResults with same txIndex
 func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
-	// log.Debug("runConfirmLoop get a result", "txIndex", txIndex, "current merged TxIndex", p.mergedTxIndex)
 	// var targetTxIndex int
+	defer debug.Handler.StartRegionAuto("toConfirmTxIndex")()
 	hit := false
 	if targetTxIndex == p.mergedTxIndex+1 {
 		// this is the one that can been merged,
 		// others are for likely conflict check, since it is not their tuen.
 		hit = true
 	}
+	log.Debug("toConfirmTxIndex", "targetTxIndex", targetTxIndex,
+		"current merged TxIndex", p.mergedTxIndex, "hit", hit)
 	for {
 		// handle a targetTxIndex in a loop
 		// targetTxIndex = p.mergedTxIndex + 1
@@ -930,7 +945,7 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
 		results := p.pendingConfirmResults[targetTxIndex]
 		resultsLen := len(results)
 		if resultsLen == 0 { // no pending result can be verified, break and wait for incoming results
-			// log.Debug("runConfirmLoop resultsLen is 0", "targetTxIndex", targetTxIndex, "merged TxIndex", p.mergedTxIndex)
+			log.Debug("toConfirmTxIndex resultsLen is 0", "targetTxIndex", targetTxIndex, "merged TxIndex", p.mergedTxIndex)
 			break
 		}
 		lastResult := results[len(results)-1] // last is the most fresh, stack based priority
@@ -938,8 +953,8 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
 			// only remove results of the hit one
 			p.pendingConfirmResults[targetTxIndex] = p.pendingConfirmResults[targetTxIndex][:resultsLen-1] // remove from the queue
 		}
-		// log.Info("runConfirmLoop", "resultsLen", resultsLen, "txIndex", lastResult.txReq.txIndex,
-		//	"targetTxIndex", targetTxIndex, "merged TxIndex", p.mergedTxIndex)
+		log.Debug("toConfirmTxIndex", "resultsLen", resultsLen, "txIndex", lastResult.txReq.txIndex,
+			"targetTxIndex", targetTxIndex, "merged TxIndex", p.mergedTxIndex)
 
 		valid := p.toConfirmTxIndexResult(lastResult, hit)
 		slotIndex := lastResult.slotIndex
@@ -976,11 +991,13 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
 		}
 		log.Debug("runConfirmLoop result to deliver", "slotIndex", slotIndex,
 			"txIndex", lastResult.txReq.txIndex, "mergedTxIndex", p.mergedTxIndex)
+		region2 := debug.Handler.StartTrace("valid, deliver to process")
 		// result is valid, deliver it to main processor
 		p.txResultChan <- lastResult
 		// wait until merged TxIndex is updated
 		<-lastResult.txReq.curTxChan
 		// 	close(result.txReq.curTxChan) // fixme: to close
+		debug.Handler.EndTrace(region2)
 
 		log.Debug("runConfirmLoop result is delivered", "slotIndex", slotIndex,
 			"txIndex", lastResult.txReq.txIndex, "mergedTxIndex", p.mergedTxIndex)
@@ -991,11 +1008,11 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
 		// p.mergedTxIndex = targetTxIndex // fixme: cpu execute disorder,
 		continue // try validate next txIndex
 	}
-
 }
 
 // to confirm one txResult
 func (p *ParallelStateProcessor) toConfirmTxIndexResult(txResult *ParallelTxResult, hit bool) bool {
+	defer debug.Handler.StartRegionAuto("toConfirmTxIndexResult")()
 	txReq := txResult.txReq
 	// txIndex := txReq.txIndex
 	// slotDB := txResult.slotDB
@@ -1030,13 +1047,16 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 		// txReq := <-curSlot.pendingTxReqChan
 		select {
 		case <-curSlot.stopChan:
-			// log.Info("runSlotLoop stop received", "slotIndex", slotIndex)
+			log.Debug("runSlotLoop stop received", "slotIndex", slotIndex)
 			p.stopSlotChan <- slotIndex
 			continue
 		case <-curSlot.pendingTxReqChan:
 		}
+		traceMsg := "runSlotLoop " + strconv.Itoa(slotIndex)
+		region1 := debug.Handler.StartTrace(traceMsg)
+
 		startTxIndex = p.mergedTxIndex + 1
-		// log.Info("runSlotLoop started", "slotIndex", slotIndex, "startTxIndex", startTxIndex)
+		log.Debug("runSlotLoop started", "slotIndex", slotIndex, "startTxIndex", startTxIndex)
 		if dispatchPolicy == dispatchPolicyStatic {
 			for _, txReq := range curSlot.pendingTxReqList {
 				if txReq.txIndex < startTxIndex {
@@ -1044,15 +1064,17 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				}
 				// if interrupted,
 				if curSlot.enableShadowFlag {
-					log.Debug("runSlotLoop use Shadow now, stop the normal one")
+					log.Debug("runSlotLoop use Shadow now, stop the normal one", "slotIndex", slotIndex,
+						"txIndex ", txReq.txIndex)
 					break
 				}
 				if !txReq.runnable {
-					// log.Info("runSlotLoop tx not runnable", "slotIndex", slotIndex,
-					//	"txIndex ", txReq.txIndex)
+					log.Debug("runSlotLoop tx not runnable", "slotIndex", slotIndex,
+						"txIndex ", txReq.txIndex)
 					continue
 				}
 
+				region2 := debug.Handler.StartTrace("for a TxReq")
 				// if txReq.slotDB == nil {  // must update slot DB
 				resultUpdateDB := &ParallelTxResult{
 					updateSlotDB: true,
@@ -1064,6 +1086,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				p.txResultChan <- resultUpdateDB
 				slotDB := <-curSlot.slotdbChan
 				if slotDB == nil { // block is processed
+					debug.Handler.EndTrace(region2)
 					break
 				}
 				txReq.runnable = false
@@ -1071,6 +1094,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 
 				p.unconfirmedStateDBs.Store(txReq.txIndex, slotDB)
 				p.pendingConfirmChan <- result
+				debug.Handler.EndTrace(region2)
 			}
 			// txReq in this Slot have all been executed, try steal one from other slot.
 			// as long as the TxReq is runable, we steal it, mark it as stolen
@@ -1079,6 +1103,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				if !stealTxReq.runnable {
 					continue
 				}
+				region2 := debug.Handler.StartTrace("for a stolen TxReq")
 				resultUpdateDB := &ParallelTxResult{
 					updateSlotDB: true,
 					slotIndex:    slotIndex,
@@ -1089,12 +1114,14 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				p.txResultChan <- resultUpdateDB
 				slotDB := <-curSlot.slotdbChan
 				if slotDB == nil { // block is processed
+					debug.Handler.EndTrace(region2)
 					break
 				}
 				stealTxReq.runnable = false
 				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
 				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
 				p.pendingConfirmChan <- result
+				debug.Handler.EndTrace(region2)
 			}
 			// most of the tx has been runned at least once, except the last batch in other slot
 			// now we will be more aggressive:
@@ -1104,6 +1131,8 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 			// throw these likely conflicted tx back to re-execute
 			p.allTxReqProcessedOnce = true
 		}
+		debug.Handler.EndTrace(region1)
+
 		/*
 			// disable dynamic right now.
 			else if dispatchPolicy == dispatchPolicyDynamic {
@@ -1130,23 +1159,24 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 	startTxIndex := 0
 	for {
 		// wait for new TxReq
-		// log.Info("runShadowSlotLoop start for loop", "slotIndex", slotIndex)
+		log.Debug("runShadowSlotLoop start for loop", "slotIndex", slotIndex)
 		select {
 		case <-curSlot.stopShadowChan:
-			// log.Info("runShadowSlotLoop stop received", "slotIndex", slotIndex)
+			log.Debug("runShadowSlotLoop stop received", "slotIndex", slotIndex)
 			p.stopSlotChan <- slotIndex
 			continue
 		case <-curSlot.pendingTxReqShadowChan: // wait for restart
 		}
+		traceMsg := "runShadowSlotLoop " + strconv.Itoa(slotIndex)
+		region1 := debug.Handler.StartTrace(traceMsg)
 
 		startTxIndex = p.mergedTxIndex + 1
-		// log.Info("runShadowSlotLoop started", "slotIndex", slotIndex, "startTxIndex", startTxIndex)
+		log.Debug("runShadowSlotLoop started", "slotIndex", slotIndex, "startTxIndex", startTxIndex)
 		if dispatchPolicy == dispatchPolicyStatic {
 			for _, txReq := range curSlot.pendingTxReqList {
 				if txReq.txIndex < startTxIndex {
 					continue
 				}
-
 				// if interrupted, it will re
 				if !curSlot.enableShadowFlag { // shadow conflict, switch back to normal
 					log.Debug("runShadowSlotLoop use Normal now, stop the Shadow one", "slotIndex", slotIndex,
@@ -1155,11 +1185,11 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 				}
 
 				if !txReq.runnable {
-					// log.Info("runShadowSlotLoop tx not runnable", "slotIndex", slotIndex,
-					//	"txIndex ", txReq.txIndex)
+					log.Debug("runShadowSlotLoop tx not runnable", "slotIndex", slotIndex,
+						"txIndex ", txReq.txIndex)
 					continue
 				}
-
+				region2 := debug.Handler.StartTrace("for a TxReq")
 				// if txReq.slotDB == nil {
 				resultUpdateDB := &ParallelTxResult{
 					updateSlotDB: true,
@@ -1171,12 +1201,14 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 				p.txResultChan <- resultUpdateDB
 				slotDB := <-curSlot.slotdbChan
 				if slotDB == nil { // block is processed
+					debug.Handler.EndTrace(region2)
 					break
 				}
 				txReq.runnable = false
 				result := p.executeInSlot(slotIndex, txReq, slotDB)
 				p.unconfirmedStateDBs.Store(txReq.txIndex, slotDB)
 				p.pendingConfirmChan <- result
+				debug.Handler.EndTrace(region2)
 			}
 			// txReq in this Slot have all been executed, try steal one from other slot.
 			// as long as the TxReq is runable, we steal it, mark it as stolen
@@ -1185,6 +1217,7 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 				if !stealTxReq.runnable {
 					continue
 				}
+				region2 := debug.Handler.StartTrace("for a stolen TxReq")
 				resultUpdateDB := &ParallelTxResult{
 					updateSlotDB: true,
 					slotIndex:    slotIndex,
@@ -1195,16 +1228,20 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 				p.txResultChan <- resultUpdateDB
 				slotDB := <-curSlot.slotdbChan
 				if slotDB == nil { // block is processed
+					debug.Handler.EndTrace(region2)
 					break
 				}
 				stealTxReq.runnable = false
 				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
 				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
 				p.pendingConfirmChan <- result
+				debug.Handler.EndTrace(region2)
 			}
 			p.allTxReqProcessedOnce = true
 
 		}
+		debug.Handler.EndTrace(region1)
+
 	}
 }
 
@@ -1240,6 +1277,10 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 
 // Implement BEP-130: Parallel Transaction Execution.
 func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (*state.StateDB, types.Receipts, []*types.Log, uint64, error) {
+	debug.Handler.EnableTraceCapture(block.Header().Number.Uint64())
+	traceMsg := "ProcessParallel " + block.Header().Number.String()
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	var (
 		usedGas = new(uint64)
 		header  = block.Header()
@@ -1318,8 +1359,9 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			receipts = append(receipts, result.receipt)
 		}
 		// wait unitl all slot are stopped
-		for _, slot := range p.slotState {
-			// log.Info("ProcessParallel to stop", "slotIndex", i)
+		region := debug.Handler.StartTrace("waitSlotIidle")
+		for i, slot := range p.slotState {
+			log.Debug("ProcessParallel to stop", "slotIndex", i)
 			slot.stopChan <- struct{}{}
 			slot.stopShadowChan <- struct{}{}
 			stopCount := 0
@@ -1328,25 +1370,25 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 				case updateDB := <-p.txResultChan: // in case a slot is requesting a new DB...
 					if updateDB.updateSlotDB {
 						slotState := p.slotState[updateDB.slotIndex]
-						// log.Info("ProcessParallel try to update slot db", "slotIndex", updateDB.slotIndex)
+						log.Debug("ProcessParallel try to update slot db", "slotIndex", updateDB.slotIndex)
 						slotState.slotdbChan <- nil
 						continue
 					}
 					// else {
-					// log.Info("ProcessParallel unexpected txResultChan", "slotIndex", i)
+					log.Debug("ProcessParallel unexpected txResultChan", "slotIndex", i)
 					// }
-				// case slotIndex := <-p.stopSlotChan:
-				case <-p.stopSlotChan:
-					// log.Info("ProcessParallel slot stopped", "slotIndex", slotIndex)
+				case slotIndex := <-p.stopSlotChan:
+					// case <-p.stopSlotChan:
+					log.Debug("ProcessParallel slot stopped", "slotIndex", slotIndex)
 					stopCount++
 				}
 				if stopCount == 2 {
 					break
 				}
 			}
-			// log.Info("ProcessParallel shadow slot stopped", "slotIndex", i)
+			log.Debug("ProcessParallel shadow slot stopped", "slotIndex", i)
 		}
-
+		debug.Handler.EndTrace(region)
 	}
 	/*
 		else if dispatchPolicy == dispatchPolicyDynamic {
@@ -1455,6 +1497,10 @@ func (p *StateProcessor) postExecute(block *types.Block, statedb *state.StateDB,
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
 func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (*state.StateDB, types.Receipts, []*types.Log, uint64, error) {
+	debug.Handler.EnableTraceCapture(block.Header().Number.Uint64())
+	traceMsg := "Process " + block.Header().Number.String()
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	var (
 		usedGas = new(uint64)
 		header  = block.Header()
@@ -1501,6 +1547,9 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 }
 
 func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainContext, author *common.Address, gp *GasPool, statedb *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, receiptProcessors ...ReceiptProcessor) (*types.Receipt, error) {
+	traceMsg := "applyTransaction"
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	// Create a new context to be used in the EVM environment.
 	txContext := NewEVMTxContext(msg)
 	evm.Reset(txContext, statedb)
@@ -1530,7 +1579,6 @@ func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainCon
 	}
 	receipt.TxHash = tx.Hash()
 	receipt.GasUsed = result.UsedGas
-
 	// If the transaction created a contract, store the creation address in the receipt.
 	if msg.To() == nil {
 		receipt.ContractAddress = crypto.CreateAddress(evm.TxContext.Origin, tx.Nonce())
@@ -1548,6 +1596,7 @@ func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainCon
 }
 
 func applyTransactionStageExecution(msg types.Message, gp *GasPool, statedb *state.ParallelStateDB, evm *vm.EVM) (*vm.EVM, *ExecutionResult, error) {
+	defer debug.Handler.StartRegionAuto("applyTransactionStageExecution")()
 	// Create a new context to be used in the EVM environment.
 	txContext := NewEVMTxContext(msg)
 	evm.Reset(txContext, statedb)
@@ -1562,6 +1611,7 @@ func applyTransactionStageExecution(msg types.Message, gp *GasPool, statedb *sta
 }
 
 func applyTransactionStageFinalization(evm *vm.EVM, result *ExecutionResult, msg types.Message, config *params.ChainConfig, statedb *state.ParallelStateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, receiptProcessors ...ReceiptProcessor) (*types.Receipt, error) {
+	defer debug.Handler.StartRegionAuto("applyTransactionStageFinalization")()
 	// Update the state with pending changes.
 	var root []byte
 	if config.IsByzantium(header.Number) {
