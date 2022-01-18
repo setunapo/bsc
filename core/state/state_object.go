@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/trie"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/metrics"
@@ -395,7 +397,11 @@ func (s *StateObject) updateTrie(db Database) Trie {
 	// Insert all the pending updates into the trie
 	tr := s.getTrie(db)
 
+	trieInstance := tr.(*trie.SecureTrie)
 	usedStorage := make([][]byte, 0, len(s.pendingStorage))
+
+	// kvpair
+	updateBatch := []trie.KvPair{}
 	for key, value := range s.pendingStorage {
 		// Skip noop changes, persist actual changes
 		if value == s.originStorage[key] {
@@ -404,11 +410,11 @@ func (s *StateObject) updateTrie(db Database) Trie {
 		s.originStorage[key] = value
 		var v []byte
 		if (value == common.Hash{}) {
-			s.setError(tr.TryDelete(key[:]))
+			updateBatch = append(updateBatch, trie.NewKvPair(key[:], common.Hash{}.Bytes(), true, trieInstance))
 		} else {
 			// Encoding []byte cannot fail, ok to ignore the error.
 			v, _ = rlp.EncodeToBytes(common.TrimLeftZeroes(value[:]))
-			s.setError(tr.TryUpdate(key[:], v))
+			updateBatch = append(updateBatch, trie.NewKvPair(key[:], v, false, trieInstance))
 		}
 		// If state snapshotting is active, cache the data til commit
 		if s.db.snap != nil {
@@ -425,6 +431,9 @@ func (s *StateObject) updateTrie(db Database) Trie {
 		}
 		usedStorage = append(usedStorage, common.CopyBytes(key[:])) // Copy needed for closure
 	}
+
+	s.setError(trieInstance.UpdateBatch(&updateBatch))
+
 	if s.db.prefetcher != nil {
 		s.db.prefetcher.used(s.data.Root, usedStorage)
 	}
