@@ -29,6 +29,7 @@ import (
 	"reflect"
 	"testing"
 	"testing/quick"
+	"time"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/ethereum/go-ethereum/common"
@@ -152,6 +153,267 @@ func testMissingNode(t *testing.T, memonly bool) {
 	err = trie.TryDelete([]byte("123456"))
 	if _, ok := err.(*MissingNodeError); !ok {
 		t.Errorf("Wrong error: %v", err)
+	}
+}
+
+// Random create bytes
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+func randomBytes(n int) []byte {
+    b := make([]byte, n)
+    for i := range b {
+    	b[i] = letterBytes[rand.Intn(len(letterBytes))]
+	}
+    return b
+}
+
+func createInsertKvPair() KvPair{
+	return KvPair{randomBytes(32), randomBytes(50), false}
+}
+
+func TestCompareSubroot(t *testing.T) {
+	println("key===", keybytesToHex([]byte("kdjgglesworth")))
+	keybytesToHex([]byte("kdjgglesworth"))
+	// 1. Preparation to insert batch kv, with one memory db
+	// create batch
+	batch := []KvPair{}
+	// Create 4096 kv pair to insert
+	for i:=0; i<4096; i++ {
+		// batch[i] = createInsertKvPair()
+		batch = append(batch, createInsertKvPair())
+	}
+    // create batch for batch update
+	new_batch := []KvPair{}
+	for i:=0; i<len(batch); i++ {
+		new_batch = append(new_batch, KvPair{keybytesToHex(batch[i].key), batch[i].val, false})
+	}
+	t.Logf("batch size ==: %d", len(batch))
+
+	// with persist data preparation for both
+	diskdb := memorydb.New()
+	triedb := NewDatabase(diskdb)
+	trie, _ := New(common.Hash{}, triedb)
+
+	newStartTime := time.Now()
+	updateStringBatchWithHexKey(trie, &new_batch)
+	newTc := time.Since(newStartTime)
+	t.Logf("newTc = %v", newTc)
+
+	exp, _ := trie.Commit(nil)
+	exp = trie.Hash()
+	t.Logf("trie1_root ==: %x", exp)
+
+	trie2, _ := New(exp, triedb)
+	root := trie2.Hash()
+	t.Logf("tri2_root ==: %x", root)
+
+	if root != exp {
+		t.Errorf("case 1: exp %x got %x", exp, root)
+	}
+}
+
+func TestCompareInsertPerformance(t *testing.T) {
+	old_size := 409600
+
+	// original batch
+	orig_batch := []KvPair{}
+	// Create 4096 kv pair to insert
+	for i:=0; i<old_size; i++ {
+		// batch[i] = createInsertKvPair()
+		orig_batch = append(orig_batch, createInsertKvPair())
+	}
+	// with persist data preparation for both
+	diskdb1 := memorydb.New()
+	triedb1 := NewDatabase(diskdb1)
+
+	trie1, _ := New(common.Hash{}, triedb1)
+	updateString(trie1, "120000", "qwerqwerqwerqwerqwerqwerqwerqwer")
+	updateString(trie1, "123456", "asdfasdfasdfasdfasdfasdfasdfasdf")
+	for i:=0; i<old_size; i++ {
+		//for i:=0; i<4096; i++ {
+		updateString(trie1, string(orig_batch[i].key), string(orig_batch[i].val))
+	}
+	root1, _ := trie1.Commit(nil)
+
+	diskdb2 := memorydb.New()
+	triedb2 := NewDatabase(diskdb2)
+
+	trie2, _ := New(common.Hash{}, triedb2)
+	updateString(trie2, "120000", "qwerqwerqwerqwerqwerqwerqwerqwer")
+	updateString(trie2, "123456", "asdfasdfasdfasdfasdfasdfasdfasdf")
+	for i:=0; i<old_size; i++ {
+		//for i:=0; i<4096; i++ {
+		updateString(trie2, string(orig_batch[i].key), string(orig_batch[i].val))
+	}
+	root2, _ := trie2.Commit(nil)
+
+	if root1 != root2 {
+		t.Errorf("case 1: root1 %x root2 %x", root1, root2)
+	}
+	t.Logf("The same root ==: %x", root1)
+
+    // Create 4196 kv pair batch
+    // includes 4096 to insert, 100 to delete
+    old_batch := []KvPair{}
+    // Create 4096 kv pair to insert
+    for i:=0; i<old_size; i++ {
+    	// batch[i] = createInsertKvPair()
+    	old_batch = append(old_batch, createInsertKvPair())
+	}
+
+    new_batch := []KvPair{}
+    for i:=0; i<len(old_batch); i++ {
+    	new_batch = append(new_batch, KvPair{keybytesToHex(old_batch[i].key), old_batch[i].val, false})
+	}
+    /*
+    // Create 100 kv pair to del
+	for i:=0; i<100; i++ {
+    	// batch[4096+i] = KvPair{batch[i*10+5].key, []byte(""), true}
+    	batch = append(batch, KvPair{batch[i+5].key, []byte(""), true})
+	}
+	*/
+
+	t.Logf("batch size ==: %d", len(old_batch))
+
+    // Single insert&del test
+    //trie := newEmpty()
+	trie, _ := New(root1, triedb1)
+
+    oldStartTime := time.Now()
+    // 1. insert
+    for i:=0; i<len(old_batch); i++ {
+		//for i:=0; i<4096; i++ {
+    	updateString(trie, string(old_batch[i].key), string(old_batch[i].val))
+	}
+    oldTc := time.Since(oldStartTime)
+    t.Logf("oldTc = %v", oldTc)
+/*
+    // 2. delete
+	for i:=0; i<5; i++ {
+		//for i:=4096; i<4196; i++ {
+		deleteString(trie, string(batch[i+10].key))
+	}
+*/
+
+	exp := trie.Hash()
+	t.Logf("exp root ==: %x", exp)
+	// trie.UpdateShardInfo()
+	//fmt.Println("rootnode ==:", trie.root)
+
+	// Batch test
+	// trie_new := newEmpty()
+    trie_new, _ := New(root1, triedb2)
+	t.Logf("Open new trie with root: %x", root1)
+    newStartTime := time.Now()
+	updateStringBatchWithHexKey(trie_new, &new_batch)
+    newTc := time.Since(newStartTime)
+    t.Logf("newTc = %v", newTc)
+
+	root := trie_new.Hash()
+	t.Logf("newroot ==: %x", root)
+	// trie.UpdateShardInfo()
+	//fmt.Println("newrootnode ==:", trie.root)
+
+	if root != exp {
+		t.Errorf("case 1: exp %x got %x", exp, root)
+	}
+}
+/*
+func TestInsertBatch(t *testing.T) {
+	trie := newEmpty()
+
+	updateString(trie, "doe", "reindeer")
+	updateString(trie, "dog", "puppy")
+	updateString(trie, "dogglesworth", "cat")
+	updateString(trie,"renchonghui", "renchonghuival")
+	updateString(trie,"renjie", "renjieval")
+	// updateString(trie, "djgglesworth", "jcat")
+	updateString(trie, "mjgglesworth", "jcat")
+	updateString(trie, "kdjgglesworth", "jcat")
+	updateString(trie, "jgglesworth", "jcat")
+	updateString(trie, "djgglesworth", "jcat")
+	deleteString(trie, "dog")
+
+	strBatch := []KvPair{
+		{[]byte("doe"), []byte("reindeer"), false},
+		{[]byte("dog"), []byte("puppy"), false},
+		{[]byte("kdjgglesworth"),[]byte("jcat"), false},
+		{[]byte("dogglesworth"), []byte("cat"),false},
+		{[]byte("renchonghui"),[]byte("renchonghuival"),false},
+		{[]byte("renjie"),[]byte("renjieval"),false},
+		{[]byte("djgglesworth"),[]byte("jcat"),false},
+		{[]byte("mjgglesworth"),[]byte("jcat"),false},
+		//{[]byte("kdjgglesworth"),[]byte("jcat")},
+		{[]byte("jgglesworth"),[]byte("jcat"),false},
+		{[]byte("dog"), []byte(""), true},
+	}
+
+	//exp := common.HexToHash("14101c6a2e31b41548f302d89f2e367f2016eed16e94f1cf1231e6d2dceaa80f")
+	exp := trie.Hash()
+	t.Logf("exp root ==: %x", exp)
+	fmt.Println("rootnode ==:", trie.root)
+
+
+	println("Start batch test")
+	// test batch update
+	trie = newEmpty()
+	updateStringBatch(trie, strBatch)
+
+	root := trie.Hash()
+	t.Logf("newroot ==: %x", root)
+	fmt.Println("newrootnode ==:", trie.root)
+
+	if root != exp {
+		t.Errorf("case 1: exp %x got %x", exp, root)
+	}
+}
+*/
+func TestInsertBatchWithHexKey(t *testing.T) {
+	trie := newEmpty()
+
+	updateString(trie, "doe", "reindeer")
+	updateString(trie, "dog", "puppy")
+	updateString(trie, "dogglesworth", "cat")
+	updateString(trie,"renchonghui", "renchonghuival")
+	updateString(trie,"renjie", "renjieval")
+	// updateString(trie, "djgglesworth", "jcat")
+	updateString(trie, "mjgglesworth", "jcat")
+	updateString(trie, "kdjgglesworth", "jcat")
+	updateString(trie, "jgglesworth", "jcat")
+	updateString(trie, "djgglesworth", "jcat")
+	//deleteString(trie, "dog")
+
+	strBatch := []KvPair{
+		{keybytesToHex([]byte("doe")), []byte("reindeer"), false},
+		{keybytesToHex([]byte("dog")), []byte("puppy"), false},
+		{keybytesToHex([]byte("kdjgglesworth")),[]byte("jcat"), false},
+		{keybytesToHex([]byte("dogglesworth")), []byte("cat"),false},
+		{keybytesToHex([]byte("renchonghui")),[]byte("renchonghuival"),false},
+		{keybytesToHex([]byte("renjie")),[]byte("renjieval"),false},
+		{keybytesToHex([]byte("djgglesworth")),[]byte("jcat"),false},
+		{keybytesToHex([]byte("mjgglesworth")),[]byte("jcat"),false},
+		//{[]byte("kdjgglesworth"),[]byte("jcat")},
+		{keybytesToHex([]byte("jgglesworth")),[]byte("jcat"),false},
+		//{keybytesToHex([]byte("dog")), []byte(""), true},
+	}
+
+	//exp := common.HexToHash("14101c6a2e31b41548f302d89f2e367f2016eed16e94f1cf1231e6d2dceaa80f")
+	exp := trie.Hash()
+	t.Logf("exp root ==: %x", exp)
+	fmt.Println("rootnode ==:", trie.root)
+
+
+	println("Start batch test")
+	// test batch update
+	trie = newEmpty()
+	updateStringBatchWithHexKey(trie, &strBatch)
+
+	root := trie.Hash()
+	t.Logf("newroot ==: %x", root)
+	fmt.Println("newrootnode ==:", trie.root)
+
+	if root != exp {
+		t.Errorf("case 1: exp %x got %x", exp, root)
 	}
 }
 
@@ -1073,6 +1335,10 @@ func getString(trie *Trie, k string) []byte {
 
 func updateString(trie *Trie, k, v string) {
 	trie.Update([]byte(k), []byte(v))
+}
+
+func updateStringBatchWithHexKey(trie *Trie, pKvBatch *[]KvPair) {
+	trie.UpdateBatch(pKvBatch)
 }
 
 func deleteString(trie *Trie, k string) {
