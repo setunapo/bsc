@@ -163,7 +163,7 @@ func (h *HandlerT) LogWhenTracing(msg string) {
 	if h.task == nil {
 		return
 	}
-	log.Info("LogWhenTracing", "msg", msg)
+	log.Debug("LogWhenTracing", "msg", msg)
 }
 
 func (h *HandlerT) StartRegionAuto(msg string) func() {
@@ -181,4 +181,18 @@ func (h *HandlerT) StartRegionAuto(msg string) func() {
 		// log.Info("StartRegionAuto exit", "msg", msg)
 		region.End()
 	}
+}
+
+func (h *HandlerT) StartTrace(msg string) *trace.Region {
+	if h.task == nil {
+		return nil
+	}
+	return trace.StartRegion(h.ctx, msg)
+}
+
+func (h *HandlerT) EndTrace(region *trace.Region) {
+	if h.task == nil || region == nil {
+		return
+	}
+	region.End()
 }

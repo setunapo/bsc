@@ -514,6 +514,9 @@ func (s *StateObject) setBalance(amount *big.Int) {
 func (s *StateObject) ReturnGas(gas *big.Int) {}
 
 func (s *StateObject) deepCopy(db *StateDB) *StateObject {
+	// traceMsg := "StateObject.deepCopy"
+	// defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	stateObject := newObject(db, s.address, s.data)
 	if s.trie != nil {
 		stateObject.trie = db.db.CopyTrie(s.trie)

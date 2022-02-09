@@ -132,9 +132,9 @@ func (dl *diskLayer) AccountRLP(hash common.Hash) ([]byte, error) {
 // Storage directly retrieves the storage data associated with a particular hash,
 // within a particular account.
 func (dl *diskLayer) Storage(accountHash, storageHash common.Hash) ([]byte, error) {
-	defer debug.Handler.StartRegionAuto("diskLayer.Storage")()
-	debug.Handler.LogWhenTracing("diskLayer.Storage accountHash:" + accountHash.String() +
-		" storageHash:" + storageHash.String())
+	// defer debug.Handler.StartRegionAuto("diskLayer.Storage")()
+	// debug.Handler.LogWhenTracing("diskLayer.Storage accountHash:" + accountHash.String() +
+	// 	" storageHash:" + storageHash.String())
 	dl.lock.RLock()
 	defer dl.lock.RUnlock()
 

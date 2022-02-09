@@ -18,6 +18,7 @@ package core
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/ethereum/go-ethereum/consensus"
@@ -123,6 +124,7 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	// For valid blocks this should always validate to true.
 	validateFuns := []func() error{
 		func() error {
+			defer debug.Handler.StartRegionAuto("Create Receipt Bloom")()
 			rbloom := types.CreateBloom(receipts)
 			if rbloom != header.Bloom {
 				return fmt.Errorf("invalid bloom (remote: %x  local: %x)", header.Bloom, rbloom)
@@ -130,8 +132,14 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 			return nil
 		},
 		func() error {
+			defer debug.Handler.StartRegionAuto("Create Receipt Root Hash")()
 			receiptSha := types.DeriveSha(receipts, trie.NewStackTrie(nil))
 			if receiptSha != header.ReceiptHash {
+				debug.Handler.LogWhenTracing("block " + block.Number().String() +
+					" len(receipts):" + strconv.Itoa(len(receipts)))
+				for index, r := range receipts {
+					r.DumpWhenTrace(block.Number(), index)
+				}
 				return fmt.Errorf("invalid receipt root hash (remote: %x local: %x)", header.ReceiptHash, receiptSha)
 			}
 			return nil
@@ -139,6 +147,7 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	}
 	if skipHeavyVerify {
 		validateFuns = append(validateFuns, func() error {
+			defer debug.Handler.StartRegionAuto("skipHeavyVerify")()
 			if err := statedb.WaitPipeVerification(); err != nil {
 				return err
 			}

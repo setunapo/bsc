@@ -461,8 +461,8 @@ func (p *ParallelStateProcessor) init() {
 // conflict check uses conflict window, it will check all state changes from (cfWindowStart + 1)
 // to the previous Tx, if any state in readDb is updated in changeList, then it is conflicted
 func (p *ParallelStateProcessor) hasStateConflict(readDb *state.StateDB, changeList state.SlotChangeList) bool {
-	// traceMsg := "hasStateConflict"
-	// defer debug.Handler.StartRegionAuto(traceMsg)()
+	traceMsg := "hasStateConflict"
+	defer debug.Handler.StartRegionAuto(traceMsg)()
 
 	// check KV change
 	reads := readDb.StateReadsInSlot()
@@ -762,7 +762,7 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 		if result.updateSlotDB {
 			// the target slot is waiting for new slotDB
 			slotState := p.slotState[result.slotIndex]
-			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, p.mergedTxIndex, result.keepSystem)
+			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, p.mergedTxIndex, result.keepSystem, result.slotIndex)
 			slotState.slotdbChan <- slotDB
 			continue
 		}
@@ -799,7 +799,7 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 }
 
 func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxRequest) *ParallelTxResult {
-	traceMsg := "execInParallelSlot slot:" + strconv.Itoa(slotIndex) // + " txIndex:" + strconv.Itoa(txReq.txIndex)
+	traceMsg := "in slot:" + strconv.Itoa(slotIndex)
 	defer debug.Handler.StartRegionAuto(traceMsg)()
 	slotDB := txReq.slotDB
 	slotDB.Prepare(txReq.tx.Hash(), txReq.block.Hash(), txReq.txIndex)
@@ -826,6 +826,9 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 }
 
 func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *ParallelTxResult) *ParallelTxResult {
+	traceMsg := "in shawdow slot:" + strconv.Itoa(slotIndex)
+	defer debug.Handler.StartRegionAuto(traceMsg)()
+
 	txReq := txResult.txReq
 	txIndex := txReq.txIndex
 	slotDB := txReq.slotDB
@@ -849,6 +852,7 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 		hasConflict = true
 		systemAddrConflict = true
 	} else {
+		region := debug.Handler.StartTrace("ConfilctDetect")
 		for index := 0; index < p.parallelNum; index++ {
 			// log.Debug("Shadow conflict check", "Slot", slotIndex, "txIndex", txIndex)
 			// check all finalizedDb from current slot's
@@ -870,6 +874,7 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 				break
 			}
 		}
+		debug.Handler.EndTrace(region)
 	}
 
 	if hasConflict {
@@ -1223,7 +1228,10 @@ func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainCon
 	}
 	receipt.TxHash = tx.Hash()
 	receipt.GasUsed = result.UsedGas
-
+	if result.Err != nil {
+		debug.Handler.LogWhenTracing("applyTransaction " + tx.Hash().Hex() +
+			" result.Err:" + result.Err.Error())
+	}
 	// If the transaction created a contract, store the creation address in the receipt.
 	if msg.To() == nil {
 		receipt.ContractAddress = crypto.CreateAddress(evm.TxContext.Origin, tx.Nonce())

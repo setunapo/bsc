@@ -124,7 +124,8 @@ type SlotChangeList struct {
 
 // For parallel mode only
 type ParallelState struct {
-	isSlotDB bool // isSlotDB denotes StateDB is used in slot
+	isSlotDB  bool // isSlotDB denotes StateDB is used in slot
+	SlotIndex int
 
 	// stateObjects holds the state objects in the base slot db
 	// the reason for using stateObjects instead of stateObjects on the outside is
@@ -245,13 +246,17 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) 
 
 // NewSlotDB creates a new State DB based on the provided StateDB.
 // With parallel, each execution slot would have its own StateDB.
-func NewSlotDB(db *StateDB, systemAddr common.Address, baseTxIndex int, keepSystem bool) *StateDB {
+func NewSlotDB(db *StateDB, systemAddr common.Address, baseTxIndex int, keepSystem bool, slotIndex int) *StateDB {
 	traceMsg := "NewSlotDB" // + " txIndex:" + strconv.Itoa(txIndex)
 	defer debug.Handler.StartRegionAuto(traceMsg)()
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(slotIndex) +
+		" NewSlotDB txIndex:" + strconv.Itoa(baseTxIndex))
 	log.Debug("NewSlotDB", " baseTxIndex:", baseTxIndex, "keepSystem", keepSystem)
+
 	slotDB := db.CopyForSlot()
 	slotDB.originalRoot = db.originalRoot
 	slotDB.parallel.baseTxIndex = baseTxIndex
+	slotDB.parallel.SlotIndex = slotIndex
 	slotDB.parallel.systemAddress = systemAddr
 	slotDB.parallel.systemAddressOpsCount = 0
 	slotDB.parallel.keepSystemAddressBalance = keepSystem
@@ -280,12 +285,13 @@ func NewWithSharedPool(root common.Hash, db Database, snaps *snapshot.Tree) (*St
 }
 
 func newStateDB(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) {
+	log.Debug("newStateDB")
 	sdb := &StateDB{
 		db:                  db,
 		originalRoot:        root,
 		snaps:               snaps,
 		stateObjects:        make(map[common.Address]*StateObject, defaultNumOfSlots),
-		parallel:            ParallelState{},
+		parallel:            ParallelState{SlotIndex: -1},
 		stateObjectsPending: make(map[common.Address]struct{}, defaultNumOfSlots),
 		stateObjectsDirty:   make(map[common.Address]struct{}, defaultNumOfSlots),
 		logs:                make(map[common.Hash][]*types.Log, defaultNumOfSlots),
@@ -343,6 +349,8 @@ func (s *StateDB) PrepareForParallel() {
 // merged back to the main StateDB.
 // And it will return and keep the slot's change list for later conflict detect.
 func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txIndex int) SlotChangeList {
+	traceMsg := "MergeSlotDB"
+	defer debug.Handler.StartRegionAuto(traceMsg)()
 	// receipt.Logs use unified log index within a block
 	// align slotDB's log index to the block stateDB's logSize
 	for _, l := range slotReceipt.Logs {
@@ -612,6 +620,7 @@ func (s *StateDB) Logs() []*types.Log {
 
 // AddPreimage records a SHA3 preimage seen by the VM.
 func (s *StateDB) AddPreimage(hash common.Hash, preimage []byte) {
+	log.Warn("StateDB.AddPreimage", "Slot", s.parallel.SlotIndex, "hash", hash.Hex())
 	if _, ok := s.preimages[hash]; !ok {
 		s.journal.append(addPreimageChange{hash: hash})
 		pi := make([]byte, len(preimage))
@@ -622,11 +631,13 @@ func (s *StateDB) AddPreimage(hash common.Hash, preimage []byte) {
 
 // Preimages returns a list of SHA3 preimages that have been submitted.
 func (s *StateDB) Preimages() map[common.Hash][]byte {
+	log.Debug("StateDB.Preimages")
 	return s.preimages
 }
 
 // AddRefund adds gas to the refund counter
 func (s *StateDB) AddRefund(gas uint64) {
+	log.Debug("StateDB.AddRefund")
 	s.journal.append(refundChange{prev: s.refund})
 	s.refund += gas
 }
@@ -634,6 +645,7 @@ func (s *StateDB) AddRefund(gas uint64) {
 // SubRefund removes gas from the refund counter.
 // This method will panic if the refund counter goes below zero
 func (s *StateDB) SubRefund(gas uint64) {
+	log.Debug("StateDB.SubRefund")
 	s.journal.append(refundChange{prev: s.refund})
 	if gas > s.refund {
 		panic(fmt.Sprintf("Refund counter below zero (gas: %d > refund: %d)", gas, s.refund))
@@ -644,19 +656,31 @@ func (s *StateDB) SubRefund(gas uint64) {
 // Exist reports whether the given account address exists in the state.
 // Notably this also returns true for suicided accounts.
 func (s *StateDB) Exist(addr common.Address) bool {
-	return s.getStateObject(addr) != nil
+	ret := s.getStateObject(addr) != nil
+	if ret {
+		debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+			" StateDB.Exist addr:" + addr.String() + " true")
+	} else {
+		debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+			" StateDB.Exist addr:" + addr.String() + " false")
+	}
+	return ret
 }
 
 // Empty returns whether the state object is either non-existent
 // or empty according to the EIP161 specification (balance = nonce = code = 0)
 func (s *StateDB) Empty(addr common.Address) bool {
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.Empty addr:" + addr.String())
+
 	so := s.getStateObject(addr)
 	return so == nil || so.empty()
 }
 
 // GetBalance retrieves the balance from the given address or 0 if object not found
 func (s *StateDB) GetBalance(addr common.Address) *big.Int {
-	debug.Handler.LogWhenTracing("StateDB.GetBalance addr:" + addr.String())
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.GetBalance addr:" + addr.String())
 	if s.parallel.isSlotDB {
 		s.parallel.balanceReadsInSlot[addr] = struct{}{}
 		if addr == s.parallel.systemAddress {
@@ -671,7 +695,8 @@ func (s *StateDB) GetBalance(addr common.Address) *big.Int {
 }
 
 func (s *StateDB) GetNonce(addr common.Address) uint64 {
-	debug.Handler.LogWhenTracing("StateDB.GetNonce addr:" + addr.String())
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.GetNonce addr:" + addr.String())
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.Nonce()
@@ -728,8 +753,11 @@ func (s *StateDB) NonceIncreased() uint64 {
 }
 
 func (s *StateDB) GetCode(addr common.Address) []byte {
-	defer debug.Handler.StartRegionAuto("StateDB.GetCode")()
-	debug.Handler.LogWhenTracing("StateDB.GetCode addr:" + addr.String())
+	/*
+		defer debug.Handler.StartRegionAuto("StateDB.GetCode")()
+		debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+			" StateDB.GetCode addr:" + addr.String())
+	*/
 	if s.parallel.isSlotDB {
 		s.parallel.codeReadsInSlot[addr] = struct{}{}
 	}
@@ -742,7 +770,8 @@ func (s *StateDB) GetCode(addr common.Address) []byte {
 }
 
 func (s *StateDB) GetCodeSize(addr common.Address) int {
-	debug.Handler.LogWhenTracing("StateDB.GetCodeSize addr:" + addr.String())
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.GetCodeSize addr:" + addr.String())
 	if s.parallel.isSlotDB {
 		s.parallel.codeReadsInSlot[addr] = struct{}{} // code size is part of code
 	}
@@ -755,7 +784,8 @@ func (s *StateDB) GetCodeSize(addr common.Address) int {
 }
 
 func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
-	debug.Handler.LogWhenTracing("StateDB.GetCodeHash addr:" + addr.String())
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.GetCodeHash addr:" + addr.String())
 	if s.parallel.isSlotDB {
 		s.parallel.codeReadsInSlot[addr] = struct{}{} // code hash is part of code
 	}
@@ -769,7 +799,16 @@ func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
 
 // GetState retrieves a value from the given account's storage trie.
 func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
-	debug.Handler.LogWhenTracing("StateDB.GetState addr:" + addr.String() + " hash:" + hash.String())
+	/*
+		var value common.Hash
+		traceMsg := "StateDB.GetState"
+		defer debug.Handler.StartRegionAuto(traceMsg)()
+		defer func() {
+					debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+						" StateDB.GetState addr:" + addr.String() + " hash:" + hash.String() +
+						" value:" + value.String())
+		}()
+	*/
 	if s.parallel.isSlotDB {
 		if s.parallel.stateReadsInSlot[addr] == nil {
 			s.parallel.stateReadsInSlot[addr] = make(map[common.Hash]struct{}, defaultNumOfSlots)
@@ -779,8 +818,11 @@ func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
 
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
+		// value = stateObject.GetState(s.db, hash)
+		// return value
 		return stateObject.GetState(s.db, hash)
 	}
+	// value = common.Hash{}
 	return common.Hash{}
 }
 
@@ -855,6 +897,8 @@ func (s *StateDB) StorageTrie(addr common.Address) Trie {
 }
 
 func (s *StateDB) HasSuicided(addr common.Address) bool {
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.HasSuicided addr:" + addr.String())
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.suicided
@@ -868,7 +912,9 @@ func (s *StateDB) HasSuicided(addr common.Address) bool {
 
 // AddBalance adds amount to the account associated with addr.
 func (s *StateDB) AddBalance(addr common.Address, amount *big.Int) {
-	debug.Handler.LogWhenTracing("StateDB.AddBalance addr:" + addr.String() + " amount:" + amount.String())
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.AddBalance addr:" + addr.String() + " amount:" + amount.String())
+	// balance 0?
 	if s.parallel.isSlotDB {
 		if amount.Sign() != 0 {
 			s.parallel.balanceChangesInSlot[addr] = struct{}{}
@@ -900,7 +946,8 @@ func (s *StateDB) AddBalance(addr common.Address, amount *big.Int) {
 
 // SubBalance subtracts amount from the account associated with addr.
 func (s *StateDB) SubBalance(addr common.Address, amount *big.Int) {
-	debug.Handler.LogWhenTracing("StateDB.SubBalance addr:" + addr.String() + " amount:" + amount.String())
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.SubBalance addr:" + addr.String() + " amount:" + amount.String())
 	if s.parallel.isSlotDB {
 		if amount.Sign() != 0 {
 			s.parallel.balanceChangesInSlot[addr] = struct{}{}
@@ -927,7 +974,8 @@ func (s *StateDB) SubBalance(addr common.Address, amount *big.Int) {
 }
 
 func (s *StateDB) SetBalance(addr common.Address, amount *big.Int) {
-	debug.Handler.LogWhenTracing("StateDB.SetBalance addr:" + addr.String() + " amount:" + amount.String())
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.SetBalance addr:" + addr.String() + " amount:" + amount.String())
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		if s.parallel.isSlotDB {
@@ -961,7 +1009,8 @@ func (s *StateDB) NonceChanged(addr common.Address) {
 }
 
 func (s *StateDB) SetNonce(addr common.Address, nonce uint64) {
-	debug.Handler.LogWhenTracing("StateDB.SetNonce addr:" + addr.String() + " nonce:" + strconv.Itoa(int(nonce)))
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.SetNonce addr:" + addr.String() + " nonce:" + strconv.Itoa(int(nonce)))
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		if s.parallel.isSlotDB {
@@ -977,7 +1026,8 @@ func (s *StateDB) SetNonce(addr common.Address, nonce uint64) {
 }
 
 func (s *StateDB) SetCode(addr common.Address, code []byte) {
-	debug.Handler.LogWhenTracing("StateDB.SetCode addr:" + addr.String())
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.SetCode addr:" + addr.String())
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		if s.parallel.isSlotDB {
@@ -995,7 +1045,12 @@ func (s *StateDB) SetCode(addr common.Address, code []byte) {
 }
 
 func (s *StateDB) SetState(addr common.Address, key, value common.Hash) {
-	debug.Handler.LogWhenTracing("StateDB.SetState addr:" + addr.String() + " key:" + key.String())
+	/*
+		debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+			" StateDB.SetState addr:" + addr.String() + " key:" + key.String() + " value:" + value.String())
+		traceMsg := "StateDB.SetState"
+		defer debug.Handler.StartRegionAuto(traceMsg)()
+	*/
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		if s.parallel.isSlotDB {
@@ -1028,11 +1083,12 @@ func (s *StateDB) SetState(addr common.Address, key, value common.Hash) {
 // SetStorage replaces the entire storage for the specified account with given
 // storage. This function should only be used for debugging.
 func (s *StateDB) SetStorage(addr common.Address, storage map[common.Hash]common.Hash) {
-	defer debug.Handler.StartRegionAuto("SetStorage")()
-	debug.Handler.LogWhenTracing("StateDB.SetStorage addr:" + addr.String())
+	// defer debug.Handler.StartRegionAuto("SetStorage")()
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.SetStorage addr:" + addr.String())
 
 	for key, value := range storage {
-		debug.Handler.LogWhenTracing("key" + key.String() + " value:" + value.String())
+		debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) + " key" + key.String() + " value:" + value.String())
 	}
 
 	stateObject := s.GetOrNewStateObject(addr)
@@ -1047,7 +1103,8 @@ func (s *StateDB) SetStorage(addr common.Address, storage map[common.Hash]common
 // The account's state object is still available until the state is committed,
 // getStateObject will return a non-nil account after Suicide.
 func (s *StateDB) Suicide(addr common.Address) bool {
-	debug.Handler.LogWhenTracing("StateDB.Suicide addr:" + addr.String())
+	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
+		" StateDB.Suicide addr:" + addr.String())
 	stateObject := s.getStateObject(addr)
 	if stateObject == nil {
 		return false
@@ -2191,10 +2248,14 @@ func (s *StateDB) AddressInAccessList(addr common.Address) bool {
 
 // SlotInAccessList returns true if the given (address, slot)-tuple is in the access list.
 func (s *StateDB) SlotInAccessList(addr common.Address, slot common.Hash) (addressPresent bool, slotPresent bool) {
+	log.Debug("Slot In AccessList", " Slot", s.parallel.SlotIndex, "addr", addr.String(), "slot", slot.String())
 	if s.accessList == nil {
+		log.Debug("Slot In AccessList accessList == nil", " Slot", s.parallel.SlotIndex, "addr", addr.String(), "slot", slot.String())
 		return false, false
 	}
-	return s.accessList.Contains(addr, slot)
+	addressPresent, slotPresent = s.accessList.Contains(addr, slot)
+	log.Debug("Slot In AccessList", " Slot", s.parallel.SlotIndex, "addressPresent", addressPresent, "slotPresent", slotPresent)
+	return addressPresent, slotPresent
 }
 
 func (s *StateDB) GetDirtyAccounts() []common.Address {
