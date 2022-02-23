@@ -2114,6 +2114,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals bool) (int, er
 		if err != nil {
 			return it.index, err
 		}
+
 		bc.updateHighestVerifiedHeader(block.Header())
 
 		// Enable prefetching to pull in trie node paths while processing transactions
