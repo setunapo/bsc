@@ -62,7 +62,7 @@ type StateProcessor struct {
 	bc     *BlockChain         // Canonical block chain
 	engine consensus.Engine    // Consensus engine used for block rewards
 
-	// add for parallel execute
+	// add for parallel executions
 	paraInitialized      int32
 	paraTxResultChan     chan *ParallelTxResult // to notify dispatcher that a tx is done
 	slotState            []*SlotState           // idle, or pending messages
@@ -389,21 +389,17 @@ type SlotState struct {
 	pendingTxReqList []*ParallelTxRequest // maintained by dispatcher for dispatch policy
 	mergedChangeList []state.SlotChangeList
 	slotdbChan       chan *state.StateDB // dispatch will create and send this slotDB to slot
-	// conflict check uses conflict window
-	// conflict check will check all state changes from (cfWindowStart + 1) to the previous Tx
 }
 
 type ParallelTxResult struct {
-	redo         bool // for redo, dispatch will wait new tx result
-	updateSlotDB bool // for redo and pending tx quest, slot needs new slotDB,
-	keepSystem   bool // for redo, should keep system address's balance
-	txIndex      int
+	redo         bool  // for redo, dispatch will wait new tx result
+	updateSlotDB bool  // for redo and pending tx quest, slot needs new slotDB,
+	keepSystem   bool  // for redo, should keep system address's balance
 	slotIndex    int   // slot index
 	err          error // to describe error message?
-	tx           *types.Transaction
 	txReq        *ParallelTxRequest
 	receipt      *types.Receipt
-	slotDB       *state.StateDB
+	slotDB       *state.StateDB // if updated, it is not equal to txReq.slotDB
 }
 
 type ParallelTxRequest struct {
@@ -425,7 +421,7 @@ func (p *StateProcessor) InitParallelOnce() {
 	if !atomic.CompareAndSwapInt32(&p.paraInitialized, 0, 1) { // not swapped means already initialized.
 		return
 	}
-	log.Info("Parallel execution mode is used and initialized", "Parallel Num", ParallelExecNum)
+	log.Info("Parallel execution mode is enabled", "Parallel Num", ParallelExecNum, "CPUNum", runtime.NumCPU())
 	p.paraTxResultChan = make(chan *ParallelTxResult, ParallelExecNum) // fixme: use blocked chan?
 	p.slotState = make([]*SlotState, ParallelExecNum)
 
@@ -446,7 +442,8 @@ func (p *StateProcessor) InitParallelOnce() {
 	wg.Wait()
 }
 
-// if any state in readDb is updated in changeList, then it has state conflict
+// conflict check uses conflict window, it will check all state changes from (cfWindowStart + 1)
+// to the previous Tx, if any state in readDb is updated in changeList, then it is conflicted
 func (p *StateProcessor) hasStateConflict(readDb *state.StateDB, changeList state.SlotChangeList) bool {
 	// check KV change
 	reads := readDb.StateReadsInSlot()
@@ -628,7 +625,7 @@ func (p *StateProcessor) waitUntilNextTxDone(statedb *state.StateDB) *ParallelTx
 		break
 	}
 	resultSlotIndex := result.slotIndex
-	resultTxIndex := result.txIndex
+	resultTxIndex := result.txReq.txIndex
 	resultSlotState := p.slotState[resultSlotIndex]
 	resultSlotState.pendingTxReqList = resultSlotState.pendingTxReqList[1:]
 	if resultSlotState.tailTxReq.txIndex == resultTxIndex {
@@ -643,13 +640,13 @@ func (p *StateProcessor) waitUntilNextTxDone(statedb *state.StateDB) *ParallelTx
 	resultSlotState.mergedChangeList = append(resultSlotState.mergedChangeList, changeList)
 
 	if resultTxIndex != p.mergedTxIndex+1 {
-		log.Warn("ProcessParallel tx result out of order", "resultTxIndex", resultTxIndex,
+		log.Error("ProcessParallel tx result out of order", "resultTxIndex", resultTxIndex,
 			"p.mergedTxIndex", p.mergedTxIndex)
-		panic("ProcessParallel tx result out of order")
 	}
 	p.mergedTxIndex = resultTxIndex
 	// notify the following Tx, it is merged,
-	// fixme: what if no wait or next tx is in same slot?
+	// todo(optimize): for the last transaction of a slot, there is no waiting tx, we can close the channel
+	// todo(optimize): if next tx is in same slot, it do not need to wait; save this channel cost.
 	result.txReq.curTxChan <- resultTxIndex
 	return result
 }
@@ -658,7 +655,7 @@ func (p *StateProcessor) execInParallelSlot(slotIndex int, txReq *ParallelTxRequ
 	txIndex := txReq.txIndex
 	tx := txReq.tx
 	slotDB := txReq.slotDB
-	gp := txReq.gp // goroutine unsafe
+	gp := txReq.gp // fixme: goroutine unsafe
 	msg := txReq.msg
 	block := txReq.block
 	header := block.Header()
@@ -701,9 +698,7 @@ func (p *StateProcessor) execInParallelSlot(slotIndex int, txReq *ParallelTxRequ
 		redoResult := &ParallelTxResult{
 			redo:         true,
 			updateSlotDB: true,
-			txIndex:      txIndex,
 			slotIndex:    slotIndex,
-			tx:           tx,
 			txReq:        txReq,
 			receipt:      receipt,
 			err:          err,
@@ -767,9 +762,7 @@ func (p *StateProcessor) execInParallelSlot(slotIndex int, txReq *ParallelTxRequ
 			redo:         true,
 			updateSlotDB: true,
 			keepSystem:   systemAddrConflict,
-			txIndex:      txIndex,
 			slotIndex:    slotIndex,
-			tx:           tx,
 			txReq:        txReq,
 			receipt:      receipt,
 			err:          err,
@@ -813,9 +806,7 @@ func (p *StateProcessor) execInParallelSlot(slotIndex int, txReq *ParallelTxRequ
 	return &ParallelTxResult{
 		redo:         false,
 		updateSlotDB: false,
-		txIndex:      txIndex,
 		slotIndex:    slotIndex,
-		tx:           tx,
 		txReq:        txReq,
 		receipt:      receipt,
 		slotDB:       slotDB,
@@ -1034,10 +1025,10 @@ func (p *StateProcessor) ProcessParallel(block *types.Block, statedb *state.Stat
 			// update tx result
 			if result.err != nil {
 				log.Warn("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
-					"resultTxIndex", result.txIndex, "result.err", result.err)
-				return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txIndex, result.tx.Hash().Hex(), result.err)
+					"resultTxIndex", result.txReq.txIndex, "result.err", result.err)
+				return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txReq.txIndex, result.txReq.tx.Hash().Hex(), result.err)
 			}
-			commonTxs = append(commonTxs, result.tx)
+			commonTxs = append(commonTxs, result.txReq.tx)
 			receipts = append(receipts, result.receipt)
 		}
 	}
@@ -1048,10 +1039,10 @@ func (p *StateProcessor) ProcessParallel(block *types.Block, statedb *state.Stat
 		// update tx result
 		if result.err != nil {
 			log.Warn("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
-				"resultTxIndex", result.txIndex, "result.err", result.err)
-			return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txIndex, result.tx.Hash().Hex(), result.err)
+				"resultTxIndex", result.txReq.txIndex, "result.err", result.err)
+			return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txReq.txIndex, result.txReq.tx.Hash().Hex(), result.err)
 		}
-		commonTxs = append(commonTxs, result.tx)
+		commonTxs = append(commonTxs, result.txReq.tx)
 		receipts = append(receipts, result.receipt)
 	}
 
