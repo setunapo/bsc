@@ -203,6 +203,8 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	// TODO diffsync performance is not as expected, disable it when pipecommit is enabled for now
 	if config.DiffSync && !config.PipeCommit {
 		bcOps = append(bcOps, core.EnableLightProcessor)
+	} else if config.ParallelTxMode {
+		bcOps = append(bcOps, core.EnableParallelProcessor(config.ParallelTxNum, config.ParallelTxQueueSize))
 	}
 	if config.PipeCommit {
 		bcOps = append(bcOps, core.EnablePipelineCommit)
