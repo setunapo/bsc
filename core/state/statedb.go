@@ -85,8 +85,8 @@ func (s *StateObjectSyncMap) StoreStateObject(addr common.Address, stateObject *
 	s.Store(addr, stateObject)
 }
 
-// loadStateObjectFromStateDB is the entry for loading state object from stateObjects in StateDB or stateObjects in parallel
-func (s *StateDB) loadStateObjectFromStateDB(addr common.Address) (*StateObject, bool) {
+// loadStateObj is the entry for loading state object from stateObjects in StateDB or stateObjects in parallel
+func (s *StateDB) loadStateObj(addr common.Address) (*StateObject, bool) {
 	if s.isParallel {
 		return s.parallel.stateObjects.LoadStateObject(addr)
 	} else {
@@ -95,8 +95,8 @@ func (s *StateDB) loadStateObjectFromStateDB(addr common.Address) (*StateObject,
 	}
 }
 
-// storeStateObjectToStateDB is the entry for storing state object to stateObjects in StateDB or stateObjects in parallel
-func (s *StateDB) storeStateObjectToStateDB(addr common.Address, stateObject *StateObject) {
+// storeStateObj is the entry for storing state object to stateObjects in StateDB or stateObjects in parallel
+func (s *StateDB) storeStateObj(addr common.Address, stateObject *StateObject) {
 	if s.isParallel {
 		s.parallel.stateObjects.Store(addr, stateObject)
 	} else {
@@ -104,8 +104,8 @@ func (s *StateDB) storeStateObjectToStateDB(addr common.Address, stateObject *St
 	}
 }
 
-// deleteStateObjectFromStateDB is the entry for deleting state object to stateObjects in StateDB or stateObjects in parallel
-func (s *StateDB) deleteStateObjectFromStateDB(addr common.Address) {
+// deleteStateObj is the entry for deleting state object to stateObjects in StateDB or stateObjects in parallel
+func (s *StateDB) deleteStateObj(addr common.Address) {
 	if s.isParallel {
 		s.parallel.stateObjects.Delete(addr)
 	} else {
@@ -304,7 +304,7 @@ func (s *StateDB) getStateObjectFromStateObjects(addr common.Address) (*StateObj
 			return obj, ok
 		}
 	}
-	return s.loadStateObjectFromStateDB(addr)
+	return s.loadStateObj(addr)
 }
 
 // If the transaction execution is reverted, keep its read list for conflict detect
@@ -361,12 +361,12 @@ func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txInd
 			log.Error("parallel merge, but dirty object not exist!", "txIndex:", slotDb.txIndex, "addr", addr)
 			continue
 		}
-		mainObj, exist := s.loadStateObjectFromStateDB(addr)
+		mainObj, exist := s.loadStateObj(addr)
 		if !exist {
 			// addr not exist on main DB, do ownership transfer
 			dirtyObj.db = s
 			dirtyObj.finalise(true) // true: prefetch on dispatcher
-			s.storeStateObjectToStateDB(addr, dirtyObj)
+			s.storeStateObj(addr, dirtyObj)
 			delete(slotDb.parallel.dirtiedStateObjectsInSlot, addr) // transfer ownership
 		} else {
 			// addr already in main DB, do merge: balance, KV, code, State(create, suicide)
@@ -419,7 +419,7 @@ func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txInd
 			}
 			newMainObj.finalise(true) // true: prefetch on dispatcher
 			// update the object
-			s.storeStateObjectToStateDB(addr, newMainObj)
+			s.storeStateObj(addr, newMainObj)
 		}
 		addressesToPrefetch = append(addressesToPrefetch, common.CopyBytes(addr[:])) // Copy needed for closure
 	}
@@ -1240,7 +1240,7 @@ func (s *StateDB) SetStateObject(object *StateObject) {
 	if s.parallel.isSlotDB {
 		s.parallel.dirtiedStateObjectsInSlot[object.Address()] = object
 	} else {
-		s.storeStateObjectToStateDB(object.Address(), object)
+		s.storeStateObj(object.Address(), object)
 	}
 }
 
@@ -1364,7 +1364,7 @@ func (s *StateDB) Copy() *StateDB {
 			// Even though the original object is dirty, we are not copying the journal,
 			// so we need to make sure that anyside effect the journal would have caused
 			// during a commit (or similar op) is already applied to the copy.
-			state.storeStateObjectToStateDB(addr, object.deepCopy(state))
+			state.storeStateObj(addr, object.deepCopy(state))
 
 			state.stateObjectsDirty[addr] = struct{}{}   // Mark the copy dirty to force internal (code/state) commits
 			state.stateObjectsPending[addr] = struct{}{} // Mark the copy pending to force external (account) commits
@@ -1376,14 +1376,14 @@ func (s *StateDB) Copy() *StateDB {
 	for addr := range s.stateObjectsPending {
 		if _, exist := state.getStateObjectFromStateObjects(addr); !exist {
 			object, _ := s.getStateObjectFromStateObjects(addr)
-			state.storeStateObjectToStateDB(addr, object.deepCopy(state))
+			state.storeStateObj(addr, object.deepCopy(state))
 		}
 		state.stateObjectsPending[addr] = struct{}{}
 	}
 	for addr := range s.stateObjectsDirty {
 		if _, exist := state.getStateObjectFromStateObjects(addr); !exist {
 			object, _ := s.getStateObjectFromStateObjects(addr)
-			state.storeStateObjectToStateDB(addr, object.deepCopy(state))
+			state.storeStateObj(addr, object.deepCopy(state))
 		}
 		state.stateObjectsDirty[addr] = struct{}{}
 	}
