@@ -240,12 +240,13 @@ type BlockChain struct {
 	running       int32          // 0 if chain is running, 1 when stopped
 	procInterrupt int32          // interrupt signaler for block processing
 
-	engine     consensus.Engine
-	prefetcher Prefetcher
-	validator  Validator // Block and state validator interface
-	processor  Processor // Block transaction processor interface
-	vmConfig   vm.Config
-	pipeCommit bool
+	engine            consensus.Engine
+	prefetcher        Prefetcher
+	validator         Validator // Block and state validator interface
+	processor         Processor // Block transaction processor interface
+	vmConfig          vm.Config
+	pipeCommit        bool
+	parallelExecution bool
 
 	shouldPreserve  func(*types.Block) bool        // Function used to determine whether should preserve the given block.
 	terminateInsert func(common.Hash, uint64) bool // Testing hook used to terminate ancient receipt chain insertion.
@@ -2112,7 +2113,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals bool) (int, er
 		var followupInterrupt uint32
 		// For diff sync, it may fallback to full sync, so we still do prefetch
 		// parallel mode has a pipeline, similar to this prefetch, to save CPU we disable this prefetch for parallel
-		if !DefaultProcessConfig.ParallelTxMode {
+		if !bc.parallelExecution {
 			if len(block.Transactions()) >= prefetchTxNumber {
 				throwaway := statedb.Copy()
 				go func(start time.Time, followup *types.Block, throwaway *state.StateDB, interrupt *uint32) {
@@ -3100,6 +3101,14 @@ func EnablePipelineCommit(bc *BlockChain) *BlockChain {
 func EnablePersistDiff(limit uint64) BlockChainOption {
 	return func(chain *BlockChain) *BlockChain {
 		chain.diffLayerFreezerBlockLimit = limit
+		return chain
+	}
+}
+
+func EnableParallelProcessor(parallelNum int, queueSize int) BlockChainOption {
+	return func(chain *BlockChain) *BlockChain {
+		chain.parallelExecution = true
+		chain.processor = NewParallelStateProcessor(chain.Config(), chain, chain.engine, parallelNum, queueSize)
 		return chain
 	}
 }
