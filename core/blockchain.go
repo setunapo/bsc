@@ -3107,6 +3107,11 @@ func EnablePersistDiff(limit uint64) BlockChainOption {
 
 func EnableParallelProcessor(parallelNum int, queueSize int) BlockChainOption {
 	return func(chain *BlockChain) *BlockChain {
+		if chain.snaps == nil {
+			// disable parallel processor if snapshot is not enabled to avoid concurrent issue for SecureTrie
+			log.Info("parallel processor is not enabled since snapshot is not enabled")
+			return chain
+		}
 		chain.parallelExecution = true
 		chain.processor = NewParallelStateProcessor(chain.Config(), chain, chain.engine, parallelNum, queueSize)
 		return chain
