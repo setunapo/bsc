@@ -145,7 +145,7 @@ type ParallelState struct {
 	stateReadsInSlot     map[common.Address]StateKeys
 	stateChangesInSlot   map[common.Address]StateKeys // no need record value
 	// Actions such as SetCode, Suicide will change address's state.
-	// Later call like Exist(), Empty(), HasSuicided() depond on the address's state.
+	// Later call like Exist(), Empty(), HasSuicided() depend on the address's state.
 	addrStateReadsInSlot       map[common.Address]struct{}
 	addrStateChangesInSlot     map[common.Address]struct{}
 	stateObjectsSuicidedInSlot map[common.Address]struct{}
@@ -307,8 +307,8 @@ func (s *StateDB) getStateObjectFromStateObjects(addr common.Address) (*StateObj
 	return s.loadStateObj(addr)
 }
 
-// If the transaction execution is reverted, keep its read list for conflict detect
-// and discard its state changes, execept its own balance change.
+// RevertSlotDB keep its read list for conflict detect and discard its state changes except its own balance change,
+// if the transaction execution is reverted,
 func (s *StateDB) RevertSlotDB(from common.Address) {
 	s.parallel.stateObjectsSuicidedInSlot = make(map[common.Address]struct{})
 	s.parallel.stateChangesInSlot = make(map[common.Address]StateKeys)
@@ -318,7 +318,7 @@ func (s *StateDB) RevertSlotDB(from common.Address) {
 	s.parallel.nonceChangesInSlot = make(map[common.Address]struct{})
 }
 
-// Prepares for state db to be used in parallel execution mode.
+// PrepareForParallel prepares for state db to be used in parallel execution mode.
 func (s *StateDB) PrepareForParallel() {
 	s.isParallel = true
 	s.parallel.stateObjects = &StateObjectSyncMap{}
@@ -936,12 +936,10 @@ func (s *StateDB) SetNonce(addr common.Address, nonce uint64) {
 				newStateObject := stateObject.deepCopy(s)
 				newStateObject.SetNonce(nonce)
 				s.parallel.dirtiedStateObjectsInSlot[addr] = newStateObject
-			} else {
-				stateObject.SetNonce(nonce)
+				return
 			}
-		} else {
-			stateObject.SetNonce(nonce)
 		}
+		stateObject.SetNonce(nonce)
 	}
 }
 
@@ -949,18 +947,16 @@ func (s *StateDB) SetCode(addr common.Address, code []byte) {
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		if s.parallel.isSlotDB {
+			s.parallel.codeChangesInSlot[addr] = struct{}{}
+
 			if _, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
 				newStateObject := stateObject.deepCopy(s)
 				newStateObject.SetCode(crypto.Keccak256Hash(code), code)
 				s.parallel.dirtiedStateObjectsInSlot[addr] = newStateObject
-			} else {
-				stateObject.SetCode(crypto.Keccak256Hash(code), code)
+				return
 			}
-
-			s.parallel.codeChangesInSlot[addr] = struct{}{}
-		} else {
-			stateObject.SetCode(crypto.Keccak256Hash(code), code)
 		}
+		stateObject.SetCode(crypto.Keccak256Hash(code), code)
 	}
 }
 
@@ -977,21 +973,20 @@ func (s *StateDB) SetState(addr common.Address, key, value common.Hash) {
 					return
 				}
 			}
-			if _, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
-				newStateObject := stateObject.deepCopy(s)
-				newStateObject.SetState(s.db, key, value)
-				s.parallel.dirtiedStateObjectsInSlot[addr] = newStateObject
-			} else {
-				stateObject.SetState(s.db, key, value)
-			}
 
 			if s.parallel.stateChangesInSlot[addr] == nil {
 				s.parallel.stateChangesInSlot[addr] = make(StateKeys, defaultNumOfSlots)
 			}
 			s.parallel.stateChangesInSlot[addr][key] = struct{}{}
-		} else {
-			stateObject.SetState(s.db, key, value)
+
+			if _, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
+				newStateObject := stateObject.deepCopy(s)
+				newStateObject.SetState(s.db, key, value)
+				s.parallel.dirtiedStateObjectsInSlot[addr] = newStateObject
+				return
+			}
 		}
+		stateObject.SetState(s.db, key, value)
 	}
 }
 
@@ -1030,15 +1025,12 @@ func (s *StateDB) Suicide(addr common.Address) bool {
 			newStateObject.markSuicided()
 			newStateObject.data.Balance = new(big.Int)
 			s.parallel.dirtiedStateObjectsInSlot[addr] = newStateObject
-		} else {
-			stateObject.markSuicided()
-			stateObject.data.Balance = new(big.Int)
+			return true
 		}
-	} else {
-		stateObject.markSuicided()
-		stateObject.data.Balance = new(big.Int)
 	}
 
+	stateObject.markSuicided()
+	stateObject.data.Balance = new(big.Int)
 	return true
 }
 
