@@ -607,10 +607,10 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 	var result *ParallelTxResult
 	for {
 		result = <-p.txResultChan
-		// slot may request new slotDB, if it think its slotDB is outdated
+		// slot may request new slotDB, if slotDB is outdated
 		// such as:
 		//   tx in pending tx request, previous tx in same queue is likely "damaged" the slotDB
-		//   tx redo for confict
+		//   tx redo for conflict
 		//   tx stage 1 failed, nonce out of order...
 		if result.updateSlotDB {
 			// the target slot is waiting for new slotDB
