@@ -857,12 +857,10 @@ func (s *StateDB) AddBalance(addr common.Address, amount *big.Int) {
 				newStateObject := stateObject.deepCopy(s)
 				newStateObject.AddBalance(amount)
 				s.parallel.dirtiedStateObjectsInSlot[addr] = newStateObject
-			} else {
-				stateObject.AddBalance(amount)
+				return
 			}
-		} else {
-			stateObject.AddBalance(amount)
 		}
+		stateObject.AddBalance(amount)
 	}
 }
 
@@ -886,12 +884,10 @@ func (s *StateDB) SubBalance(addr common.Address, amount *big.Int) {
 				newStateObject := stateObject.deepCopy(s)
 				newStateObject.SubBalance(amount)
 				s.parallel.dirtiedStateObjectsInSlot[addr] = newStateObject
-			} else {
-				stateObject.SubBalance(amount)
+				return
 			}
-		} else {
-			stateObject.SubBalance(amount)
 		}
+		stateObject.SubBalance(amount)
 	}
 }
 
@@ -899,20 +895,19 @@ func (s *StateDB) SetBalance(addr common.Address, amount *big.Int) {
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		if s.parallel.isSlotDB {
-			if _, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
-				newStateObject := stateObject.deepCopy(s)
-				newStateObject.SetBalance(amount)
-				s.parallel.dirtiedStateObjectsInSlot[addr] = newStateObject
-			} else {
-				stateObject.SetBalance(amount)
-			}
 			s.parallel.balanceChangesInSlot[addr] = struct{}{}
 			if addr == s.parallel.systemAddress {
 				s.parallel.systemAddressOpsCount++
 			}
-		} else {
-			stateObject.SetBalance(amount)
+
+			if _, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
+				newStateObject := stateObject.deepCopy(s)
+				newStateObject.SetBalance(amount)
+				s.parallel.dirtiedStateObjectsInSlot[addr] = newStateObject
+				return
+			}
 		}
+		stateObject.SetBalance(amount)
 	}
 }
 
