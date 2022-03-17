@@ -89,10 +89,9 @@ func (s *StateObjectSyncMap) StoreStateObject(addr common.Address, stateObject *
 func (s *StateDB) loadStateObj(addr common.Address) (*StateObject, bool) {
 	if s.isParallel {
 		return s.parallel.stateObjects.LoadStateObject(addr)
-	} else {
-		obj, ok := s.stateObjects[addr]
-		return obj, ok
 	}
+	obj, ok := s.stateObjects[addr]
+	return obj, ok
 }
 
 // storeStateObj is the entry for storing state object to stateObjects in StateDB or stateObjects in parallel
