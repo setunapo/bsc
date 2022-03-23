@@ -152,6 +152,7 @@ type ParallelState struct {
 	// needs real system address's balance, the transaction will be marked redo with keepSystemAddressBalance = true
 	systemAddress            common.Address
 	systemAddressOpsCount    int
+	nonceIncreased           uint64 // create contract
 	keepSystemAddressBalance bool
 }
 
@@ -681,6 +682,10 @@ func (s *StateDB) BlockHash() common.Hash {
 	return s.bhash
 }
 
+func (s *StateDB) IsSlotDB() bool {
+	return s.parallel.isSlotDB
+}
+
 // BaseTxIndex returns the tx index that slot db based.
 func (s *StateDB) BaseTxIndex() int {
 	return s.parallel.baseTxIndex
@@ -709,6 +714,10 @@ func (s *StateDB) BalanceReadsInSlot() map[common.Address]struct{} {
 // this case, we should redo and keep its balance on NewSlotDB()
 func (s *StateDB) SystemAddressRedo() bool {
 	return s.parallel.systemAddressOpsCount > 2
+}
+
+func (s *StateDB) NonceIncreased() uint64 {
+	return s.parallel.nonceIncreased
 }
 
 func (s *StateDB) GetCode(addr common.Address) []byte {
@@ -932,6 +941,7 @@ func (s *StateDB) NonceChanged(addr common.Address) {
 	if s.parallel.isSlotDB {
 		log.Debug("NonceChanged", "txIndex", s.txIndex, "addr", addr)
 		s.parallel.nonceChangesInSlot[addr] = struct{}{}
+		s.parallel.nonceIncreased++
 	}
 }
 
