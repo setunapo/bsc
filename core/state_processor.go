@@ -623,9 +623,10 @@ func (p *ParallelStateProcessor) dispatchToIdleSlot(statedb *state.StateDB, txRe
 func (p *ParallelStateProcessor) dispatchToHungrySlot(statedb *state.StateDB, txReq *ParallelTxRequest) bool {
 	var workload int = len(p.slotState[0].pendingTxReqList)
 	var slotIndex int = 0
-	for i, slot := range p.slotState[1:] { // can start from index 1
+	for i, slot := range p.slotState { // can start from index 1
 		if len(slot.pendingTxReqList) < workload {
 			slotIndex = i
+			workload = len(slot.pendingTxReqList)
 		}
 	}
 	if workload >= p.queueSize {
