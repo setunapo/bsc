@@ -535,6 +535,14 @@ func (tx *Transaction) AsMessage(s Signer) (Message, error) {
 	return msg, err
 }
 
+// Parallel 1.0&2.0 will skip nonce check, since it is not necessary for sync mode.
+// Parallel 3.0 will reenable it, nonce check for parallel execution will be designed.
+func (tx *Transaction) AsParallelMessage(s Signer) (Message, error) {
+	msg, err := tx.AsMessage(s)
+	msg.checkNonce = false
+	return msg, err
+}
+
 func (m Message) From() common.Address   { return m.from }
 func (m Message) To() *common.Address    { return m.to }
 func (m Message) GasPrice() *big.Int     { return m.gasPrice }
