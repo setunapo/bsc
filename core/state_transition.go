@@ -197,24 +197,7 @@ func (st *StateTransition) buyGas() error {
 
 func (st *StateTransition) preCheck() error {
 	// Make sure this transaction's nonce is correct.
-	// For Parallel Execution mode, we do out-of-order execution for slot routine,
-	// we will do nonce check before transaction result merge.
-	if st.msg.CheckNonce() && !st.state.IsSlotDB() {
-		stNonce := st.state.GetNonce(st.msg.From())
-		if msgNonce := st.msg.Nonce(); stNonce < msgNonce {
-			return fmt.Errorf("%w: address %v, tx: %d state: %d", ErrNonceTooHigh,
-				st.msg.From().Hex(), msgNonce, stNonce)
-		} else if stNonce > msgNonce {
-			return fmt.Errorf("%w: address %v, tx: %d state: %d", ErrNonceTooLow,
-				st.msg.From().Hex(), msgNonce, stNonce)
-		}
-	}
-	return st.buyGas()
-}
-
-func (st *StateTransition) postCheck() error {
-	// in Parallel mode, nonce check will be done in postCheck
-	if st.msg.CheckNonce() && st.state.IsSlotDB() {
+	if st.msg.CheckNonce() {
 		stNonce := st.state.GetNonce(st.msg.From())
 		if msgNonce := st.msg.Nonce(); stNonce < msgNonce {
 			return fmt.Errorf("%w: address %v, tx: %d state: %d", ErrNonceTooHigh,
