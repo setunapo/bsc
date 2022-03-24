@@ -393,7 +393,6 @@ func (p *LightStateProcessor) LightProcess(diffLayer *types.DiffLayer, block *ty
 }
 
 type SlotState struct {
-	tailTxReq          *ParallelTxRequest // tail pending Tx of the slot, should be accessed on dispatcher only.
 	pendingTxReqChan   chan *ParallelTxRequest
 	pendingConfirmChan chan *ParallelTxResult
 	pendingTxReqList   []*ParallelTxRequest // maintained by dispatcher for dispatch policy
@@ -541,13 +540,6 @@ func (p *ParallelStateProcessor) queueSameToAddress(txReq *ParallelTxRequest) bo
 		return false
 	}
 	for i, slot := range p.slotState {
-		if slot.tailTxReq == nil { // this slot is idle
-			continue
-		}
-		// if len(slot.pendingTxReqList) >= p.queueSize {
-		//	log.Info("queue To Address, skip full slot", "slotIndex", i, "len(slot.pendingTxReqList)", len(slot.pendingTxReqList))
-		//	continue
-		// }
 		for _, pending := range slot.pendingTxReqList {
 			// To() == nil means contract creation, skip it.
 			if pending.tx.To() == nil {
@@ -557,7 +549,6 @@ func (p *ParallelStateProcessor) queueSameToAddress(txReq *ParallelTxRequest) bo
 			if *txToAddr == *pending.tx.To() {
 				select {
 				case slot.pendingTxReqChan <- txReq:
-					slot.tailTxReq = txReq
 					slot.pendingTxReqList = append(slot.pendingTxReqList, txReq)
 					log.Debug("queue same To address", "Slot", i, "txIndex", txReq.txIndex)
 					return true
@@ -576,19 +567,11 @@ func (p *ParallelStateProcessor) queueSameToAddress(txReq *ParallelTxRequest) bo
 func (p *ParallelStateProcessor) queueSameFromAddress(txReq *ParallelTxRequest) bool {
 	txFromAddr := txReq.msg.From()
 	for i, slot := range p.slotState {
-		if slot.tailTxReq == nil { // this slot is idle
-			continue
-		}
-		if len(slot.pendingTxReqList) >= p.queueSize {
-			log.Debug("queue From Address, skip full slot", "slotIndex", i, "len(slot.pendingTxReqList)", len(slot.pendingTxReqList))
-			continue
-		}
 		for _, pending := range slot.pendingTxReqList {
 			// same from address, put it on slot's pending list.
 			if txFromAddr == pending.msg.From() {
 				select {
 				case slot.pendingTxReqChan <- txReq:
-					slot.tailTxReq = txReq
 					slot.pendingTxReqList = append(slot.pendingTxReqList, txReq)
 					log.Debug("queue same From address", "Slot", i, "txIndex", txReq.txIndex)
 					return true
@@ -597,24 +580,6 @@ func (p *ParallelStateProcessor) queueSameFromAddress(txReq *ParallelTxRequest) 
 					break // try next slot
 				}
 			}
-		}
-	}
-	return false
-}
-
-// if there is idle slot, dispatch the msg to the first idle slot
-func (p *ParallelStateProcessor) dispatchToIdleSlot(statedb *state.StateDB, txReq *ParallelTxRequest) bool {
-	for i, slot := range p.slotState {
-		if slot.tailTxReq == nil {
-			if len(slot.mergedChangeList) == 0 {
-				// first transaction of a slot, there is no usable SlotDB, have to create one for it.
-				txReq.slotDB = state.NewSlotDB(statedb, consensus.SystemAddress, p.mergedTxIndex, false)
-			}
-			log.Debug("dispatch to idle", "Slot", i, "txIndex", txReq.txIndex)
-			slot.tailTxReq = txReq
-			slot.pendingTxReqList = append(slot.pendingTxReqList, txReq)
-			slot.pendingTxReqChan <- txReq
-			return true
 		}
 	}
 	return false
@@ -630,15 +595,19 @@ func (p *ParallelStateProcessor) dispatchToHungrySlot(statedb *state.StateDB, tx
 		}
 	}
 	if workload >= p.queueSize {
-		log.Debug("dispatch no Hungry Slot")
+		log.Debug("dispatch no Hungry Slot, all slots are full of task", "queueSize", p.queueSize)
 		return false
+	}
+
+	if workload == 0 && txReq.slotDB == nil {
+		// Create a SlotDB for idle slot to save an IPC channel cost for updateSlotDB
+		txReq.slotDB = state.NewSlotDB(statedb, consensus.SystemAddress, p.mergedTxIndex, false)
 	}
 
 	log.Debug("dispatch To Hungry Slot", "slot", slotIndex, "workload", workload, "txIndex", txReq.txIndex)
 	slot := p.slotState[slotIndex]
 	select {
 	case slot.pendingTxReqChan <- txReq:
-		slot.tailTxReq = txReq
 		slot.pendingTxReqList = append(slot.pendingTxReqList, txReq)
 		return true
 	default:
@@ -678,10 +647,6 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 	resultTxIndex := result.txReq.txIndex
 	resultSlotState := p.slotState[resultSlotIndex]
 	resultSlotState.pendingTxReqList = resultSlotState.pendingTxReqList[1:]
-	if resultSlotState.tailTxReq.txIndex == resultTxIndex {
-		log.Debug("ProcessParallel slot is idle", "Slot", resultSlotIndex)
-		resultSlotState.tailTxReq = nil
-	}
 
 	// Slot's mergedChangeList is produced by dispatcher, while consumed by slot.
 	// It is safe, since write and read is in sequential, do write -> notify -> read
@@ -878,7 +843,6 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	statedb.PrepareForParallel()
 
 	for _, slot := range p.slotState {
-		slot.tailTxReq = nil
 		slot.mergedChangeList = make([]state.SlotChangeList, 0)
 		slot.pendingTxReqList = make([]*ParallelTxRequest, 0)
 	}
@@ -947,10 +911,6 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			}
 
 			if p.queueSameToAddress(txReq) {
-				break
-			}
-			// if idle slot available, just dispatch and process next tx.
-			if p.dispatchToIdleSlot(statedb, txReq) { // no need any more
 				break
 			}
 
