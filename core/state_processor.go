@@ -671,8 +671,8 @@ func (p *ParallelStateProcessor) doStaticDispatch(mainStatedb *state.StateDB, tx
 
 	fromSlotMap := make(map[common.Address]int, 100)
 	toSlotMap := make(map[common.Address]int, 100)
-	var slotIndex int = -1
 	for _, txReq := range txReqs {
+		var slotIndex int = -1
 		if i, ok := fromSlotMap[txReq.msg.From()]; ok {
 			// first: same From are all in same slot
 			slotIndex = i
