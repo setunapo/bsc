@@ -26,6 +26,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -68,7 +69,6 @@ type StateObject struct {
 	addrHash common.Hash // hash of ethereum address of the account
 	data     Account
 	db       *StateDB
-
 	// DB error.
 	// State objects are used by the consensus core and VM which are
 	// unable to deal with database-level errors. Any error that occurs
@@ -86,7 +86,6 @@ type StateObject struct {
 	pendingStorage Storage // Storage entries that need to be flushed to disk, at the end of an entire block
 	dirtyStorage   Storage // Storage entries that have been modified in the current transaction execution
 	fakeStorage    Storage // Fake storage which constructed by caller for debugging purpose.
-
 	// Cache flags.
 	// When an object is marked suicided it will be delete from the trie
 	// during the "update" phase of the state transition.
@@ -190,6 +189,10 @@ func (s *StateObject) getTrie(db Database) Trie {
 }
 
 // GetState retrieves a value from the account storage trie.
+// Order: lightCopy's dirty -> lightCopy's pendin(on merge) -> unconfirmed DB(pending) -> mainStateDB committed: (pending, origin, snapshot)
+// for lightCopy: dirty -> unconfirmed DB -> main DB committed
+// for main StateObject: dirty(nil) -> main DB committed
+// for merge: dirty -> pending ->
 func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 	// If the fake storage is set, only lookup the state here(in the debugging mode)
 	if s.fakeStorage != nil {
@@ -198,8 +201,27 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 	// If we have a dirty value for this state entry, return it
 	value, dirty := s.dirtyStorage[key]
 	if dirty {
+		log.Info("StateObject::GetState in dirty", "key", key, "value", value)
 		return value
 	}
+
+	// unconfirmed DB is committed too.
+	if s.db.parallel.isSlotDB {
+		// on merge
+		value, dirty = s.pendingStorage[key] // fixme: can be removed, since StateObject in SlotDB will not do finalize
+		if dirty {
+			log.Warn("StateObject::GetState in pending", "key", key, "value", value)
+		}
+
+		// KVs in unconfirmed DB can be seen as "unconfirmed pending storage"
+		if val, ok := s.db.getKVFromUnconfirmedDB(s.address, key); ok {
+			return val
+		}
+		// The pendingStorage of slot DB is incorrect, try to get from the base DB
+		baseDB := s.db.parallel.baseDB
+		return baseDB.GetCommittedState(s.address, key)
+	}
+
 	// Otherwise return the entry's original value
 	return s.GetCommittedState(db, key)
 }
@@ -214,7 +236,7 @@ func (s *StateObject) getOriginStorage(key common.Hash) (common.Hash, bool) {
 		if !ok {
 			return common.Hash{}, false
 		}
-		s.originStorage[key] = val.(common.Hash)
+		// s.originStorage[key] = val.(common.Hash)
 		return val.(common.Hash), true
 	}
 	return common.Hash{}, false
@@ -224,7 +246,7 @@ func (s *StateObject) setOriginStorage(key common.Hash, value common.Hash) {
 	if s.db.writeOnSharedStorage && s.sharedOriginStorage != nil {
 		s.sharedOriginStorage.Store(key, value)
 	}
-	s.originStorage[key] = value
+	// s.originStorage[key] = value
 }
 
 // GetCommittedState retrieves a value from the committed account storage trie.
@@ -235,10 +257,12 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 	}
 	// If we have a pending write or clean cached, return that
 	if value, pending := s.pendingStorage[key]; pending {
+		log.Info("StateObject GetCommittedState pendingStorage", "value", value)
 		return value
 	}
 
 	if value, cached := s.getOriginStorage(key); cached {
+		log.Info("StateObject GetCommittedState originStorage", "value", value)
 		return value
 	}
 	// If no live objects are available, attempt to use snapshots
@@ -268,9 +292,12 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 		//   1) resurrect happened, and new slot values were set -- those should
 		//      have been handles via pendingStorage above.
 		//   2) we don't have new values, and can deliver empty response back
-		if _, destructed := s.db.snapDestructs[s.address]; destructed {
+		s.db.snapParallelLock.RLock()
+		if _, destructed := s.db.snapDestructs[s.address]; destructed { // fixme: use sync.Map, instead of RWMutex?
+			s.db.snapParallelLock.RUnlock()
 			return common.Hash{}
 		}
+		s.db.snapParallelLock.RUnlock()
 		enc, err = s.db.snap.Storage(s.addrHash, crypto.Keccak256Hash(key.Bytes()))
 	}
 	// If snapshot unavailable or reading from it failed, load from the database
@@ -284,7 +311,8 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 		if metrics.EnabledExpensive {
 			meter = &s.db.StorageReads
 		}
-		if enc, err = s.getTrie(db).TryGet(key.Bytes()); err != nil {
+		if enc, err = s.getTrie(db).TryGet(key.Bytes()); err != nil { // fixme: handle trie concurrent safe
+			log.Error("StateObject GetCommittedState get from getTrie fail", "error", err)
 			s.setError(err)
 			return common.Hash{}
 		}
@@ -298,6 +326,7 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 		value.SetBytes(content)
 	}
 	s.setOriginStorage(key, value)
+	log.Info("StateObject GetCommittedState return", "key", key, "value", value)
 	return value
 }
 
@@ -308,10 +337,10 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 		s.fakeStorage[key] = value
 		return
 	}
-	// If the new value is the same as old, don't set
 	prev := s.GetState(db, key)
 	if prev == value {
-		return
+		log.Info("StateObject SetStat same, but continue", "key", key, "prev", prev, "value", value)
+		return // fixme: should check with unconfirmed DB first
 	}
 	// New value is different, update and journal the change
 	s.db.journal.append(storageChange{
@@ -342,6 +371,7 @@ func (s *StateObject) SetStorage(storage map[common.Hash]common.Hash) {
 
 func (s *StateObject) setState(key, value common.Hash) {
 	s.dirtyStorage[key] = value
+	log.Info("StateObject setState dirtyStorage", "key", key, "value", value)
 }
 
 // finalise moves all dirty storage slots into the pending area to be hashed or
@@ -350,7 +380,7 @@ func (s *StateObject) finalise(prefetch bool) {
 	slotsToPrefetch := make([][]byte, 0, len(s.dirtyStorage))
 	for key, value := range s.dirtyStorage {
 		s.pendingStorage[key] = value
-		if value != s.originStorage[key] {
+		if originVal, _ := s.getOriginStorage(key); value != originVal {
 			slotsToPrefetch = append(slotsToPrefetch, common.CopyBytes(key[:])) // Copy needed for closure
 		}
 	}
@@ -386,11 +416,12 @@ func (s *StateObject) updateTrie(db Database) Trie {
 
 	usedStorage := make([][]byte, 0, len(s.pendingStorage))
 	for key, value := range s.pendingStorage {
+		// log.Warn("StateObject updateTrie pendingStorage", "addr", s.address, "key", key, "value", value)
 		// Skip noop changes, persist actual changes
-		if value == s.originStorage[key] {
+		if originValue, _ := s.getOriginStorage(key); value == originValue {
 			continue
 		}
-		s.originStorage[key] = value
+		s.setOriginStorage(key, value)
 		var v []byte
 		if (value == common.Hash{}) {
 			s.setError(tr.TryDelete(key[:]))
@@ -504,6 +535,19 @@ func (s *StateObject) setBalance(amount *big.Int) {
 
 // Return the gas back to the origin. Used by the Virtual machine or Closures
 func (s *StateObject) ReturnGas(gas *big.Int) {}
+
+func (s *StateObject) lightCopy(db *StateDB) *StateObject {
+	log.Info("StateObject lightCopy", "txIndex", db.txIndex, "addr", s.address)
+	stateObject := newObject(db, s.address, s.data)
+	if s.trie != nil {
+		stateObject.trie = db.db.CopyTrie(s.trie) // fixme: trie not needed to light copy
+	}
+	stateObject.code = s.code
+	stateObject.suicided = s.suicided
+	stateObject.dirtyCode = s.dirtyCode
+	stateObject.deleted = s.deleted
+	return stateObject
+}
 
 func (s *StateObject) deepCopy(db *StateDB) *StateObject {
 	stateObject := newObject(db, s.address, s.data)
