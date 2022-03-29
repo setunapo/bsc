@@ -155,7 +155,13 @@ func (ch createObjectChange) dirtied() *common.Address {
 }
 
 func (ch resetObjectChange) revert(s *StateDB) {
-	s.SetStateObject(ch.prev)
+	if s.parallel.isSlotDB {
+		// ch.prev must be from dirtiedStateObjectsInSlot, put it back
+		s.parallel.dirtiedStateObjectsInSlot[ch.prev.address] = ch.prev
+	} else {
+		// ch.prev was got from main DB, put it back to main DB.
+		s.SetStateObject(ch.prev)
+	}
 	if !ch.prevdestruct && s.snap != nil {
 		delete(s.snapDestructs, ch.prev.address)
 	}

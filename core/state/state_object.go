@@ -197,7 +197,7 @@ type Account struct {
 // newObject creates a state object.
 func newObject(db *StateDB, isParallel bool, address common.Address, data Account) *StateObject {
 	if data.Balance == nil {
-		data.Balance = new(big.Int)
+		data.Balance = new(big.Int) // todo: why not common.Big0?
 	}
 	if data.CodeHash == nil {
 		data.CodeHash = emptyCodeHash
@@ -284,6 +284,7 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 	if dirty {
 		return value
 	}
+
 	// Otherwise return the entry's original value
 	return s.GetCommittedState(db, key)
 }
@@ -353,9 +354,12 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 		//   1) resurrect happened, and new slot values were set -- those should
 		//      have been handles via pendingStorage above.
 		//   2) we don't have new values, and can deliver empty response back
-		if _, destructed := s.db.snapDestructs[s.address]; destructed {
+		s.db.snapParallelLock.RLock()
+		if _, destructed := s.db.snapDestructs[s.address]; destructed { // fixme: use sync.Map, instead of RWMutex?
+			s.db.snapParallelLock.RUnlock()
 			return common.Hash{}
 		}
+		s.db.snapParallelLock.RUnlock()
 		enc, err = s.db.snap.Storage(s.addrHash, crypto.Keccak256Hash(key.Bytes()))
 	}
 	// If snapshot unavailable or reading from it failed, load from the database
@@ -394,7 +398,14 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 		return
 	}
 	// If the new value is the same as old, don't set
-	prev := s.GetState(db, key)
+	// In parallel mode, it has to get from StateDB, in case:
+	//  a.the Slot did not set the key before and try to set it to `val_1`
+	//  b.Unconfirmed DB has set the key to `val_2`
+	//  c.if we use StateObject.GetState, and the key load from the main DB is `val_1`
+	//    this `SetState could be skipped`
+	//  d.Finally, the key's value will be `val_2`, while it should be `val_1`
+	// such as: https://bscscan.com/txs?block=2491181
+	prev := s.db.GetState(s.address, key)
 	if prev == value {
 		return
 	}
@@ -404,6 +415,10 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 		key:      key,
 		prevalue: prev,
 	})
+	if s.db.parallel.isSlotDB {
+		s.db.parallel.kvChangesInSlot[s.address][key] = struct{}{} // should be moved to here, after `s.db.GetState()`
+	}
+
 	s.setState(key, value)
 }
 
@@ -484,7 +499,7 @@ func (s *StateObject) updateTrie(db Database) Trie {
 			return true
 		}
 
-		s.originStorage.StoreValue(k.(common.Hash), v.(common.Hash))
+		s.setOriginStorage(key, value)
 
 		var vs []byte
 		if (value == common.Hash{}) {
@@ -602,6 +617,19 @@ func (s *StateObject) setBalance(amount *big.Int) {
 // Return the gas back to the origin. Used by the Virtual machine or Closures
 func (s *StateObject) ReturnGas(gas *big.Int) {}
 
+func (s *StateObject) lightCopy(db *StateDB) *StateObject {
+	stateObject := newObject(db, s.isParallel, s.address, s.data)
+	if s.trie != nil {
+		// fixme: no need to copy trie for light copy, since light copied object won't access trie DB
+		stateObject.trie = db.db.CopyTrie(s.trie)
+	}
+	stateObject.code = s.code
+	stateObject.suicided = false        // should be false
+	stateObject.dirtyCode = s.dirtyCode // it is not used in slot, but keep it is ok
+	stateObject.deleted = false         // should be false
+	return stateObject
+}
+
 func (s *StateObject) deepCopy(db *StateDB) *StateObject {
 	stateObject := newObject(db, s.isParallel, s.address, s.data)
 	if s.trie != nil {
@@ -619,9 +647,12 @@ func (s *StateObject) deepCopy(db *StateDB) *StateObject {
 
 func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys StateKeys) {
 	for key := range keys {
-		// better to do s.GetState(db, key) to load originStorage for this key?
-		// since originStorage was in dirtyObjs, but it works even originStorage miss the state object.
-		s.SetState(db, key, dirtyObjs.GetState(db, key))
+		// In parallel mode, always GetState by StateDB, not by StateObject directly,
+		// since it the KV could exist in unconfirmed DB.
+		// But here, it should be ok, since the KV should be changed and valid in the SlotDB,
+		// we still  do GetState by StateDB, it is not an issue.
+		val := dirtyObjs.db.GetState(s.address, key)
+		s.SetState(db, key, val)
 	}
 }
 
