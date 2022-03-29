@@ -402,7 +402,8 @@ type SlotState struct {
 	pendingTxReqList   []*ParallelTxRequest // maintained by dispatcher for dispatch policy
 	mergedChangeList   []state.SlotChangeList
 	slotdbChan         chan *state.StateDB // dispatch will create and send this slotDB to slot
-	// txReqUnits         []*ParallelDispatchUnit // only dispatch can access
+	// txReqUnits         []*ParallelDispatchUnit // only dispatch can accesssd
+	unconfirmedStateDBs map[int]*state.StateDB
 }
 
 type ParallelTxResult struct {
@@ -463,7 +464,7 @@ func (p *ParallelStateProcessor) init() {
 func (p *ParallelStateProcessor) hasStateConflict(readDb *state.StateDB, changeList state.SlotChangeList) bool {
 	traceMsg := "hasStateConflict"
 	defer debug.Handler.StartRegionAuto(traceMsg)()
-
+	log.Debug("hasStateConflict")
 	// check KV change
 	reads := readDb.StateReadsInSlot()
 	writes := changeList.StateChangeSet
@@ -762,7 +763,7 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 		if result.updateSlotDB {
 			// the target slot is waiting for new slotDB
 			slotState := p.slotState[result.slotIndex]
-			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, p.mergedTxIndex, result.keepSystem, result.slotIndex)
+			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, p.mergedTxIndex, result.keepSystem, result.slotIndex, slotState.unconfirmedStateDBs)
 			slotState.slotdbChan <- slotDB
 			continue
 		}
@@ -811,7 +812,6 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 
 	evm, result, err := applyTransactionStageExecution(txReq.msg, gpSlot, slotDB, vmenv)
 	log.Debug("In Slot, Stage Execution done", "Slot", slotIndex, "txIndex", txReq.txIndex, "slotDB.baseTxIndex", slotDB.BaseTxIndex())
-
 	return &ParallelTxResult{
 		updateSlotDB: false,
 		slotIndex:    slotIndex,
@@ -849,12 +849,14 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 	systemAddrConflict := false
 	log.Debug("Shadow Stage Execution done, do conflict check", "Slot", slotIndex, "txIndex", txIndex)
 	if slotDB.SystemAddressRedo() {
+		log.Info("Stage Execution conflict for SystemAddressRedo", "Slot", slotIndex,
+			"txIndex", txIndex)
 		hasConflict = true
 		systemAddrConflict = true
 	} else {
 		region := debug.Handler.StartTrace("ConfilctDetect")
 		for index := 0; index < p.parallelNum; index++ {
-			// log.Debug("Shadow conflict check", "Slot", slotIndex, "txIndex", txIndex)
+			log.Debug("Shadow conflict check", "Slot", slotIndex, "txIndex", txIndex)
 			// check all finalizedDb from current slot's
 			for _, changeList := range p.slotState[index].mergedChangeList {
 				// log.Debug("Shadow conflict check", "changeList.TxIndex", changeList.TxIndex,
@@ -862,6 +864,33 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 				if changeList.TxIndex <= slotDB.BaseTxIndex() {
 					continue
 				}
+				// do unconfirmed check, if slotDB accessed the stateDB is bad, it will be marked conflict
+				// fixme: can be more precious, check the redo stateDB
+				// in same slot, if the db is referenced and it is valid, we can skip it for CF
+				if slotIndex == index { // fixme: more strict...
+					if _, ok := slotDB.UnconfirmedRefList()[changeList.TxIndex]; ok {
+						log.Info("Shadow conflict check", "changeList.TxIndex's DB is referenced", changeList.TxIndex, " by TxIndex", txIndex)
+						// check if the ChangeList's DB is referred or not
+						unconfirmedDB, ok := p.slotState[index].unconfirmedStateDBs[changeList.TxIndex]
+						if !ok {
+							log.Error("Shadow conflict check, tx not in slot", "slotIndex", index, "changeList.TxIndex", changeList.TxIndex)
+						}
+						if unconfirmedDB.Invalid { // redo, the refered stateDB is bad.
+							log.Info("Stage Execution conflict for unconfirmed", "Slot", slotIndex,
+								"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
+								"conflict slot", index, "conflict TxIndex", changeList.TxIndex)
+							hasConflict = true
+							// fixme, if invalid, we still can check if the detail referenced State is change?
+							break
+						}
+						// unconfirmedDB for changeList is valid, skip conflict check for it.
+						log.Info("Stage Execution skip conflict check for confirmed DB reference", "Slot", slotIndex,
+							"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
+							"conflict slot", index, "conflict TxIndex", changeList.TxIndex)
+						continue
+					}
+				}
+
 				if p.hasStateConflict(slotDB, changeList) {
 					log.Debug("Stage Execution conflict", "Slot", slotIndex,
 						"txIndex", txIndex, " conflict slot", index, "slotDB.baseTxIndex", slotDB.BaseTxIndex(),
@@ -869,6 +898,7 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 					hasConflict = true
 					break
 				}
+
 			}
 			if hasConflict {
 				break
@@ -878,6 +908,7 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 	}
 
 	if hasConflict {
+		slotDB.Invalid = true
 		p.debugConflictRedoNum++
 		// re-run should not have conflict, since it has the latest world state.
 		redoResult := &ParallelTxResult{
@@ -954,6 +985,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				txReq.slotDB = <-curSlot.slotdbChan
 			}
 			result := p.executeInSlot(slotIndex, txReq)
+			curSlot.unconfirmedStateDBs[txReq.txIndex] = txReq.slotDB
 			curSlot.pendingConfirmChan <- result
 		}
 	}
@@ -989,6 +1021,7 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	for _, slot := range p.slotState {
 		slot.mergedChangeList = make([]state.SlotChangeList, 0)
 		slot.pendingTxReqList = make([]*ParallelTxRequest, 0)
+		slot.unconfirmedStateDBs = make(map[int]*state.StateDB)
 	}
 }
 

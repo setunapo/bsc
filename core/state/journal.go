@@ -166,7 +166,12 @@ func (ch resetObjectChange) dirtied() *common.Address {
 }
 
 func (ch suicideChange) revert(s *StateDB) {
-	obj := s.getStateObject(*ch.account)
+	var obj *StateObject
+	if s.parallel.isSlotDB {
+		obj = s.parallel.dirtiedStateObjectsInSlot[*ch.account]
+	} else {
+		obj = s.getStateObject(*ch.account)
+	}
 	if obj != nil {
 		obj.suicided = ch.prev
 		obj.setBalance(ch.prevbalance)
@@ -187,7 +192,13 @@ func (ch touchChange) dirtied() *common.Address {
 }
 
 func (ch balanceChange) revert(s *StateDB) {
-	s.getStateObject(*ch.account).setBalance(ch.prev)
+	var obj *StateObject
+	if s.parallel.isSlotDB {
+		obj = s.parallel.dirtiedStateObjectsInSlot[*ch.account]
+	} else {
+		obj = s.getStateObject(*ch.account)
+	}
+	obj.setBalance(ch.prev)
 }
 
 func (ch balanceChange) dirtied() *common.Address {
@@ -195,7 +206,14 @@ func (ch balanceChange) dirtied() *common.Address {
 }
 
 func (ch nonceChange) revert(s *StateDB) {
-	s.getStateObject(*ch.account).setNonce(ch.prev)
+	var obj *StateObject
+	if s.parallel.isSlotDB {
+		obj = s.parallel.dirtiedStateObjectsInSlot[*ch.account]
+	} else {
+		obj = s.getStateObject(*ch.account)
+	}
+
+	obj.setNonce(ch.prev)
 }
 
 func (ch nonceChange) dirtied() *common.Address {
@@ -203,7 +221,13 @@ func (ch nonceChange) dirtied() *common.Address {
 }
 
 func (ch codeChange) revert(s *StateDB) {
-	s.getStateObject(*ch.account).setCode(common.BytesToHash(ch.prevhash), ch.prevcode)
+	var obj *StateObject
+	if s.parallel.isSlotDB {
+		obj = s.parallel.dirtiedStateObjectsInSlot[*ch.account]
+	} else {
+		obj = s.getStateObject(*ch.account)
+	}
+	obj.setCode(common.BytesToHash(ch.prevhash), ch.prevcode)
 }
 
 func (ch codeChange) dirtied() *common.Address {
@@ -211,7 +235,13 @@ func (ch codeChange) dirtied() *common.Address {
 }
 
 func (ch storageChange) revert(s *StateDB) {
-	s.getStateObject(*ch.account).setState(ch.key, ch.prevalue)
+	var obj *StateObject
+	if s.parallel.isSlotDB {
+		obj = s.parallel.dirtiedStateObjectsInSlot[*ch.account]
+	} else {
+		obj = s.getStateObject(*ch.account)
+	}
+	obj.setState(ch.key, ch.prevalue)
 }
 
 func (ch storageChange) dirtied() *common.Address {

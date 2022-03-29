@@ -26,6 +26,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -86,7 +87,6 @@ type StateObject struct {
 	pendingStorage Storage // Storage entries that need to be flushed to disk, at the end of an entire block
 	dirtyStorage   Storage // Storage entries that have been modified in the current transaction execution
 	fakeStorage    Storage // Fake storage which constructed by caller for debugging purpose.
-
 	// Cache flags.
 	// When an object is marked suicided it will be delete from the trie
 	// during the "update" phase of the state transition.
@@ -287,8 +287,8 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 		if metrics.EnabledExpensive {
 			meter = &s.db.StorageReads
 		}
-		if enc, err = s.getTrie(db).TryGet(key.Bytes()); err != nil {
-			// log.Info("StateObject GetCommittedState get from getTrie fail", "error", err)
+		if enc, err = s.getTrie(db).TryGet(key.Bytes()); err != nil { // fixme: handle trie concurrent safe
+			log.Error("StateObject GetCommittedState get from getTrie fail", "error", err)
 			s.setError(err)
 			return common.Hash{}
 		}
@@ -317,6 +317,7 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 	// If the new value is the same as old, don't set
 	prev := s.GetState(db, key)
 	if prev == value {
+		log.Info("StateObject SetStat same", "key", key, "prev", prev, "value", value)
 		return
 	}
 	// New value is different, update and journal the change
@@ -348,6 +349,7 @@ func (s *StateObject) SetStorage(storage map[common.Hash]common.Hash) {
 
 func (s *StateObject) setState(key, value common.Hash) {
 	s.dirtyStorage[key] = value
+	log.Info("StateObject setState dirtyStorage", "key", key, "value", value)
 }
 
 // finalise moves all dirty storage slots into the pending area to be hashed or
@@ -513,6 +515,17 @@ func (s *StateObject) setBalance(amount *big.Int) {
 // Return the gas back to the origin. Used by the Virtual machine or Closures
 func (s *StateObject) ReturnGas(gas *big.Int) {}
 
+func (s *StateObject) lightCopy(db *StateDB) *StateObject {
+	stateObject := newObject(db, s.address, s.data)
+	if s.trie != nil {
+		stateObject.trie = db.db.CopyTrie(s.trie) // fixme: trie not needed to light copy
+	}
+	stateObject.code = s.code
+	stateObject.suicided = s.suicided
+	stateObject.dirtyCode = s.dirtyCode
+	stateObject.deleted = s.deleted
+	return stateObject
+}
 func (s *StateObject) deepCopy(db *StateDB) *StateObject {
 	// traceMsg := "StateObject.deepCopy"
 	// defer debug.Handler.StartRegionAuto(traceMsg)()
