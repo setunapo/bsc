@@ -266,6 +266,8 @@ func NewSlotDB(db *StateDB, systemAddr common.Address, baseTxIndex int,
 	slotDB.parallel.systemAddress = systemAddr
 	slotDB.parallel.systemAddressOpsCount = 0
 	slotDB.parallel.keepSystemAddressBalance = keepSystem
+	slotDB.storagePool = NewStoragePool()
+	slotDB.EnableWriteOnSharedStorage()
 	for txIndex, unconfirmedDB := range unconfirmedDBs {
 		if txIndex > baseTxIndex {
 			slotDB.parallel.unconfirmedDBInShot[txIndex] = unconfirmedDB
@@ -296,7 +298,7 @@ func NewWithSharedPool(root common.Hash, db Database, snaps *snapshot.Tree) (*St
 }
 
 func newStateDB(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) {
-	log.Debug("newStateDB")
+	log.Info("newStateDB")
 	sdb := &StateDB{
 		db:                  db,
 		originalRoot:        root,
@@ -325,6 +327,7 @@ func newStateDB(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, 
 		return nil, err
 	}
 	sdb.trie = tr
+	sdb.EnableWriteOnSharedStorage() // fixme:remove when s.originStorage[key] is enabled
 	return sdb, nil
 }
 

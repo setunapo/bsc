@@ -215,8 +215,10 @@ func (s *StateObject) getOriginStorage(key common.Hash) (common.Hash, bool) {
 		if !ok {
 			return common.Hash{}, false
 		}
-		s.originStorage[key] = val.(common.Hash)
+		// s.originStorage[key] = val.(common.Hash)
 		return val.(common.Hash), true
+	} else {
+		log.Info("getOriginStorage sharedOriginStorage == nil", "SlotIndex", s.db.parallel.SlotIndex)
 	}
 	return common.Hash{}, false
 }
@@ -224,8 +226,11 @@ func (s *StateObject) getOriginStorage(key common.Hash) (common.Hash, bool) {
 func (s *StateObject) setOriginStorage(key common.Hash, value common.Hash) {
 	if s.db.writeOnSharedStorage && s.sharedOriginStorage != nil {
 		s.sharedOriginStorage.Store(key, value)
+	} else {
+		log.Info("getOriginStorage setOriginStorage == nil", "SlotIndex", s.db.parallel.SlotIndex)
+
 	}
-	s.originStorage[key] = value
+	// s.originStorage[key] = value
 }
 
 // GetCommittedState retrieves a value from the committed account storage trie.
@@ -358,7 +363,7 @@ func (s *StateObject) finalise(prefetch bool) {
 	slotsToPrefetch := make([][]byte, 0, len(s.dirtyStorage))
 	for key, value := range s.dirtyStorage {
 		s.pendingStorage[key] = value
-		if value != s.originStorage[key] {
+		if originVal, _ := s.getOriginStorage(key); value != originVal {
 			slotsToPrefetch = append(slotsToPrefetch, common.CopyBytes(key[:])) // Copy needed for closure
 		}
 	}
@@ -397,10 +402,10 @@ func (s *StateObject) updateTrie(db Database) Trie {
 	for key, value := range s.pendingStorage {
 		// log.Info("StateObject updateTrie pendingStorage", "key", key, "value", value)
 		// Skip noop changes, persist actual changes
-		if value == s.originStorage[key] {
+		if originValue, _ := s.getOriginStorage(key); value == originValue {
 			continue
 		}
-		s.originStorage[key] = value
+		s.setOriginStorage(key, value)
 		var v []byte
 		if (value == common.Hash{}) {
 			s.setError(tr.TryDelete(key[:]))
