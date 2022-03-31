@@ -257,7 +257,7 @@ func NewSlotDB(db *StateDB, systemAddr common.Address, baseTxIndex int,
 	defer debug.Handler.StartRegionAuto(traceMsg)()
 	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(slotIndex) +
 		" NewSlotDB txIndex:" + strconv.Itoa(baseTxIndex))
-	log.Debug("NewSlotDB", " baseTxIndex:", baseTxIndex, "keepSystem", keepSystem)
+	log.Info("NewSlotDB", " baseTxIndex:", baseTxIndex, "keepSystem", keepSystem)
 
 	slotDB := db.CopyForSlot()
 	slotDB.originalRoot = db.originalRoot
@@ -344,6 +344,10 @@ func (s *StateDB) RevertSlotDB(from common.Address) {
 	s.parallel.balanceChangesInSlot[from] = struct{}{}
 	s.parallel.addrStateChangesInSlot = make(map[common.Address]struct{})
 	s.parallel.nonceChangesInSlot = make(map[common.Address]struct{})
+	// fixme: keep object for systemAddress
+	// selfStateObject := s.parallel.dirtiedStateObjectsInSlot[from]
+	// s.parallel.dirtiedStateObjectsInSlot = make(map[common.Address]*StateObject, 1)
+	// s.parallel.dirtiedStateObjectsInSlot[from] = selfStateObject
 }
 
 // PrepareForParallel prepares for state db to be used in parallel execution mode.
@@ -668,11 +672,17 @@ func (s *StateDB) GetKVFromUnconfirmedStateDB(addr common.Address, key common.Ha
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
 			s.parallel.unconfirmedRefList[db.txIndex] = struct{}{} // no matter addr exist or not, we have reference the DB.
 			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok {
-				if val, ok := obj.dirtyStorage[key]; ok {
-					log.Info("GetKVFromUnconfirmedStateDB get from unconfirmed DB",
-						"my txIndex", s.txIndex, "DB's txIndex", i, "addr", addr,
-						"key", key, "val", val)
-					return val, ok
+				if _, ok := db.parallel.stateChangesInSlot[addr]; ok {
+					if val, ok := obj.dirtyStorage[key]; ok {
+						log.Info("GetKVFromUnconfirmedStateDB get from unconfirmed DB",
+							"my txIndex", s.txIndex, "DB's txIndex", i, "addr", addr,
+							"key", key, "val", val)
+						return val, ok
+					} else {
+						log.Info("GetKVFromUnconfirmedStateDB addr in stateChangesInSlot but not in dirty",
+							"my txIndex", s.txIndex, "DB's txIndex", i, "addr", addr,
+							"key", key)
+					}
 				}
 			}
 		}
