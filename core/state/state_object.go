@@ -190,6 +190,7 @@ func (s *StateObject) getTrie(db Database) Trie {
 }
 
 // GetState retrieves a value from the account storage trie.
+// Order: lightCopy's dirty -> mainStateDB's dirty -> unconfirmed DB -> committed
 func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 	// If the fake storage is set, only lookup the state here(in the debugging mode)
 	if s.fakeStorage != nil {
@@ -200,6 +201,14 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 	if dirty {
 		// log.Info("StateObject GetState dirty", "value", value)
 		return value
+	}
+	// fixme: if s is light copied, access mainStateDB's stateobject's dirty, if lightCopy's dirty missed
+	if !s.inMainDB {
+		if mainObj, ok := s.db.loadStateObj(s.address); ok {
+			if val, ok := mainObj.dirtyStorage[key]; ok {
+				return val
+			}
+		}
 	}
 
 	// unconfirmed DB is committed too.

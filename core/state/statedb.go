@@ -1266,7 +1266,7 @@ func (s *StateDB) SetState(addr common.Address, key, value common.Hash) {
 		traceMsg := "StateDB.SetState"
 		defer debug.Handler.StartRegionAuto(traceMsg)()
 	*/
-	stateObject := s.GetOrNewStateObject(addr)
+	stateObject := s.GetOrNewStateObject(addr) // attention: if StateObject's lightCopy, its storage is only a part of the full storage,
 	if stateObject != nil {
 		if s.parallel.isSlotDB {
 			log.Info("SetState", "SlotIndex", s.parallel.SlotIndex, "txIndex", s.txIndex,
@@ -1275,6 +1275,9 @@ func (s *StateDB) SetState(addr common.Address, key, value common.Hash) {
 			if s.parallel.baseTxIndex+1 == s.txIndex {
 				// we check if state is unchanged
 				// only when current transaction is the next transaction to be committed
+				// fixme: there is a bug, block: 14,962,284,
+				//        stateObject is in dirty (light copy), but the key is in mainStateDB
+				//        stateObject dirty -> committed, will skip mainStateDB dirty
 				if stateObject.GetState(s.db, key) == value {
 					log.Debug("Skip set same state", "baseTxIndex", s.parallel.baseTxIndex,
 						"txIndex", s.txIndex)
