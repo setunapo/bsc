@@ -698,6 +698,11 @@ func (s *StateDB) GetKVFromUnconfirmedStateDB(addr common.Address, key common.Ha
 }
 
 func (s *StateDB) GetBalanceFromUnconfirmedStateDB(addr common.Address) *StateObject {
+	if addr == s.parallel.systemAddress {
+		// never get systemaddress from unconfirmed DB
+		return nil
+	}
+
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
 			s.parallel.unconfirmedRefList[db.txIndex] = struct{}{}
@@ -714,6 +719,10 @@ func (s *StateDB) GetBalanceFromUnconfirmedStateDB(addr common.Address) *StateOb
 }
 
 func (s *StateDB) GetStateObjectFromUnconfirmedStateDB(addr common.Address) *StateObject {
+	if addr == s.parallel.systemAddress {
+		// never get systemaddress from unconfirmed DB
+		return nil
+	}
 	s.parallel.addrStateReadsInSlot[addr] = struct{}{}
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
