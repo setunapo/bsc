@@ -403,7 +403,7 @@ type SlotState struct {
 	mergedChangeList   []state.SlotChangeList
 	slotdbChan         chan *state.StateDB // dispatch will create and send this slotDB to slot
 	// txReqUnits         []*ParallelDispatchUnit // only dispatch can accesssd
-	unconfirmedStateDBs map[int]*state.StateDB
+	unconfirmedStateDBs *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
 }
 
 type ParallelTxResult struct {
@@ -763,7 +763,9 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 		if result.updateSlotDB {
 			// the target slot is waiting for new slotDB
 			slotState := p.slotState[result.slotIndex]
-			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, p.mergedTxIndex, result.keepSystem, result.slotIndex, slotState.unconfirmedStateDBs)
+			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress,
+				result.txReq.txIndex, p.mergedTxIndex,
+				result.keepSystem, result.slotIndex, slotState.unconfirmedStateDBs)
 			slotState.slotdbChan <- slotDB
 			continue
 		}
@@ -811,6 +813,12 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 	gpSlot := new(GasPool).AddGas(txReq.gasLimit)
 
 	evm, result, err := applyTransactionStageExecution(txReq.msg, gpSlot, slotDB, vmenv)
+	if result.Failed() {
+		// if Tx is reverted, all its state change will be discarded
+		log.Info("TX reverted? in normal slot", "Slot", slotIndex, "txIndex", txReq.txIndex, "result.Err", result.Err)
+		slotDB.RevertSlotDB(txReq.msg.From())
+	}
+
 	log.Debug("In Slot, Stage Execution done", "Slot", slotIndex, "txIndex", txReq.txIndex, "slotDB.baseTxIndex", slotDB.BaseTxIndex())
 	return &ParallelTxResult{
 		updateSlotDB: false,
@@ -871,11 +879,11 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 					if _, ok := slotDB.UnconfirmedRefList()[changeList.TxIndex]; ok {
 						log.Info("Shadow conflict check", "changeList.TxIndex's DB is referenced", changeList.TxIndex, " by TxIndex", txIndex)
 						// check if the ChangeList's DB is referred or not
-						unconfirmedDB, ok := p.slotState[index].unconfirmedStateDBs[changeList.TxIndex]
+						unconfirmedDB, ok := p.slotState[index].unconfirmedStateDBs.Load(changeList.TxIndex)
 						if !ok {
 							log.Error("Shadow conflict check, tx not in slot", "slotIndex", index, "changeList.TxIndex", changeList.TxIndex)
 						}
-						if unconfirmedDB.Invalid { // redo, the refered stateDB is bad.
+						if unconfirmedDB.(*state.StateDB).Invalid { // redo, the refered stateDB is bad.
 							log.Info("Stage Execution conflict for unconfirmed", "Slot", slotIndex,
 								"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
 								"conflict slot", index, "conflict TxIndex", changeList.TxIndex)
@@ -915,6 +923,7 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 			updateSlotDB: true,
 			keepSystem:   systemAddrConflict,
 			slotIndex:    slotIndex,
+			txReq:        txReq,
 		}
 		p.txResultChan <- redoResult
 		updatedSlotDB := <-p.slotState[slotIndex].slotdbChan
@@ -932,6 +941,13 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 		if txResult.err != nil {
 			log.Error("Stage Execution conflict redo, error", txResult.err)
 		}
+
+		if txResult.result.Failed() {
+			// if Tx is reverted, all its state change will be discarded
+			log.Debug("TX reverted?", "Slot", slotIndex, "txIndex", txIndex,
+				"result.Err", txResult.result.Err)
+			txResult.slotDB.RevertSlotDB(txReq.msg.From())
+		}
 	}
 
 	// goroutine unsafe operation will be handled from here for safety
@@ -948,13 +964,6 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 	txResult.receipt, txResult.err = applyTransactionStageFinalization(txResult.evm, txResult.result,
 		txReq.msg, p.config, txResult.slotDB, header,
 		txReq.tx, txReq.usedGas, txReq.bloomProcessor)
-
-	if txResult.result.Failed() {
-		// if Tx is reverted, all its state change will be discarded
-		log.Debug("TX reverted?", "Slot", slotIndex, "txIndex", txIndex,
-			"result.Err", txResult.result.Err)
-		txResult.slotDB.RevertSlotDB(txReq.msg.From())
-	}
 
 	txResult.updateSlotDB = false
 	return txResult
@@ -980,12 +989,13 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 					updateSlotDB: true,
 					slotIndex:    slotIndex,
 					err:          nil,
+					txReq:        txReq,
 				}
 				p.txResultChan <- result
 				txReq.slotDB = <-curSlot.slotdbChan
 			}
 			result := p.executeInSlot(slotIndex, txReq)
-			curSlot.unconfirmedStateDBs[txReq.txIndex] = txReq.slotDB
+			curSlot.unconfirmedStateDBs.Store(txReq.txIndex, txReq.slotDB)
 			curSlot.pendingConfirmChan <- result
 		}
 	}
@@ -1021,7 +1031,7 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	for _, slot := range p.slotState {
 		slot.mergedChangeList = make([]state.SlotChangeList, 0)
 		slot.pendingTxReqList = make([]*ParallelTxRequest, 0)
-		slot.unconfirmedStateDBs = make(map[int]*state.StateDB)
+		slot.unconfirmedStateDBs = new(sync.Map) // make(map[int]*state.StateDB), fixme: resue not new?
 	}
 }
 
@@ -1030,12 +1040,12 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	debug.Handler.EnableTraceCapture(block.Header().Number.Uint64())
 	traceMsg := "ProcessParallel " + block.Header().Number.String()
 	defer debug.Handler.StartRegionAuto(traceMsg)()
-
 	var (
 		usedGas = new(uint64)
 		header  = block.Header()
 		gp      = new(GasPool).AddGas(block.GasLimit())
 	)
+	log.Warn("ProcessParallel", "block", header.Number)
 	var receipts = make([]*types.Receipt, 0)
 	txNum := len(block.Transactions())
 	p.resetState(txNum, statedb)
@@ -1117,7 +1127,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 
 	// len(commonTxs) could be 0, such as: https://bscscan.com/block/14580486
 	if len(commonTxs) > 0 {
-		log.Info("ProcessParallel tx all done", "block", header.Number, "usedGas", *usedGas,
+		log.Warn("ProcessParallel tx all done", "block", header.Number, "usedGas", *usedGas,
 			"txNum", txNum,
 			"len(commonTxs)", len(commonTxs),
 			"errorNum", p.debugErrorRedoNum,
@@ -1190,7 +1200,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	var receipts = make([]*types.Receipt, 0)
 	txNum := len(block.Transactions())
 	if txNum > 0 {
-		log.Info("Process", "block num", block.Number())
+		log.Warn("Process", "block num", block.Number())
 	}
 	commonTxs := make([]*types.Transaction, 0, txNum)
 	// Iterate over and process the individual transactions

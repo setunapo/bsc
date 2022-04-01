@@ -201,6 +201,15 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 		// log.Info("StateObject GetState dirty", "value", value)
 		return value
 	}
+
+	// unconfirmed DB is committed too.
+	// fixme: it could be mainStateDB's StateObject, but with a SlotDB, cause the slotDB accessed by other Slot, panic
+	// if s.db.parallel.isSlotDB {
+	//	if val, ok := s.db.GetKVFromUnconfirmedStateDB(s.address, key); ok {
+	//		return val
+	//	}
+	//}
+
 	// Otherwise return the entry's original value
 	return s.GetCommittedState(db, key)
 }
@@ -322,8 +331,8 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 	// If the new value is the same as old, don't set
 	prev := s.GetState(db, key)
 	if prev == value {
-		log.Info("StateObject SetStat same", "key", key, "prev", prev, "value", value)
-		return
+		log.Info("StateObject SetStat same, but continue", "key", key, "prev", prev, "value", value)
+		// return  // fixme: should check with unconfirmed DB first
 	}
 	// New value is different, update and journal the change
 	s.db.journal.append(storageChange{
@@ -400,7 +409,7 @@ func (s *StateObject) updateTrie(db Database) Trie {
 
 	usedStorage := make([][]byte, 0, len(s.pendingStorage))
 	for key, value := range s.pendingStorage {
-		// log.Info("StateObject updateTrie pendingStorage", "key", key, "value", value)
+		// log.Warn("StateObject updateTrie pendingStorage", "addr", s.address, "key", key, "value", value)
 		// Skip noop changes, persist actual changes
 		if originValue, _ := s.getOriginStorage(key); value == originValue {
 			continue

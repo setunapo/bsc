@@ -215,7 +215,8 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 	// parent context.
 	steps := 0
 	defer func() {
-		debug.Handler.LogWhenTracing("EVMInterpreter Run steps:" + strconv.Itoa(steps))
+		debug.Handler.LogWhenTracing("EVMInterpreter Run TxIndex=" + strconv.Itoa(in.evm.StateDB.TxIndex()) +
+			" steps:" + strconv.Itoa(steps))
 	}()
 	for {
 		steps++
@@ -283,6 +284,9 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 			if err != nil || !contract.UseGas(dynamicCost) {
 				return nil, ErrOutOfGas
 			}
+			debug.Handler.LogWhenTracing("EVMInterpreter Run TxIndex=" + strconv.Itoa(in.evm.StateDB.TxIndex()) +
+				" opCode:" + op.String() +
+				" dynamicCost:" + strconv.FormatInt(int64(dynamicCost), 10))
 		}
 		if memorySize > 0 {
 			mem.Resize(memorySize)

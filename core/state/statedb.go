@@ -251,15 +251,16 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) 
 
 // NewSlotDB creates a new State DB based on the provided StateDB.
 // With parallel, each execution slot would have its own StateDB.
-func NewSlotDB(db *StateDB, systemAddr common.Address, baseTxIndex int,
-	keepSystem bool, slotIndex int, unconfirmedDBs map[int]*StateDB) *StateDB {
+func NewSlotDB(db *StateDB, systemAddr common.Address, txIndex int, baseTxIndex int,
+	keepSystem bool, slotIndex int, unconfirmedDBs *sync.Map /*map[int]*StateDB*/) *StateDB {
 	traceMsg := "NewSlotDB" // + " txIndex:" + strconv.Itoa(txIndex)
 	defer debug.Handler.StartRegionAuto(traceMsg)()
 	debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(slotIndex) +
 		" NewSlotDB txIndex:" + strconv.Itoa(baseTxIndex))
-	log.Info("NewSlotDB", " baseTxIndex:", baseTxIndex, "keepSystem", keepSystem)
+	log.Info("NewSlotDB", "txIndex", txIndex, "baseTxIndex:", baseTxIndex, "keepSystem", keepSystem)
 
 	slotDB := db.CopyForSlot()
+	slotDB.txIndex = txIndex
 	slotDB.originalRoot = db.originalRoot
 	slotDB.parallel.baseTxIndex = baseTxIndex
 	slotDB.parallel.SlotIndex = slotIndex
@@ -268,9 +269,10 @@ func NewSlotDB(db *StateDB, systemAddr common.Address, baseTxIndex int,
 	slotDB.parallel.keepSystemAddressBalance = keepSystem
 	slotDB.storagePool = NewStoragePool()
 	slotDB.EnableWriteOnSharedStorage()
-	for txIndex, unconfirmedDB := range unconfirmedDBs {
-		if txIndex > baseTxIndex {
-			slotDB.parallel.unconfirmedDBInShot[txIndex] = unconfirmedDB
+	for index := baseTxIndex + 1; index < slotDB.txIndex; index++ { // txIndex
+		unconfirmedDB, ok := unconfirmedDBs.Load(index)
+		if ok {
+			slotDB.parallel.unconfirmedDBInShot[index] = unconfirmedDB.(*StateDB)
 		}
 	}
 
@@ -344,10 +346,14 @@ func (s *StateDB) RevertSlotDB(from common.Address) {
 	s.parallel.balanceChangesInSlot[from] = struct{}{}
 	s.parallel.addrStateChangesInSlot = make(map[common.Address]struct{})
 	s.parallel.nonceChangesInSlot = make(map[common.Address]struct{})
+
 	// fixme: keep object for systemAddress
-	// selfStateObject := s.parallel.dirtiedStateObjectsInSlot[from]
-	// s.parallel.dirtiedStateObjectsInSlot = make(map[common.Address]*StateObject, 1)
-	// s.parallel.dirtiedStateObjectsInSlot[from] = selfStateObject
+	selfStateObject := s.parallel.dirtiedStateObjectsInSlot[from]
+	systemAddress := s.parallel.systemAddress
+	systemStateObject := s.parallel.dirtiedStateObjectsInSlot[systemAddress]
+	s.parallel.dirtiedStateObjectsInSlot = make(map[common.Address]*StateObject, 2)
+	s.parallel.dirtiedStateObjectsInSlot[from] = selfStateObject
+	s.parallel.dirtiedStateObjectsInSlot[systemAddress] = systemStateObject
 }
 
 // PrepareForParallel prepares for state db to be used in parallel execution mode.
@@ -645,7 +651,7 @@ func (s *StateDB) AddPreimage(hash common.Hash, preimage []byte) {
 
 // Preimages returns a list of SHA3 preimages that have been submitted.
 func (s *StateDB) Preimages() map[common.Hash][]byte {
-	log.Debug("StateDB.Preimages")
+	log.Info("StateDB.Preimages")
 	return s.preimages
 }
 
@@ -727,15 +733,20 @@ func (s *StateDB) Exist(addr common.Address) bool {
 	if s.parallel.isSlotDB {
 		// 1.Get from dirty
 		if _, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
+			log.Info("Exist in dirty", "txIndex", s.txIndex, "baseTxIndex:", s.parallel.baseTxIndex)
 			return true
 		}
 		// 2.Get from uncomfirmed
 		if obj := s.GetStateObjectFromUnconfirmedStateDB(addr); obj != nil {
+			log.Info("Exist in unconfirmed", "txIndex", s.txIndex, "baseTxIndex:", s.parallel.baseTxIndex)
 			return true
 		}
 	}
 	// 3.Get from main StateDB
 	ret := s.getStateObject(addr) != nil
+	log.Info("Exist main StateDB", "txIndex", s.txIndex,
+		"baseTxIndex:", s.parallel.baseTxIndex,
+		"return", ret)
 	if ret {
 		debug.Handler.LogWhenTracing("Slot=" + strconv.Itoa(s.parallel.SlotIndex) +
 			" StateDB.Exist addr:" + addr.String() + " true")
@@ -754,15 +765,23 @@ func (s *StateDB) Empty(addr common.Address) bool {
 	if s.parallel.isSlotDB {
 		// 1.Get from dirty
 		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
+			log.Info("Empty in dirty", "txIndex", s.txIndex, "baseTxIndex:", s.parallel.baseTxIndex,
+				"return", obj.empty())
+
 			return obj.empty()
 		}
 		// 2.Get from uncomfirmed
 		if obj := s.GetStateObjectFromUnconfirmedStateDB(addr); obj != nil {
+			log.Info("Empty in confirmed", "txIndex", s.txIndex, "baseTxIndex:", s.parallel.baseTxIndex,
+				"return", obj.empty())
 			return obj.empty()
 		}
 	}
 
 	so := s.getStateObject(addr)
+	log.Info("Empty in main DB", "txIndex", s.txIndex, "baseTxIndex:", s.parallel.baseTxIndex,
+		"return", (so == nil || so.empty()))
+
 	return so == nil || so.empty()
 }
 
@@ -1268,6 +1287,8 @@ func (s *StateDB) SetState(addr common.Address, key, value common.Hash) {
 			obj.SetState(s.db, key, value)
 			return
 		}
+		log.Info("SetState", "SlotIndex", s.parallel.SlotIndex, "txIndex", s.txIndex,
+			"addr", addr, "key", key, "value", value)
 		stateObject.SetState(s.db, key, value)
 	}
 }
@@ -1454,7 +1475,7 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *StateObject {
 		}
 	}
 	// Insert into the live set
-	obj := newObject(s, addr, *data)
+	obj := newObject(s, addr, *data) // fixme: concurrent create object
 	s.storeStateObj(addr, obj)
 	return obj
 }
@@ -1906,7 +1927,7 @@ func (s *StateDB) AccountsIntermediateRoot() {
 			wg.Add(1)
 			tasks <- func() {
 				obj.updateRoot(s.db)
-				log.Info("AccountsIntermediateRoot", "addr", obj.address,
+				log.Warn("AccountsIntermediateRoot", "addr", obj.address,
 					"deleted", obj.deleted,
 					"balance", obj.data.Balance,
 					"nonce", obj.data.Nonce,
