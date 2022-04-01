@@ -69,7 +69,7 @@ type StateObject struct {
 	addrHash common.Hash // hash of ethereum address of the account
 	data     Account
 	db       *StateDB
-
+	inMainDB bool
 	// DB error.
 	// State objects are used by the consensus core and VM which are
 	// unable to deal with database-level errors. Any error that occurs
@@ -204,11 +204,12 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 
 	// unconfirmed DB is committed too.
 	// fixme: it could be mainStateDB's StateObject, but with a SlotDB, cause the slotDB accessed by other Slot, panic
-	// if s.db.parallel.isSlotDB {
-	//	if val, ok := s.db.GetKVFromUnconfirmedStateDB(s.address, key); ok {
-	//		return val
-	//	}
-	//}
+	if s.db.parallel.isSlotDB && !s.inMainDB {
+		// if it is main StateObject, do not get from unconfirmed DB
+		if val, ok := s.db.GetKVFromUnconfirmedStateDB(s.address, key); ok {
+			return val
+		}
+	}
 
 	// Otherwise return the entry's original value
 	return s.GetCommittedState(db, key)
@@ -328,11 +329,10 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 		s.fakeStorage[key] = value
 		return
 	}
-	// If the new value is the same as old, don't set
 	prev := s.GetState(db, key)
 	if prev == value {
 		log.Info("StateObject SetStat same, but continue", "key", key, "prev", prev, "value", value)
-		// return  // fixme: should check with unconfirmed DB first
+		return // fixme: should check with unconfirmed DB first
 	}
 	// New value is different, update and journal the change
 	s.db.journal.append(storageChange{

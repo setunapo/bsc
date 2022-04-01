@@ -96,6 +96,7 @@ func (s *StateDB) loadStateObj(addr common.Address) (*StateObject, bool) {
 // storeStateObj is the entry for storing state object to stateObjects in StateDB or stateObjects in parallel
 func (s *StateDB) storeStateObj(addr common.Address, stateObject *StateObject) {
 	if s.isParallel {
+		stateObject.inMainDB = true
 		s.parallel.stateObjects.Store(addr, stateObject)
 	} else {
 		s.stateObjects[addr] = stateObject

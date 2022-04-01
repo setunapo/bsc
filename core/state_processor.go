@@ -944,7 +944,7 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 
 		if txResult.result.Failed() {
 			// if Tx is reverted, all its state change will be discarded
-			log.Debug("TX reverted?", "Slot", slotIndex, "txIndex", txIndex,
+			log.Info("TX reverted?", "Slot", slotIndex, "txIndex", txIndex,
 				"result.Err", txResult.result.Err)
 			txResult.slotDB.RevertSlotDB(txReq.msg.From())
 		}
