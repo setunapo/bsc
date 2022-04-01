@@ -203,13 +203,13 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 		return value
 	}
 	// fixme: if s is light copied, access mainStateDB's stateobject's dirty, if lightCopy's dirty missed
-	if !s.inMainDB {
-		if mainObj, ok := s.db.loadStateObj(s.address); ok {
-			if val, ok := mainObj.dirtyStorage[key]; ok {
-				return val
-			}
+	// if !s.inMainDB {
+	if mainObj, ok := s.db.loadStateObj(s.address); ok {
+		if val, ok := mainObj.dirtyStorage[key]; ok {
+			return val
 		}
 	}
+	//}
 
 	// unconfirmed DB is committed too.
 	// fixme: it could be mainStateDB's StateObject, but with a SlotDB, cause the slotDB accessed by other Slot, panic
