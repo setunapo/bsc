@@ -819,7 +819,9 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 		slotDB.RevertSlotDB(txReq.msg.From())
 	}
 
-	log.Debug("In Slot, Stage Execution done", "Slot", slotIndex, "txIndex", txReq.txIndex, "slotDB.baseTxIndex", slotDB.BaseTxIndex())
+	log.Debug("In Slot, Stage Execution done", "Slot", slotIndex, "txIndex", txReq.txIndex,
+		"slotDB.baseTxIndex", slotDB.BaseTxIndex(),
+		"result.UsedGas", result.UsedGas)
 	return &ParallelTxResult{
 		updateSlotDB: false,
 		slotIndex:    slotIndex,
@@ -935,6 +937,8 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 
 		blockContext := NewEVMBlockContext(header, p.bc, nil) // can share blockContext within a block for efficiency
 		vmenv := vm.NewEVM(blockContext, vm.TxContext{}, updatedSlotDB, p.config, txReq.vmConfig)
+		log.Info("Shadow conflict redo", "Slot", slotIndex,
+			"txReq.txIndex", txReq.txIndex, "slotDB.baseTxIndex", slotDB.BaseTxIndex())
 		txResult.evm, txResult.result, txResult.err = applyTransactionStageExecution(txReq.msg,
 			gpSlot, updatedSlotDB, vmenv)
 
@@ -957,7 +961,7 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 			"gasConsumed", gasConsumed, "result.UsedGas", txResult.result.UsedGas)
 	}
 
-	log.Debug("ok to finalize this TX", "Slot", slotIndex, "txIndex", txIndex,
+	log.Info("ok to finalize this TX", "Slot", slotIndex, "txIndex", txIndex,
 		"result.UsedGas", txResult.result.UsedGas, "txReq.usedGas", *txReq.usedGas)
 
 	// ok, time to do finalize, stage2 should not be parallel
