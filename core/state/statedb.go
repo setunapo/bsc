@@ -408,7 +408,7 @@ func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txInd
 			dirtyObj.db = s
 			dirtyObj.finalise(true) // true: prefetch on dispatcher
 			s.storeStateObj(addr, dirtyObj)
-			// delete(slotDb.parallel.dirtiedStateObjectsInSlot, addr) // transfer ownership, fixme: shared read?
+			delete(slotDb.parallel.dirtiedStateObjectsInSlot, addr) // transfer ownership, fixme: shared read?
 		} else {
 			// addr already in main DB, do merge: balance, KV, code, State(create, suicide)
 			// can not do copy or ownership transfer directly, since dirtyObj could have outdated
@@ -426,7 +426,7 @@ func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txInd
 				log.Debug("MergeSlotDB state object merge: addr state change")
 				dirtyObj.db = s
 				newMainObj = dirtyObj
-				// delete(slotDb.parallel.dirtiedStateObjectsInSlot, addr) // transfer ownership, fixme: shared read?
+				delete(slotDb.parallel.dirtiedStateObjectsInSlot, addr) // transfer ownership, fixme: shared read?
 				if dirtyObj.deleted {
 					// remove the addr from snapAccounts&snapStorage only when object is deleted.
 					// "deleted" is not equal to "snapDestructs", since createObject() will add an addr for
@@ -1488,6 +1488,9 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *StateObject {
 		}
 	}
 	// Insert into the live set
+	if obj, ok := s.loadStateObj(addr); ok { // fixme: concurrent safe
+		return obj
+	}
 	obj := newObject(s, addr, *data) // fixme: concurrent create object
 	s.storeStateObj(addr, obj)
 	return obj
@@ -1498,6 +1501,7 @@ func (s *StateDB) SetStateObject(object *StateObject) {
 }
 
 // GetOrNewStateObject retrieves a state object or create a new state object if nil.
+// dirtyInSlot -> Unconfirmed DB -> main DB -> snapshot, no? create one
 func (s *StateDB) GetOrNewStateObject(addr common.Address) *StateObject {
 	if s.parallel.isSlotDB {
 		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
