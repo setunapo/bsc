@@ -136,8 +136,8 @@ type ParallelState struct {
 	stateObjects        *StateObjectSyncMap
 	originStorgaeInSlot map[common.Address]Storage // fixme
 
-	baseTxIndex               int // slotDB is created base on this tx index.
-	dirtiedStateObjectsInSlot map[common.Address]*StateObject
+	baseTxIndex               int                             // slotDB is created base on this tx index.
+	dirtiedStateObjectsInSlot map[common.Address]*StateObject // fixme: sync.Map, unconfirmed reference & main stateDB write if ownership transfered
 	// for conflict check
 	unconfirmedDBInShot map[int]*StateDB // do unconfirmed reference in same slot.
 	unconfirmedRefList  map[int]struct{} // fixme: not use map?
@@ -408,7 +408,8 @@ func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txInd
 			dirtyObj.db = s
 			dirtyObj.finalise(true) // true: prefetch on dispatcher
 			s.storeStateObj(addr, dirtyObj)
-			delete(slotDb.parallel.dirtiedStateObjectsInSlot, addr) // transfer ownership, fixme: shared read?
+			// should not delete, would cause unconfirmed DB incorrect.
+			// delete(slotDb.parallel.dirtiedStateObjectsInSlot, addr) // transfer ownership, fixme: shared read?
 		} else {
 			// addr already in main DB, do merge: balance, KV, code, State(create, suicide)
 			// can not do copy or ownership transfer directly, since dirtyObj could have outdated
@@ -426,7 +427,8 @@ func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txInd
 				log.Debug("MergeSlotDB state object merge: addr state change")
 				dirtyObj.db = s
 				newMainObj = dirtyObj
-				delete(slotDb.parallel.dirtiedStateObjectsInSlot, addr) // transfer ownership, fixme: shared read?
+				// should not delete, would cause unconfirmed DB incorrect.
+				// delete(slotDb.parallel.dirtiedStateObjectsInSlot, addr) // transfer ownership, fixme: shared read?
 				if dirtyObj.deleted {
 					// remove the addr from snapAccounts&snapStorage only when object is deleted.
 					// "deleted" is not equal to "snapDestructs", since createObject() will add an addr for
@@ -677,8 +679,8 @@ func (s *StateDB) SubRefund(gas uint64) {
 func (s *StateDB) GetKVFromUnconfirmedStateDB(addr common.Address, key common.Hash) (common.Hash, bool) {
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			s.parallel.unconfirmedRefList[db.txIndex] = struct{}{} // no matter addr exist or not, we have reference the DB.
-			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok {
+			s.parallel.unconfirmedRefList[db.txIndex] = struct{}{}          // no matter addr exist or not, we have reference the DB.
+			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok { // if deleted on merge, can get from main StateDB, ok but fixme: concurrent safe
 				if _, ok := db.parallel.stateChangesInSlot[addr]; ok {
 					if val, ok := obj.dirtyStorage[key]; ok {
 						log.Info("GetKVFromUnconfirmedStateDB get from unconfirmed DB",
@@ -1944,7 +1946,7 @@ func (s *StateDB) AccountsIntermediateRoot() {
 			wg.Add(1)
 			tasks <- func() {
 				obj.updateRoot(s.db)
-				log.Warn("AccountsIntermediateRoot", "addr", obj.address,
+				log.Info("AccountsIntermediateRoot", "addr", obj.address,
 					"deleted", obj.deleted,
 					"balance", obj.data.Balance,
 					"nonce", obj.data.Nonce,
