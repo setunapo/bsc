@@ -191,6 +191,9 @@ func (s *StateObject) getTrie(db Database) Trie {
 
 // GetState retrieves a value from the account storage trie.
 // Order: lightCopy's dirty -> lightCopy's pendin(on merge) -> unconfirmed DB(pending) -> mainStateDB committed: (pending, origin, snapshot)
+// for lightCopy: dirty -> unconfirmed DB -> main DB committed
+// for main StateObject: dirty(nil) -> main DB committed
+// for merge: dirty -> pending ->
 func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 	// If the fake storage is set, only lookup the state here(in the debugging mode)
 	if s.fakeStorage != nil {
@@ -218,18 +221,24 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 		}
 	}
 
-	obj := s
 	// fixme: if s is light copied, access mainStateDB's stateobject's dirty, if lightCopy's dirty missed
-	/*
-		if !s.inMainDB {
-			if mainObj, ok := s.db.loadStateObj(s.address); ok {
-				log.Info("StateObjec::GetState loadStateObj")
-				obj = mainObj
+	val := s.GetCommittedState(db, key)
+	var mainVal common.Hash
+	if !s.inMainDB {
+		if mainObj, ok := s.db.loadStateObj(s.address); ok {
+			log.Info("StateObject::GetState loadStateObj")
+			// obj = mainObj
+			mainVal = mainObj.GetCommittedState(db, key)
+			if mainVal != val {
+				log.Info("StateObject::GetState mainVal != val", "key", key,
+					"mainVal", mainVal, "val", val)
 			}
+			return mainVal
 		}
-	*/
+	}
+	return val
 	// Otherwise return the entry's original value
-	return obj.GetCommittedState(db, key)
+	// return obj.GetCommittedState(db, key)
 
 }
 
@@ -269,12 +278,12 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 	}
 	// If we have a pending write or clean cached, return that
 	if value, pending := s.pendingStorage[key]; pending {
-		// log.Info("StateObject GetCommittedState pendingStorage", "value", value)
+		log.Info("StateObject GetCommittedState pendingStorage", "value", value)
 		return value
 	}
 
 	if value, cached := s.getOriginStorage(key); cached {
-		// log.Info("StateObject GetCommittedState originStorage", "value", value)
+		log.Info("StateObject GetCommittedState originStorage", "value", value)
 		return value
 	}
 	// If no live objects are available, attempt to use snapshots
@@ -336,7 +345,7 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 		value.SetBytes(content)
 	}
 	s.setOriginStorage(key, value)
-	// log.Info("StateObject GetCommittedState return", "key", key, "value", value)
+	log.Info("StateObject GetCommittedState return", "key", key, "value", value)
 	return value
 }
 
