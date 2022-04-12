@@ -1979,11 +1979,6 @@ func (s *StateDB) SlotDBPutSyncPool() {
 	}
 	balancePool.Put(s.parallel.balanceChangesInSlot)
 
-	for key := range s.parallel.balanceChangesInSlot {
-		delete(s.parallel.balanceChangesInSlot, key)
-	}
-	addressStructPool.Put(s.parallel.balanceChangesInSlot)
-
 	for key := range s.parallel.balanceReadsInSlot {
 		delete(s.parallel.balanceReadsInSlot, key)
 	}
