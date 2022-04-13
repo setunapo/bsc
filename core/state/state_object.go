@@ -654,7 +654,7 @@ func (s *StateObject) lightCopy(db *StateDB) *StateObject {
 	}
 	stateObject.code = s.code
 	stateObject.suicided = s.suicided
-	stateObject.dirtyCode = s.dirtyCode
+	stateObject.dirtyCode = s.dirtyCode // it is not used in slot, but keep it is ok
 	stateObject.deleted = s.deleted
 	return stateObject
 }

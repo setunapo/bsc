@@ -459,27 +459,40 @@ func (p *ParallelStateProcessor) init() {
 }
 
 func (p *ParallelStateProcessor) hasInvalidReference(slotDB *state.StateDB,
-	refDetail state.UnconfirmedReferDetail, changeList state.SlotChangeList) bool {
+	refDetail state.SlotUnconfirmedReferList, changeList state.SlotChangeList) bool {
 	txIndex := slotDB.TxIndex()
 	for addr, balanceReferred := range refDetail.BalanceChangeReferred {
 		// 1.StateObject deleted or rebuild
 		if _, exist := changeList.AddrStateChangeSet[addr]; exist {
-			log.Info("Unconfirmed check, balance referred, but addr state changed",
+			log.Debug("Unconfirmed check, balance referred, but addr state changed",
 				"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
 				"conflict TxIndex", changeList.TxIndex, "addr", addr)
 			return true
 		}
+
+		// 1.5.We tried the DB, but it did not change the balance
+		if balanceReferred == nil {
+			if _, exist := changeList.BalanceChangeSet[addr]; exist {
+				log.Info("Unconfirmed check, balance refer failed, but in BalanceChangeSet now",
+					"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
+					"conflict TxIndex", changeList.TxIndex, "addr", addr)
+				return true
+			}
+			continue
+		}
+
 		// 2.not in changeList.BalanceChangeSet, conflict = true
 		if _, exist := changeList.BalanceChangeSet[addr]; !exist {
-			log.Info("Unconfirmed check, balance referred, but not in BalanceChangeSet",
+			log.Debug("Unconfirmed check, balance referred, but not in BalanceChangeSet",
 				"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
 				"conflict TxIndex", changeList.TxIndex, "addr", addr)
 			return true
 		}
+
 		// 3.balance changed and it is not same
 		if balanceChanged, exist := changeList.BalanceChangeSet[addr]; exist {
 			if balanceReferred.Cmp(balanceChanged) != 0 {
-				log.Info("Unconfirmed check, balance referred, but balance differ",
+				log.Debug("Unconfirmed check, balance referred, but balance differ",
 					"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
 					"conflict TxIndex", changeList.TxIndex, "addr", addr,
 					"balanceReferred", balanceReferred.String(), "balanceChanged", balanceChanged.String())
@@ -488,13 +501,24 @@ func (p *ParallelStateProcessor) hasInvalidReference(slotDB *state.StateDB,
 		}
 	}
 
-	for addr := range refDetail.CodeChangeReferred {
+	for addr, codeRefer := range refDetail.CodeChangeReferred {
 		// 1.StateObject deleted or rebuild
 		if _, exist := changeList.AddrStateChangeSet[addr]; exist {
-			log.Info("Unconfirmed check, code referred, but addr state changed",
+			log.Debug("Unconfirmed check, code referred, but addr state changed",
 				"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
 				"conflict TxIndex", changeList.TxIndex, "addr", addr)
 			return true
+		}
+
+		// 1.5.We tried the DB, but it did not change the balance
+		if codeRefer == nil {
+			if _, exist := changeList.CodeChangeSet[addr]; exist {
+				log.Info("Unconfirmed check, code refer failed, but in CodeChangeSet now",
+					"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
+					"conflict TxIndex", changeList.TxIndex, "addr", addr)
+				return true
+			}
+			continue
 		}
 		// 2.not in changeList.CodeChangeSet, conflict = true
 		if _, exist := changeList.CodeChangeSet[addr]; !exist {
@@ -503,7 +527,16 @@ func (p *ParallelStateProcessor) hasInvalidReference(slotDB *state.StateDB,
 				"conflict TxIndex", changeList.TxIndex, "addr", addr)
 			return true
 		}
-		// 3.fixme: to check if the codeHash is same or not
+		// 3.code changed, but the codeHash is not same
+		if codeChanged, exist := changeList.CodeChangeSet[addr]; exist {
+			if !bytes.Equal(codeRefer, codeChanged) {
+				log.Info("Unconfirmed check, code referred, but code differ",
+					"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
+					"conflict TxIndex", changeList.TxIndex, "addr", addr,
+					"codeRefer", codeRefer, "codeChanged", codeChanged)
+				return true
+			}
+		}
 	}
 
 	for addr := range refDetail.AddrStateReferred {
