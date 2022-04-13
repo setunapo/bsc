@@ -95,7 +95,7 @@ func (s *StateDB) loadStateObj(addr common.Address) (*StateObject, bool) {
 func (s *StateDB) storeStateObj(addr common.Address, stateObject *StateObject) {
 	if s.isParallel {
 		if s.parallel.isSlotDB {
-			stateObject.db = s.parallel.baseDB
+			stateObject.db = s.parallel.baseStateDB
 		}
 		s.parallel.stateObjects.Store(addr, stateObject)
 	} else {
@@ -143,7 +143,7 @@ type ParallelState struct {
 	// And we will merge all the changes made by the concurrent slot into it.
 	stateObjects *StateObjectSyncMap
 
-	baseDB                    *StateDB                        // for parallel mode, there will be a base StateDB in dispatcher routine.
+	baseStateDB               *StateDB                        // for parallel mode, there will be a base StateDB in dispatcher routine.
 	baseTxIndex               int                             // slotDB is created base on this tx index.
 	dirtiedStateObjectsInSlot map[common.Address]*StateObject // fixme: sync.Map, unconfirmed reference & main stateDB write if ownership transfered
 	// for conflict check
@@ -267,7 +267,7 @@ func NewSlotDB(db *StateDB, systemAddr common.Address, txIndex int, baseTxIndex 
 	slotDB := db.CopyForSlot()
 	slotDB.txIndex = txIndex
 	slotDB.originalRoot = db.originalRoot
-	slotDB.parallel.baseDB = db
+	slotDB.parallel.baseStateDB = db
 	slotDB.parallel.baseTxIndex = baseTxIndex
 	slotDB.parallel.systemAddress = systemAddr
 	slotDB.parallel.systemAddressOpsCount = 0
@@ -1272,7 +1272,7 @@ func (s *StateDB) unconfirmedLightCopy(obj *StateObject) *StateObject {
 		newObj.setBalance(balance)
 	} else {
 		// fix: https: //bscscan.com/txs?block=2029961
-		// unconfirmed DB do not contain the balance, try to get from baseDB
+		// unconfirmed DB do not contain the balance, try to get from baseStateDB
 		obj := s.getStateObjectNoSlot(obj.address)
 		if obj != nil {
 			log.Info("unconfirmedLightCopy balance in main", "txIndex", s.txIndex, "addr", obj.address, "balance", obj.Balance())
@@ -1288,7 +1288,7 @@ func (s *StateDB) unconfirmedLightCopy(obj *StateObject) *StateObject {
 		newObj.setCode(crypto.Keccak256Hash(codeObj.code), codeObj.code) // fixme: to confirm if we should use "codeObj.Code(db)"
 		// newObj.dirtyCode = false                                         // fixme: to confirm, copy does not make the code dirty
 	} else {
-		// unconfirmed DB do not contain the balance, try to get from baseDB
+		// unconfirmed DB do not contain the balance, try to get from baseStateDB
 		obj := s.getStateObjectNoSlot(obj.address)
 		if obj != nil { // should never be nil
 			log.Info("unconfirmedLightCopy code in main", "txIndex", s.txIndex, "addr", obj.address, "balance", obj.Balance())
