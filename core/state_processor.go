@@ -934,9 +934,28 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 	vmenv := vm.NewEVM(blockContext, vm.TxContext{}, slotDB, p.config, txReq.vmConfig)
 	// gasLimit not accurate, but it is ok for block import.
 	// each slot would use its own gas pool, and will do gaslimit check later
-	gpSlot := new(GasPool).AddGas(txReq.gasLimit)
+	gpSlot := new(GasPool).AddGas(txReq.gasLimit) // block.GasLimit()
 
 	evm, result, err := applyTransactionStageExecution(txReq.msg, gpSlot, slotDB, vmenv)
+
+	if err != nil {
+		// the error could be caused by unconfirmed balance reference,
+		// the balance could insufficient to pay its gas limit, which cause it preCheck.buyGas() failed
+		// redo could solve it.
+		log.Warn("In slot execution error", "error", err)
+		return &ParallelTxResult{
+			updateSlotDB: false,
+			slotIndex:    slotIndex,
+			txReq:        txReq,
+			receipt:      nil, // receipt is generated in finalize stage
+			slotDB:       slotDB,
+			err:          err,
+			gpSlot:       gpSlot,
+			evm:          evm,
+			result:       result,
+		}
+	}
+
 	if result.Failed() {
 		// if Tx is reverted, all its state change will be discarded
 		log.Info("TX reverted? in normal slot", "Slot", slotIndex, "txIndex", txReq.txIndex, "result.Err", result.Err)
@@ -972,15 +991,14 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 		<-txReq.waitTxChan // close the channel
 	}
 
-	if txResult.err != nil {
-		log.Error("executeInShadowSlot should have no error", "err", txResult.err)
-	}
-
 	// do conflict detect
 	hasConflict := false
 	systemAddrConflict := false
 	log.Debug("Shadow Stage Execution done, do conflict check", "Slot", slotIndex, "txIndex", txIndex)
-	if slotDB.SystemAddressRedo() {
+	if txResult.err != nil {
+		log.Debug("redo, since in slot execute failed", "err", txResult.err)
+		hasConflict = true
+	} else if slotDB.SystemAddressRedo() {
 		log.Info("Stage Execution conflict for SystemAddressRedo", "Slot", slotIndex,
 			"txIndex", txIndex)
 		hasConflict = true
@@ -1225,7 +1243,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			txIndex:        i,
 			tx:             tx,
 			slotDB:         nil,
-			gasLimit:       gp.Gas(),
+			gasLimit:       block.GasLimit(), // gp.Gas().
 			msg:            msg,
 			block:          block,
 			vmConfig:       cfg,

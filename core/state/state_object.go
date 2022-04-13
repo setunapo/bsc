@@ -309,9 +309,8 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 		// The pendingStorage of slot DB is incorrect, try to get from the base DB
 		baseObj := s.db.getStateObjectNoSlot(s.address)
 		if baseObj == nil {
-			// it should never be nil
-			// if base StateDB did not contain the address, it should be in slotDB's dirtyStorage
-			log.Error("SlotDB try to get KV from base DB, but address is nil", "addr", s.address)
+			// if base StateDB did not contain the address return empty
+			log.Debug("SlotDB try to get KV from base DB, but address is nil", "addr", s.address)
 			return common.Hash{}
 		}
 		return baseObj.GetCommittedState(db, key)
