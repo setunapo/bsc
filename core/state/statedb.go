@@ -167,7 +167,6 @@ type ParallelState struct {
 	// needs real system address's balance, the transaction will be marked redo with keepSystemAddressBalance = true
 	systemAddress            common.Address
 	systemAddressOpsCount    int
-	nonceIncreased           uint64 // create contract
 	keepSystemAddressBalance bool
 
 	// we may need to redo for some specific reasons, like we read the wrong state and need to panic in sequential mode in SubRefund
@@ -992,10 +991,6 @@ func (s *StateDB) BlockHash() common.Hash {
 	return s.bhash
 }
 
-func (s *StateDB) IsSlotDB() bool {
-	return s.parallel.isSlotDB
-}
-
 // BaseTxIndex returns the tx index that slot db based.
 func (s *StateDB) BaseTxIndex() int {
 	return s.parallel.baseTxIndex
@@ -1032,10 +1027,6 @@ func (s *StateDB) SystemAddressRedo() bool {
 // NeedsRedo returns true if there is any clear reason that we need to redo this transaction
 func (s *StateDB) NeedsRedo() bool {
 	return s.parallel.needsRedo
-}
-
-func (s *StateDB) NonceIncreased() uint64 {
-	return s.parallel.nonceIncreased
 }
 
 func (s *StateDB) GetCode(addr common.Address) []byte {
@@ -1419,7 +1410,6 @@ func (s *StateDB) NonceChanged(addr common.Address) {
 	if s.parallel.isSlotDB {
 		log.Debug("NonceChanged", "txIndex", s.txIndex, "addr", addr)
 		s.parallel.nonceChangesInSlot[addr] = struct{}{}
-		s.parallel.nonceIncreased++
 		s.parallel.addrStateChangesInSlot[addr] = struct{}{} // simplify unconfirmed conflict check
 	}
 }

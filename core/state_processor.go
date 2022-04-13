@@ -1179,7 +1179,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		// Parallel Execution 1.0&2.0 is for full sync mode, Nonce PreCheck is not necessary
 		// And since we will do out-of-order execution, the Nonce PreCheck could fail.
 		// We will disable it and leave it to Parallel 3.0 which is for validator mode
-		msg, err := tx.AsParallelMessage(signer)
+		msg, err := tx.AsMessageNoNonceCheck(signer)
 		if err != nil {
 			return statedb, nil, nil, 0, err
 		}
