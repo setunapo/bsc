@@ -458,136 +458,163 @@ func (p *ParallelStateProcessor) init() {
 	}
 }
 
-func (p *ParallelStateProcessor) hasInvalidReference(slotDB *state.StateDB,
-	refDetail state.SlotUnconfirmedReferList, changeList state.SlotChangeList) bool {
+// to check if the referred infor is valid or not
+func (p *ParallelStateProcessor) hasInvalidReference(slotDB *state.StateDB, index int) bool {
 	txIndex := slotDB.TxIndex()
-	for addr, balanceReferred := range refDetail.BalanceChangeReferred {
-		// 1.StateObject deleted or rebuild
-		if _, exist := changeList.AddrStateChangeSet[addr]; exist {
-			log.Debug("Unconfirmed check, balance referred, but addr state changed",
-				"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
-				"conflict TxIndex", changeList.TxIndex, "addr", addr)
-			return true
-		}
-
-		// 1.5.We tried the DB, but it did not change the balance
-		if balanceReferred == nil {
-			if _, exist := changeList.BalanceChangeSet[addr]; exist {
-				log.Info("Unconfirmed check, balance refer failed, but in BalanceChangeSet now",
-					"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
-					"conflict TxIndex", changeList.TxIndex, "addr", addr)
+	refDetail := slotDB.UnconfirmedRefList()
+	changeListInSlot := p.slotState[index].mergedChangeList
+	log.Debug("hasInvalidReference ", "txIndex", txIndex, "BaseTxIndex", slotDB.BaseTxIndex())
+	// check nonce reference
+	for addr, nonceRef := range refDetail.NonceReferred {
+		// check in descent order
+		hit := false
+		for clIndex := len(changeListInSlot) - 1; clIndex >= 0; clIndex-- {
+			changeList := changeListInSlot[clIndex]
+			log.Debug("hasInvalidReference ", "txIndex", txIndex, "changeList txIndex", changeList.TxIndex)
+			if changeList.TxIndex <= slotDB.BaseTxIndex() {
+				break
+			}
+			if nonceCL, exist := changeList.NonceChangeSet[addr]; exist {
+				if nonceRef == nonceCL {
+					// addr's nonceRef is valid
+					hit = true
+					break
+				}
+				log.Info("hasInvalidReference conflict: nonce refer invalid",
+					"txIndex", txIndex, "addr", addr,
+					"nonceRef", nonceRef, "nonceCL", nonceCL)
 				return true
 			}
-			continue
 		}
-
-		// 2.not in changeList.BalanceChangeSet, conflict = true
-		if _, exist := changeList.BalanceChangeSet[addr]; !exist {
-			log.Debug("Unconfirmed check, balance referred, but not in BalanceChangeSet",
-				"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
-				"conflict TxIndex", changeList.TxIndex, "addr", addr)
+		// not hit means nonce has not been changed in unconfirmed DBs,
+		if !hit {
+			log.Info("hasInvalidReference conflict: nonce refer not hit in ChangeList",
+				"txIndex", txIndex, "addr", addr, "nonceRef", nonceRef)
 			return true
-		}
-
-		// 3.balance changed and it is not same
-		if balanceChanged, exist := changeList.BalanceChangeSet[addr]; exist {
-			if balanceReferred.Cmp(balanceChanged) != 0 {
-				log.Debug("Unconfirmed check, balance referred, but balance differ",
-					"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
-					"conflict TxIndex", changeList.TxIndex, "addr", addr,
-					"balanceReferred", balanceReferred.String(), "balanceChanged", balanceChanged.String())
-				return true
-			}
 		}
 	}
 
-	for addr, codeRefer := range refDetail.CodeChangeReferred {
-		// 1.StateObject deleted or rebuild
-		if _, exist := changeList.AddrStateChangeSet[addr]; exist {
-			log.Debug("Unconfirmed check, code referred, but addr state changed",
-				"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
-				"conflict TxIndex", changeList.TxIndex, "addr", addr)
-			return true
-		}
-
-		// 1.5.We tried the DB, but it did not change the balance
-		if codeRefer == nil {
-			if _, exist := changeList.CodeChangeSet[addr]; exist {
-				log.Info("Unconfirmed check, code refer failed, but in CodeChangeSet now",
-					"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
-					"conflict TxIndex", changeList.TxIndex, "addr", addr)
-				return true
+	// check balance reference
+	for addr, balanceRef := range refDetail.BalanceChangeReferred {
+		// check in descent order
+		hit := false
+		for clIndex := len(changeListInSlot) - 1; clIndex >= 0; clIndex-- {
+			changeList := changeListInSlot[clIndex]
+			if changeList.TxIndex <= slotDB.BaseTxIndex() {
+				break
 			}
-			continue
-		}
-		// 2.not in changeList.CodeChangeSet, conflict = true
-		if _, exist := changeList.CodeChangeSet[addr]; !exist {
-			log.Info("Unconfirmed check, code referred, but not in CodeChangeSet",
-				"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
-				"conflict TxIndex", changeList.TxIndex, "addr", addr)
-			return true
-		}
-		// 3.code changed, but the codeHash is not same
-		if codeChanged, exist := changeList.CodeChangeSet[addr]; exist {
-			if !bytes.Equal(codeRefer, codeChanged) {
-				log.Info("Unconfirmed check, code referred, but code differ",
-					"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
-					"conflict TxIndex", changeList.TxIndex, "addr", addr,
-					"codeRefer", codeRefer, "codeChanged", codeChanged)
+			if balanceCL, exist := changeList.BalanceChangeSet[addr]; exist {
+				if balanceRef.Cmp(balanceCL) == 0 {
+					// addr's nonceRef is valid
+					hit = true
+					break
+				}
+				log.Info("hasInvalidReference conflict: balance refer invalid",
+					"txIndex", txIndex, "addr", addr,
+					"balanceRef", balanceRef, "balanceCL", balanceCL)
 				return true
 			}
 		}
-	}
-
-	for addr := range refDetail.AddrStateReferred {
-		// 1.StateObject deleted or rebuild
-		if _, exist := changeList.AddrStateChangeSet[addr]; exist {
-			log.Info("Unconfirmed check, addr referred, but addr state changed",
-				"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
-				"conflict TxIndex", changeList.TxIndex, "addr", addr)
+		if !hit {
+			log.Info("hasInvalidReference conflict: balance refer not hit in ChangeList",
+				"txIndex", txIndex, "addr", addr, "balanceRef", balanceRef)
 			return true
 		}
-		//2. not in any of the change list
-		if _, exist := changeList.StateChangeSet[addr]; exist {
-			continue
-		}
-		if _, exist := changeList.BalanceChangeSet[addr]; exist {
-			continue
-		}
-		if _, exist := changeList.CodeChangeSet[addr]; exist {
-			continue
-		}
-		log.Info("Unconfirmed conflict check, addr not in any of the change list",
-			"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
-			"conflict TxIndex", changeList.TxIndex, "addr", addr)
-		return true
 	}
 
-	for addr, storageReferred := range refDetail.KVChangeReferred {
-		// 1.StateObject deleted or rebuild
-		keysChanged, exist := changeList.StateChangeSet[addr]
-		if !exist {
-			log.Info("Unconfirmed check, KV referred, but addr not exist in StateChangeSet",
-				"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
-				"conflict TxIndex", changeList.TxIndex, "addr", addr)
+	// check code reference
+	for addr, codeRef := range refDetail.CodeChangeReferred {
+		hit := false
+		// check in descent order
+		for clIndex := len(changeListInSlot) - 1; clIndex >= 0; clIndex-- {
+			changeList := changeListInSlot[clIndex]
+			if changeList.TxIndex <= slotDB.BaseTxIndex() {
+				break
+			}
+			if codeCL, exist := changeList.CodeChangeSet[addr]; exist {
+				if bytes.Equal(codeRef.Bytes(), codeCL.Bytes()) {
+					// addr's codeRef is valid
+					hit = true
+					break
+				}
+				log.Info("hasInvalidReference conflict: code refer invalid",
+					"txIndex", txIndex, "addr", addr,
+					"codeRef", codeRef, "codeCL", codeCL)
+				return true
+			}
+		}
+		if !hit {
+			log.Info("hasInvalidReference conflict: code refer not hit in ChangeList",
+				"txIndex", txIndex, "addr", addr)
 			return true
 		}
+	}
 
-		isChanged := false
-		storageReferred.Range(func(key, value interface{}) bool {
-			if _, exist := keysChanged[key.(common.Hash)]; !exist {
-				log.Info("Unconfirmed check, KV referred, but addr not exist in keysChanged",
-					"txIndex", txIndex, " baseTxIndex", slotDB.BaseTxIndex(),
-					"conflict TxIndex", changeList.TxIndex, "addr", addr)
-				isChanged = true
-				return false // fixme: to check the value
+	// check KV reference
+	for addr, storageRef := range refDetail.KVChangeReferred {
+		conflict := false
+		// check in descent order
+		storageRef.Range(func(key, valRef interface{}) bool {
+			keyHit := false
+			for clIndex := len(changeListInSlot) - 1; clIndex >= 0; clIndex-- {
+				changeList := changeListInSlot[clIndex]
+				if changeList.TxIndex <= slotDB.BaseTxIndex() {
+					break
+				}
+				if storageCL, exist := changeList.KVChangeSet[addr]; exist {
+					if valCL, ok := storageCL.GetValue(key.(common.Hash)); ok {
+						if !bytes.Equal(valCL.Bytes(), valRef.(common.Hash).Bytes()) {
+							conflict = true
+							log.Info("hasInvalidReference conflict: KV refer invalid",
+								"txIndex", txIndex, "addr", addr, "key", key.(common.Hash),
+								"valRef", valRef.(common.Hash), "valCL", valCL)
+							return false // terminate the Range()
+						}
+						keyHit = true
+					}
+					return true
+				}
+			}
+			if !keyHit {
+				log.Info("hasInvalidReference conflict: KV refer not hit in ChangeList",
+					"txIndex", txIndex, "addr", addr, "key", key.(common.Hash))
+				conflict = true
+				return false
 			}
 			return true
 		})
-		if isChanged {
+		if conflict {
 			return true
 		}
 	}
+
+	// check addr state reference
+	for addr, stateRef := range refDetail.AddrStateReferred {
+		hit := false
+		// check in descent order
+		for clIndex := len(changeListInSlot) - 1; clIndex >= 0; clIndex-- {
+			changeList := changeListInSlot[clIndex]
+			if changeList.TxIndex <= slotDB.BaseTxIndex() {
+				break
+			}
+			if stateCL, exist := changeList.DirtyAddrStateSet[addr]; exist {
+				if stateRef == stateCL {
+					// addr's stateRef is valid
+					hit = true
+					break
+				}
+				log.Info("hasInvalidReference addr state refer invalid")
+				return true
+			}
+		}
+		if !hit {
+			log.Info("hasInvalidReference conflict: addr state refer not hit in ChangeList",
+				"txIndex", txIndex, "addr", addr)
+			return true
+		}
+
+	}
+
 	return false
 }
 
@@ -596,20 +623,26 @@ func (p *ParallelStateProcessor) hasInvalidReference(slotDB *state.StateDB,
 func (p *ParallelStateProcessor) hasStateConflict(readDb *state.StateDB, changeList state.SlotChangeList) bool {
 	// check KV change
 	reads := readDb.StateReadsInSlot()
-	writes := changeList.StateChangeSet
+	writes := changeList.KVChangeSet
+	conflict := false
 	for readAddr, readKeys := range reads {
 		if _, exist := changeList.AddrStateChangeSet[readAddr]; exist {
 			log.Debug("conflict: read addr changed state", "addr", readAddr)
 			return true
 		}
-		if writeKeys, ok := writes[readAddr]; ok {
+		if writeStorage, ok := writes[readAddr]; ok {
 			// readAddr exist
-			for writeKey := range writeKeys {
+			writeStorage.Range(func(key, valRef interface{}) bool {
 				// same addr and same key, mark conflicted
-				if _, ok := readKeys[writeKey]; ok {
-					log.Debug("conflict: state conflict", "addr", readAddr, "key", writeKey)
-					return true
+				if _, ok := readKeys[key.(common.Hash)]; ok {
+					log.Info("conflict: state conflict", "addr", readAddr, "key", key.(common.Hash))
+					conflict = true
+					return false
 				}
+				return true
+			})
+			if conflict {
+				return true
 			}
 		}
 	}
@@ -1010,41 +1043,28 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 		for index := 0; index < p.parallelNum; index++ {
 			log.Debug("Shadow conflict check", "Slot", slotIndex, "txIndex", txIndex,
 				"index", index, "baseTxIndex", slotDB.BaseTxIndex())
+
+			// do unconfirmed check, if slotDB accessed the stateDB is bad, it will be marked conflict
+			// fixme: can be more precious, check the redo stateDB
+			// in same slot, if the db is referenced and it is valid, we can skip it for CF
+			if slotIndex == index {
+				// https://bscscan.com/txs?block=2001956
+				if p.hasInvalidReference(slotDB, slotIndex) {
+					log.Info("Stage Execution conflict", "Slot", slotIndex,
+						"txIndex", txIndex, " conflict slot", index,
+						"slotDB.baseTxIndex", slotDB.BaseTxIndex())
+					hasConflict = true
+					break
+				}
+				continue
+			}
+
 			// check all finalizedDb from current slot's
 			for _, changeList := range p.slotState[index].mergedChangeList {
 				// log.Debug("Shadow conflict check", "changeList.TxIndex", changeList.TxIndex,
 				//	"slotDB.BaseTxIndex()", slotDB.BaseTxIndex())
 				if changeList.TxIndex <= slotDB.BaseTxIndex() {
 					continue
-				}
-				// do unconfirmed check, if slotDB accessed the stateDB is bad, it will be marked conflict
-				// fixme: can be more precious, check the redo stateDB
-				// in same slot, if the db is referenced and it is valid, we can skip it for CF
-				if slotIndex == index { // fixme: more strict...
-					if refDetail, ok := slotDB.UnconfirmedRefList()[changeList.TxIndex]; ok {
-						log.Info("Shadow conflict check", "changeList.TxIndex's DB is referenced", changeList.TxIndex, " by TxIndex", txIndex)
-						// check if the ChangeList's DB is referred or not
-						unconfirmedDB, ok := p.slotState[index].unconfirmedStateDBs.Load(changeList.TxIndex)
-						if !ok {
-							log.Error("Shadow conflict check, tx not in slot", "slotIndex", index, "changeList.TxIndex", changeList.TxIndex)
-						}
-						if !unconfirmedDB.(*state.StateDB).Invalid { // valid, skip CF for this changeList
-							// unconfirmedDB for changeList is valid, skip conflict check for it.
-							log.Info("Stage Execution skip conflict check for confirmed DB reference", "Slot", slotIndex,
-								"txIndex", txIndex, "baseTxIndex", slotDB.BaseTxIndex(),
-								"confirmed slot", index, "confirmed TxIndex", changeList.TxIndex)
-							continue
-						}
-
-						// https://bscscan.com/txs?block=2001956
-						if p.hasInvalidReference(slotDB, refDetail, changeList) {
-							log.Info("Stage Execution conflict", "Slot", slotIndex,
-								"txIndex", txIndex, " conflict slot", index, "slotDB.baseTxIndex", slotDB.BaseTxIndex(),
-								"conflict txIndex", changeList.TxIndex)
-							hasConflict = true
-							break
-						}
-					}
 				}
 
 				log.Debug("do hasStateConflict", "Slot", slotIndex, "txIndex", txIndex,
@@ -1179,15 +1199,15 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 
 	statedb.PrepareForParallel()
 
-	stateDBsToRelease := p.slotDBsToRelease
 	p.slotDBsToRelease = make([]*state.StateDB, 0, txNum)
-
-	go func() {
-		for _, slotDB := range stateDBsToRelease {
-			slotDB.SlotDBPutSyncPool()
-		}
-	}()
-
+	/*
+		stateDBsToRelease := p.slotDBsToRelease
+			go func() {
+				for _, slotDB := range stateDBsToRelease {
+					slotDB.SlotDBPutSyncPool()
+				}
+			}()
+	*/
 	for _, slot := range p.slotState {
 		slot.mergedChangeList = make([]state.SlotChangeList, 0)
 		slot.pendingTxReqList = make([]*ParallelTxRequest, 0)

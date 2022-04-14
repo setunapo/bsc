@@ -652,9 +652,9 @@ func (s *StateObject) lightCopy(db *StateDB) *StateObject {
 		stateObject.trie = db.db.CopyTrie(s.trie)
 	}
 	stateObject.code = s.code
-	stateObject.suicided = s.suicided
+	stateObject.suicided = false        // should be false
 	stateObject.dirtyCode = s.dirtyCode // it is not used in slot, but keep it is ok
-	stateObject.deleted = s.deleted
+	stateObject.deleted = false         // should be false
 	return stateObject
 }
 
@@ -673,12 +673,13 @@ func (s *StateObject) deepCopy(db *StateDB) *StateObject {
 	return stateObject
 }
 
-func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys StateKeys) {
-	for key := range keys {
+func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, storage Storage) {
+	storage.Range(func(key, value interface{}) bool {
 		// better to do s.GetState(db, key) to load originStorage for this key?
 		// since originStorage was in dirtyObjs, but it works even originStorage miss the state object.
-		s.SetState(db, key, dirtyObjs.GetState(db, key))
-	}
+		s.SetState(db, key.(common.Hash), dirtyObjs.GetState(db, key.(common.Hash)))
+		return true
+	})
 }
 
 //
