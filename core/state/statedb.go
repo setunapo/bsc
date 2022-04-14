@@ -128,9 +128,16 @@ type SlotChangeList struct {
 // For parallel mode: unconfirmed DB reference.
 // Keep the reference detail, will be used on conflict detect, to check if the reference is valid.
 type SlotUnconfirmedReferList struct {
-	AddrStateReferred     map[common.Address]struct{} // addr state: create, suicide, deleted, or the ?
+	// addr state, false: deleted or not( dirtied, created)
+	// -1: address not accessible in this DB
+	//  0: address is valid in this DB, could be updated or created
+	//  1: address is deleted in this DB, could be suicide or empty delete on finalize
+	// fixme: do not have the hardcode value
+	AddrStateReferred     map[common.Address]int
 	BalanceChangeReferred map[common.Address]*big.Int
-	CodeChangeReferred    map[common.Address][]byte // `[]byte` can be nil or codeHash in bytes, nil: not changed
+	// For code change: `[]byte` can be nil or codeHash in bytes
+	// nil: not changed
+	CodeChangeReferred map[common.Address][]byte
 	// NonceChangeSet      map[common.Address]struct{}  // nonce should be reliable, it is not necessary
 	KVChangeReferred map[common.Address]Storage // the KV pair should be exist
 }
@@ -709,8 +716,8 @@ func (s *StateDB) getBalanceFromUnconfirmedDB(addr common.Address) *big.Int {
 				s.parallel.unconfirmedRefList[db.txIndex] = SlotUnconfirmedReferList{
 					BalanceChangeReferred: make(map[common.Address]*big.Int, defaultNumOfSlots),
 					CodeChangeReferred:    make(map[common.Address][]byte, defaultNumOfSlots),
-					AddrStateReferred:     make(map[common.Address]struct{}), // the address is referred
-					KVChangeReferred:      make(map[common.Address]Storage),  // the KV pair should be exist
+					AddrStateReferred:     make(map[common.Address]int),
+					KVChangeReferred:      make(map[common.Address]Storage),
 				}
 			}
 			// 1.Refer the state of address, exist or not in dirtiedStateObjectsInSlot
@@ -759,7 +766,7 @@ func (s *StateDB) getCodeFromUnconfirmedDB(addr common.Address) *StateObject {
 				s.parallel.unconfirmedRefList[db.txIndex] = SlotUnconfirmedReferList{
 					BalanceChangeReferred: make(map[common.Address]*big.Int, defaultNumOfSlots),
 					CodeChangeReferred:    make(map[common.Address][]byte, defaultNumOfSlots),
-					AddrStateReferred:     make(map[common.Address]struct{}),
+					AddrStateReferred:     make(map[common.Address]int),
 					KVChangeReferred:      make(map[common.Address]Storage),
 				}
 			}
@@ -799,10 +806,12 @@ func (s *StateDB) getCodeFromUnconfirmedDB(addr common.Address) *StateObject {
 
 // Similar to getCodeFromUnconfirmedDB
 // It is for address state check of: Exist(), Empty() and HasSuicided()
-func (s *StateDB) getAddrStateFromUnconfirmedDB(addr common.Address) *StateObject {
+// Since the unconfirmed DB should have done Finalise() with `deleteEmptyObjects = true`
+// If the dirty address is empty or suicided, it will be marked as deleted, so we only need to return `deleted` or not.
+func (s *StateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (deleted bool, exist bool) {
 	if addr == s.parallel.systemAddress {
 		// never get systemaddress from unconfirmed DB
-		return nil
+		return false, false
 	}
 
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
@@ -812,23 +821,27 @@ func (s *StateDB) getAddrStateFromUnconfirmedDB(addr common.Address) *StateObjec
 				s.parallel.unconfirmedRefList[db.txIndex] = SlotUnconfirmedReferList{
 					BalanceChangeReferred: make(map[common.Address]*big.Int, defaultNumOfSlots),
 					CodeChangeReferred:    make(map[common.Address][]byte, defaultNumOfSlots),
-					AddrStateReferred:     make(map[common.Address]struct{}),
+					AddrStateReferred:     make(map[common.Address]int),
 					KVChangeReferred:      make(map[common.Address]Storage),
 				}
 			}
 			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok {
 				log.Info("Get AddrState from UnconfirmedDB, in drity",
-					"my txIndex", s.txIndex, "DB's txIndex", i, "addr", addr)
-				s.parallel.unconfirmedRefList[db.txIndex].AddrStateReferred[addr] = struct{}{}
-				return obj
+					"txIndex", s.txIndex, "referred txIndex", i,
+					"addr", addr, "deleted", obj.deleted)
+				if obj.deleted {
+					s.parallel.unconfirmedRefList[db.txIndex].AddrStateReferred[addr] = 1
+				} else {
+					s.parallel.unconfirmedRefList[db.txIndex].AddrStateReferred[addr] = 0
+				}
+				return obj.deleted, true
 			}
-			// fixme
 			// Mark it as nil, mean we did not get the state from the confirmed DB.
 			// If the unconfirmed DB got redo and changed the state at the end, it is conflicted
-			// s.parallel.unconfirmedRefList[db.txIndex].AddrStateReferred[addr] = nil
+			s.parallel.unconfirmedRefList[db.txIndex].AddrStateReferred[addr] = -1
 		}
 	}
-	return nil
+	return false, false
 }
 
 func (s *StateDB) getKVFromUnconfirmedDB(addr common.Address, key common.Hash) (common.Hash, bool) {
@@ -839,14 +852,13 @@ func (s *StateDB) getKVFromUnconfirmedDB(addr common.Address, key common.Hash) (
 				s.parallel.unconfirmedRefList[db.txIndex] = SlotUnconfirmedReferList{
 					BalanceChangeReferred: make(map[common.Address]*big.Int, defaultNumOfSlots),
 					CodeChangeReferred:    make(map[common.Address][]byte, defaultNumOfSlots),
-					AddrStateReferred:     make(map[common.Address]struct{}),
+					AddrStateReferred:     make(map[common.Address]int),
 					KVChangeReferred:      make(map[common.Address]Storage),
 				}
 			}
 
 			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok { // if deleted on merge, can get from main StateDB, ok but fixme: concurrent safe
 				if _, ok := db.parallel.stateChangesInSlot[addr]; ok {
-					// fixme: dirtyStorage will be cleared on StateObject.finalize, to keep the KV in stateChangesInSlot?
 					if val, exist := obj.dirtyStorage.GetValue(key); exist {
 						log.Info("Get KV from Unconfirmed StateDB, in dirty",
 							"my txIndex", s.txIndex, "DB's txIndex", i, "addr", addr,
@@ -868,6 +880,7 @@ func (s *StateDB) getKVFromUnconfirmedDB(addr common.Address, key common.Hash) (
 						return val, true
 					}
 				}
+				// fixme: mark the unaccessible visit
 			}
 		}
 	}
@@ -885,14 +898,19 @@ func (s *StateDB) getStateObjectFromUnconfirmedDB(addr common.Address) *StateObj
 				s.parallel.unconfirmedRefList[db.txIndex] = SlotUnconfirmedReferList{
 					BalanceChangeReferred: make(map[common.Address]*big.Int, defaultNumOfSlots),
 					CodeChangeReferred:    make(map[common.Address][]byte, defaultNumOfSlots),
-					AddrStateReferred:     make(map[common.Address]struct{}), // the address should be exist,
-					KVChangeReferred:      make(map[common.Address]Storage),  // the KV pair should be exist
+					AddrStateReferred:     make(map[common.Address]int),
+					KVChangeReferred:      make(map[common.Address]Storage),
 				}
 			}
 			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok {
 				log.Info("Get StateObject from unconfirmed DB",
 					"txIndex", s.txIndex, "unconfirmed txIndex", i, "addr", addr)
-				s.parallel.unconfirmedRefList[db.txIndex].AddrStateReferred[addr] = struct{}{}
+				if obj.deleted {
+					s.parallel.unconfirmedRefList[db.txIndex].AddrStateReferred[addr] = 1
+				} else {
+					s.parallel.unconfirmedRefList[db.txIndex].AddrStateReferred[addr] = 0
+				}
+
 				return obj
 			}
 		}
@@ -914,8 +932,8 @@ func (s *StateDB) Exist(addr common.Address) bool {
 			return true
 		}
 		// 2.Try to get from uncomfirmed
-		if obj := s.getAddrStateFromUnconfirmedDB(addr); obj != nil {
-			if obj.deleted {
+		if deleted, ok := s.getAddrStateFromUnconfirmedDB(addr); ok {
+			if deleted {
 				log.Info("Exist in unconfirmed, but it deleted", "txIndex", s.txIndex,
 					"baseTxIndex:", s.parallel.baseTxIndex,
 					"addr", addr)
@@ -939,25 +957,25 @@ func (s *StateDB) Empty(addr common.Address) bool {
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty
 		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
-			log.Info("Empty in dirty", "txIndex", s.txIndex, "addr", addr, "ret", obj.empty())
+			log.Debug("Empty in dirty", "txIndex", s.txIndex, "addr", addr, "ret", obj.empty())
 			return obj.empty()
 		}
 		// 2.Try to get from uncomfirmed
-		if obj := s.getAddrStateFromUnconfirmedDB(addr); obj != nil {
-			if obj.deleted {
-				log.Info("Empty in unconfirmed, but it deleted", "txIndex", s.txIndex,
+		if deleted, ok := s.getAddrStateFromUnconfirmedDB(addr); ok {
+			// with unconfirmed DB, empty is already marked as deleted.
+			if deleted {
+				log.Debug("Empty in unconfirmed, but it deleted", "txIndex", s.txIndex,
 					"baseTxIndex:", s.parallel.baseTxIndex,
 					"addr", addr)
 				return true
 			}
-
-			log.Info("Empty in unconfirmed", "txIndex", s.txIndex, "addr", addr, "ret", obj.empty())
-			return obj.empty()
+			log.Debug("Empty in unconfirmed, not empty", "txIndex", s.txIndex, "addr", addr)
+			return false
 		}
 	}
 
 	so := s.getStateObjectNoSlot(addr)
-	log.Info("Empty in main", "txIndex", s.txIndex, "addr", addr, "ret", (so == nil || so.empty()))
+	log.Debug("Empty in main", "txIndex", s.txIndex, "addr", addr, "ret", (so == nil || so.empty()))
 	return so == nil || so.empty()
 }
 
@@ -1281,25 +1299,27 @@ func (s *StateDB) HasSuicided(addr common.Address) bool {
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty
 		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
-			log.Info("HasSuicided in dirty", "addr", addr, "suicided", obj.suicided)
+			log.Debug("HasSuicided in dirty", "SlotIndex", s.parallel.SlotIndex, "txIndex", s.txIndex, "addr", addr, "suicided", obj.suicided)
 			return obj.suicided
 		}
 		// 2.Try to get from uncomfirmed
-		if obj := s.getAddrStateFromUnconfirmedDB(addr); obj != nil {
-			if obj.deleted {
-				log.Info("HasSuicided in unconfirmed, but deleted", "addr", addr, "suicided", obj.suicided)
-				return false
+		if deleted, ok := s.getAddrStateFromUnconfirmedDB(addr); ok {
+			if deleted {
+				log.Debug("HasSuicided in unconfirmed, but deleted",
+					"SlotIndex", s.parallel.SlotIndex, "txIndex", s.txIndex, "addr", addr)
+				return true
 			}
-			log.Info("HasSuicided in unconfirmed", "addr", addr, "suicided", obj.suicided)
-			return obj.suicided
+			log.Debug("HasSuicided in unconfirmed, not suicided",
+				"SlotIndex", s.parallel.SlotIndex, "txIndex", s.txIndex, "addr", addr)
+			return false
 		}
 	}
 	stateObject := s.getStateObjectNoSlot(addr)
 	if stateObject != nil {
-		log.Info("HasSuicided in main", "addr", addr, "suicided", stateObject.suicided)
+		log.Debug("HasSuicided in main", "addr", addr, "suicided", stateObject.suicided)
 		return stateObject.suicided
 	}
-	log.Info("HasSuicided not exist", "addr", addr)
+	log.Debug("HasSuicided not exist", "addr", addr)
 	return false
 }
 
