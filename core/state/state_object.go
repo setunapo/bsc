@@ -283,38 +283,40 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 	// If we have a dirty value for this state entry, return it
 	value, dirty := s.dirtyStorage.GetValue(key)
 	if dirty {
-		log.Debug("StateObject::GetState in dirty", "key", key, "value", value)
+		log.Debug("StateObject get state in dirty", "key", key, "value", value)
 		return value
 	}
 
-	if s.db.parallel.isSlotDB {
-		// In parallel execution mode, it is a bit complicated to do GetState.
-		// Since we do `unconfirmed reference` & `lightCopy`, the KV is accessed in order of priority:
-		//   -> 1.lightCopy's dirtyStorage
-		//   -> 2.lightCopy's pendingStorage
-		//        It was for merge, but not needed any more since StateObject in Slot will not be finalized.
-		//   -> 3.unconfirmed DB: it can be seen as unconfirmed pending
-		//   -> 4.mainStateDB committed: pending -> origin -> snopshot or trie node
+	/*
+		if s.db.parallel.isSlotDB {
+			// In parallel execution mode, it is a bit complicated to do get state .
+			// Since we do `unconfirmed reference` & `lightCopy`, the KV is accessed in order of priority:
+			//   -> 1.lightCopy's dirtyStorage
+			//   -> 2.lightCopy's pendingStorage
+			//        It was for merge, but not needed any more since StateObject in Slot will not be finalized.
+			//   -> 3.unconfirmed DB: it can be seen as unconfirmed pending
+			//   -> 4.mainStateDB committed: pending -> origin -> snopshot or trie node
 
-		value, dirty = s.pendingStorage.GetValue(key)
-		if dirty {
-			// pendingStorage check can be removed, since StateObject in SlotDB will not do finalize
-			log.Error("SlotDB should not get KV in pending", "key", key, "value", value)
-		}
+			value, dirty = s.pendingStorage.GetValue(key)
+			if dirty {
+				// pendingStorage check can be removed, since StateObject in SlotDB will not do finalize
+				log.Error("SlotDB should not get KV in pending", "key", key, "value", value)
+			}
 
-		// KVs in unconfirmed DB can be seen as "unconfirmed pending storage"
-		if val, ok := s.db.getKVFromUnconfirmedDB(s.address, key); ok {
-			return val
+			// KVs in unconfirmed DB can be seen as "unconfirmed pending storage"
+			if val, ok := s.db.getKVFromUnconfirmedDB(s.address, key); ok {
+				return val
+			}
+			// The pendingStorage of slot DB is incorrect, try to get from the base DB
+			baseObj := s.db.getStateObjectNoSlot(s.address)
+			if baseObj == nil {
+				// if base StateDB did not contain the address return empty
+				log.Debug("SlotDB try to get KV from base DB, but address is nil", "addr", s.address)
+				return common.Hash{}
+			}
+			return baseObj.GetCommittedState(db, key)
 		}
-		// The pendingStorage of slot DB is incorrect, try to get from the base DB
-		baseObj := s.db.getStateObjectNoSlot(s.address)
-		if baseObj == nil {
-			// if base StateDB did not contain the address return empty
-			log.Debug("SlotDB try to get KV from base DB, but address is nil", "addr", s.address)
-			return common.Hash{}
-		}
-		return baseObj.GetCommittedState(db, key)
-	}
+	*/
 
 	// Otherwise return the entry's original value
 	return s.GetCommittedState(db, key)
@@ -352,13 +354,13 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 	}
 	// If we have a pending write or clean cached, return that
 	if value, pending := s.pendingStorage.GetValue(key); pending {
-		log.Debug("StateObject GetCommittedState in pendingStorage", "addr", s.address,
+		log.Debug("StateObject get committed state in pendingStorage", "addr", s.address,
 			"key", key, "value", value)
 		return value
 	}
 
 	if value, cached := s.getOriginStorage(key); cached {
-		log.Debug("StateObject GetCommittedState in originStorage", "addr", s.address,
+		log.Debug("StateObject get committed state in originStorage", "addr", s.address,
 			"key", key, "value", value)
 		return value
 	}
@@ -422,7 +424,7 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 		value.SetBytes(content)
 	}
 	s.setOriginStorage(key, value)
-	log.Debug("StateObject GetCommittedState in DB", "addr", s.address, "key", key, "value", value)
+	log.Debug("StateObject get committed state in DB", "addr", s.address, "key", key, "value", value)
 	return value
 }
 
@@ -434,9 +436,9 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 		return
 	}
 	// If the new value is the same as old, don't set
-	prev := s.GetState(db, key)
+	prev := s.db.GetState(s.address, key) // in parallel mode, it has to get from StateDB
 	if prev == value {
-		log.Debug("StateObject SetState with same value", "addr", s.address, "key", key, "value", value)
+		log.Debug("StateObject set state with same value", "addr", s.address, "key", key, "value", value)
 		return
 	}
 	// New value is different, update and journal the change
@@ -673,13 +675,12 @@ func (s *StateObject) deepCopy(db *StateDB) *StateObject {
 	return stateObject
 }
 
-func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, storage Storage) {
-	storage.Range(func(key, value interface{}) bool {
+func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys StateKeys) {
+	for key := range keys {
 		// better to do s.GetState(db, key) to load originStorage for this key?
 		// since originStorage was in dirtyObjs, but it works even originStorage miss the state object.
-		s.SetState(db, key.(common.Hash), dirtyObjs.GetState(db, key.(common.Hash)))
-		return true
-	})
+		s.SetState(db, key, dirtyObjs.GetState(db, key))
+	}
 }
 
 //

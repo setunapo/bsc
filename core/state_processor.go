@@ -458,6 +458,7 @@ func (p *ParallelStateProcessor) init() {
 	}
 }
 
+/*
 // to check if the referred infor is valid or not
 func (p *ParallelStateProcessor) hasInvalidReference(slotDB *state.StateDB, index int) bool {
 	txIndex := slotDB.TxIndex()
@@ -701,6 +702,7 @@ func (p *ParallelStateProcessor) hasStateConflict(readDb *state.StateDB, changeL
 
 	return false
 }
+*/
 
 // for parallel execute, we put contracts of same address in a slot,
 // since these txs probably would have conflicts
@@ -1040,48 +1042,57 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 		// if this is any reason that indicates this transaction needs to redo, skip the conflict check
 		hasConflict = true
 	} else {
-		for index := 0; index < p.parallelNum; index++ {
-			log.Debug("Shadow conflict check", "Slot", slotIndex, "txIndex", txIndex,
-				"index", index, "baseTxIndex", slotDB.BaseTxIndex())
+		// to check if what the slot db read is correct.
+		// refDetail := slotDB.UnconfirmedRefList()
+		if !slotDB.IsParallelReadsValid() {
+			log.Info("Stage Execution conflict IsParallelReadsValid failed", "Slot", slotIndex,
+				"txIndex", txIndex)
+			hasConflict = true
+		}
+		/*
+			for index := 0; index < p.parallelNum; index++ {
+				log.Debug("Shadow conflict check", "Slot", slotIndex, "txIndex", txIndex,
+					"index", index, "baseTxIndex", slotDB.BaseTxIndex())
 
-			// do unconfirmed check, if slotDB accessed the stateDB is bad, it will be marked conflict
-			// fixme: can be more precious, check the redo stateDB
-			// in same slot, if the db is referenced and it is valid, we can skip it for CF
-			if slotIndex == index {
-				// https://bscscan.com/txs?block=2001956
-				if p.hasInvalidReference(slotDB, slotIndex) {
-					log.Info("Stage Execution conflict", "Slot", slotIndex,
-						"txIndex", txIndex, " conflict slot", index,
-						"slotDB.baseTxIndex", slotDB.BaseTxIndex())
-					hasConflict = true
-					break
-				}
-				continue
-			}
-
-			// check all finalizedDb from current slot's
-			for _, changeList := range p.slotState[index].mergedChangeList {
-				// log.Debug("Shadow conflict check", "changeList.TxIndex", changeList.TxIndex,
-				//	"slotDB.BaseTxIndex()", slotDB.BaseTxIndex())
-				if changeList.TxIndex <= slotDB.BaseTxIndex() {
+				// do unconfirmed check, if slotDB accessed the stateDB is bad, it will be marked conflict
+				// fixme: can be more precious, check the redo stateDB
+				// in same slot, if the db is referenced and it is valid, we can skip it for CF
+				if slotIndex == index {
+					// https://bscscan.com/txs?block=2001956
+					if p.hasInvalidReference(slotDB, slotIndex) {
+						log.Info("Stage Execution conflict", "Slot", slotIndex,
+							"txIndex", txIndex, " conflict slot", index,
+							"slotDB.baseTxIndex", slotDB.BaseTxIndex())
+						hasConflict = true
+						break
+					}
 					continue
 				}
 
-				log.Debug("do hasStateConflict", "Slot", slotIndex, "txIndex", txIndex,
-					"index", index, "baseTxIndex", slotDB.BaseTxIndex())
-				if p.hasStateConflict(slotDB, changeList) {
-					log.Info("Stage Execution conflict", "Slot", slotIndex,
-						"txIndex", txIndex, " conflict slot", index, "slotDB.baseTxIndex", slotDB.BaseTxIndex(),
-						"conflict txIndex", changeList.TxIndex)
-					hasConflict = true
+				// check all finalizedDb from current slot's
+				for _, changeList := range p.slotState[index].mergedChangeList {
+					// log.Debug("Shadow conflict check", "changeList.TxIndex", changeList.TxIndex,
+					//	"slotDB.BaseTxIndex()", slotDB.BaseTxIndex())
+					if changeList.TxIndex <= slotDB.BaseTxIndex() {
+						continue
+					}
+
+					log.Debug("do hasStateConflict", "Slot", slotIndex, "txIndex", txIndex,
+						"index", index, "baseTxIndex", slotDB.BaseTxIndex())
+					if p.hasStateConflict(slotDB, changeList) {
+						log.Info("Stage Execution conflict", "Slot", slotIndex,
+							"txIndex", txIndex, " conflict slot", index, "slotDB.baseTxIndex", slotDB.BaseTxIndex(),
+							"conflict txIndex", changeList.TxIndex)
+						hasConflict = true
+						break
+					}
+
+				}
+				if hasConflict {
 					break
 				}
-
 			}
-			if hasConflict {
-				break
-			}
-		}
+		*/
 	}
 
 	if hasConflict {
