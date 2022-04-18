@@ -436,7 +436,14 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 		return
 	}
 	// If the new value is the same as old, don't set
-	prev := s.GetState(db, key) // in parallel mode, it has to get from StateDB?
+	// in parallel mode, it has to get from StateDB, in case:
+	//  a.the Slot did not set the key before and try to set it to `val_1`
+	//  b.Unconfirmed DB has set the key to `val_2`
+	//  c.if we use StateObject.GetState, and the key load from the main DB is `val_1`
+	//    this `SetState could be skipped`
+	//  d.Finally, the key's value will be `val_2`, while it should be `val_1`
+	// such as: https://bscscan.com/txs?block=2491181
+	prev := s.db.GetState(s.address, key)
 	if prev == value {
 		log.Debug("StateObject set state with same value", "addr", s.address, "key", key, "value", value)
 		return
@@ -447,6 +454,10 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 		key:      key,
 		prevalue: prev,
 	})
+	if s.db.parallel.isSlotDB {
+		s.db.parallel.kvChangesInSlot[s.address][key] = struct{}{} // should be moved to after SetState, since there is a GetState inside of SetState
+	}
+
 	s.setState(key, value)
 }
 
@@ -679,7 +690,11 @@ func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys 
 	for key := range keys {
 		// better to do s.GetState(db, key) to load originStorage for this key?
 		// since originStorage was in dirtyObjs, but it works even originStorage miss the state object.
-		s.SetState(db, key, dirtyObjs.GetState(db, key))
+		// In parallel mode, always GetState from StateDB, not by StateObject directly
+		val := dirtyObjs.db.GetState(s.address, key)
+		log.Debug("MergeSlotObject", "txIndex", s.db.txIndex, "addr", s.address,
+			"key", key, "val", val)
+		s.SetState(db, key, val)
 	}
 }
 
