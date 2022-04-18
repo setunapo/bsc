@@ -1007,16 +1007,23 @@ func (s *StateDB) GetBalance(addr common.Address) *big.Int {
 		// 2.2 Try to get from unconfirmed DB if exist
 		if balance := s.getBalanceFromUnconfirmedDB(addr); balance != nil {
 			log.Debug("GetBalance in unconfirmed DB", "txIndex", s.txIndex, "addr", addr, "balance", balance)
+			s.parallel.balanceReadsInSlot[addr] = balance
 			return balance
 		}
 	}
 	// 3. Try to get from main StateObejct
+	balance := common.Big0
 	stateObject := s.getStateObjectNoSlot(addr)
 	if stateObject != nil {
 		log.Debug("GetBalance in main DB", "txIndex", s.txIndex, "addr", addr, "balance", stateObject.Balance())
-		return stateObject.Balance()
+		balance = stateObject.Balance()
+	} else {
+		log.Debug("GetBalance address not exist", "txIndex", s.txIndex, "addr", addr)
 	}
-	return common.Big0
+	if s.parallel.isSlotDB {
+		s.parallel.balanceReadsInSlot[addr] = balance
+	}
+	return balance
 }
 
 func (s *StateDB) GetNonce(addr common.Address) uint64 {
@@ -1036,16 +1043,22 @@ func (s *StateDB) GetNonce(addr common.Address) uint64 {
 		// 2.2 Try to get from unconfirmed DB if exist
 		if nonce, ok := s.getNonceFromUnconfirmedDB(addr); ok {
 			log.Debug("GetNonce in unconfirmed", "txIndex", s.txIndex, "addr", addr, "Nonce", nonce)
+			s.parallel.nonceReadsInSlot[addr] = nonce
 			return nonce
 		}
 	}
 	// 3.Try to get from main StateDB
+	var nonce uint64 = 0
 	stateObject := s.getStateObjectNoSlot(addr)
 	if stateObject != nil {
 		log.Debug("GetNonce in main", "txIndex", s.txIndex, "addr", addr, "stateObject", stateObject.Nonce())
-		return stateObject.Nonce()
+		nonce = stateObject.Nonce()
 	}
-	return 0
+	if s.parallel.isSlotDB {
+		s.parallel.nonceReadsInSlot[addr] = nonce
+	}
+
+	return nonce
 }
 
 // TxIndex returns the current transaction index set by Prepare.
@@ -1234,20 +1247,22 @@ func (s *StateDB) GetCodeSize(addr common.Address) int {
 	}
 
 	// 3. Try to get from main StateObejct
+	var codeSize int = 0
+	var code []byte
 	stateObject := s.getStateObjectNoSlot(addr)
-	if s.parallel.isSlotDB {
-		var code []byte
-		if stateObject != nil {
-			code = stateObject.Code(s.db)
-		}
-		s.parallel.codeReadsInSlot[addr] = code
-	}
+
 	if stateObject != nil {
 		log.Debug("GetCodeSize in main", "txIndex", s.txIndex, "addr", addr, "CodeSize", stateObject.CodeSize(s.db))
-		return stateObject.CodeSize(s.db)
+		code = stateObject.Code(s.db)
+		codeSize = stateObject.CodeSize(s.db)
+	} else {
+		log.Debug("GetCodeSize address not exist", "txIndex", s.txIndex, "addr", addr, "CodeSize", 0)
 	}
-	log.Debug("GetCodeSize in main", "txIndex", s.txIndex, "addr", addr, "CodeSize", 0)
-	return 0
+
+	if s.parallel.isSlotDB {
+		s.parallel.codeReadsInSlot[addr] = code
+	}
+	return codeSize
 }
 
 // return value of GetCodeHash:
@@ -2265,19 +2280,22 @@ func (s *StateDB) CopyForSlot() *StateDB {
 	parallel := ParallelState{
 		// use base(dispatcher) slot db's stateObjects.
 		// It is a SyncMap, only readable to slot, not writable
-		stateObjects:              s.parallel.stateObjects,
-		unconfirmedDBInShot:       make(map[int]*StateDB, 100),
-		unconfirmedRefList:        unconfirmedRef,
-		codeReadsInSlot:           make(map[common.Address][]byte, 10), // addressStructPool.Get().(map[common.Address]struct{}),
-		codeHashReadsInSlot:       make(map[common.Address]common.Hash),
-		codeChangesInSlot:         make(map[common.Address]struct{}),
-		kvChangesInSlot:           make(map[common.Address]StateKeys),    // stateKeysPool.Get().(map[common.Address]StateKeys),
-		kvReadsInSlot:             make(map[common.Address]Storage, 100), // stateKeysPool.Get().(map[common.Address]Storage),
-		balanceChangesInSlot:      make(map[common.Address]struct{}, 10), // balancePool.Get().(map[common.Address]struct{}, 10),
-		balanceReadsInSlot:        make(map[common.Address]*big.Int),     // addressStructPool.Get().(map[common.Address]struct{}),
-		addrStateReadsInSlot:      make(map[common.Address]bool),         // addressStructPool.Get().(map[common.Address]struct{}),
-		addrStateChangesInSlot:    make(map[common.Address]bool),         // addressStructPool.Get().(map[common.Address]struct{}),
-		nonceChangesInSlot:        make(map[common.Address]struct{}),     // addressStructPool.Get().(map[common.Address]struct{}),
+		stateObjects:        s.parallel.stateObjects,
+		unconfirmedDBInShot: make(map[int]*StateDB, 100),
+		unconfirmedRefList:  unconfirmedRef,
+
+		codeReadsInSlot:        make(map[common.Address][]byte, 10), // addressStructPool.Get().(map[common.Address]struct{}),
+		codeHashReadsInSlot:    make(map[common.Address]common.Hash),
+		codeChangesInSlot:      make(map[common.Address]struct{}),
+		kvChangesInSlot:        make(map[common.Address]StateKeys),    // stateKeysPool.Get().(map[common.Address]StateKeys),
+		kvReadsInSlot:          make(map[common.Address]Storage, 100), // stateKeysPool.Get().(map[common.Address]Storage),
+		balanceChangesInSlot:   make(map[common.Address]struct{}, 10), // balancePool.Get().(map[common.Address]struct{}, 10),
+		balanceReadsInSlot:     make(map[common.Address]*big.Int),     // addressStructPool.Get().(map[common.Address]struct{}),
+		addrStateReadsInSlot:   make(map[common.Address]bool),         // addressStructPool.Get().(map[common.Address]struct{}),
+		addrStateChangesInSlot: make(map[common.Address]bool),         // addressStructPool.Get().(map[common.Address]struct{}),
+		nonceChangesInSlot:     make(map[common.Address]struct{}),     // addressStructPool.Get().(map[common.Address]struct{}),
+		nonceReadsInSlot:       make(map[common.Address]uint64),
+
 		isSlotDB:                  true,
 		dirtiedStateObjectsInSlot: stateObjectsPool.Get().(map[common.Address]*StateObject),
 	}
