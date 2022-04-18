@@ -436,7 +436,7 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 		return
 	}
 	// If the new value is the same as old, don't set
-	prev := s.db.GetState(s.address, key) // in parallel mode, it has to get from StateDB
+	prev := s.GetState(db, key) // in parallel mode, it has to get from StateDB?
 	if prev == value {
 		log.Debug("StateObject set state with same value", "addr", s.address, "key", key, "value", value)
 		return
