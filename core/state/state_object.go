@@ -198,7 +198,7 @@ type Account struct {
 // newObject creates a state object.
 func newObject(db *StateDB, isParallel bool, address common.Address, data Account) *StateObject {
 	if data.Balance == nil {
-		data.Balance = new(big.Int)
+		data.Balance = new(big.Int) // todo: why not common.Big0?
 	}
 	if data.CodeHash == nil {
 		data.CodeHash = emptyCodeHash
