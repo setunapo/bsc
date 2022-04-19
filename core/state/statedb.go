@@ -485,8 +485,12 @@ func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txInd
 					log.Debug("merge state object: KV", "txIndex", slotDb.txIndex, "addr", addr)
 					newMainObj.MergeSlotObject(s.db, dirtyObj, keys)
 				}
-				// dirtyObj.Nonce() should not be less than newMainObj
-				newMainObj.setNonce(dirtyObj.Nonce())
+				if _, nonced := slotDb.parallel.nonceChangesInSlot[addr]; nonced {
+					log.Debug("merge state object: nonce", "txIndex", slotDb.txIndex,
+						"addr", addr, "nonce", dirtyObj.Nonce())
+					// dirtyObj.Nonce() should not be less than newMainObj
+					newMainObj.setNonce(dirtyObj.Nonce())
+				}
 			}
 			newMainObj.finalise(true) // true: prefetch on dispatcher
 			// update the object
@@ -1608,6 +1612,8 @@ func (s *StateDB) SetNonce(addr common.Address, nonce uint64) {
 				return
 			}
 		}
+		log.Debug("SetNonce update", "SlotIndex", s.parallel.SlotIndex, "txIndex", s.txIndex,
+			"addr", addr, "nonce", nonce)
 		stateObject.SetNonce(nonce)
 	}
 }
