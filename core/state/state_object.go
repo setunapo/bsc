@@ -287,37 +287,6 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 		return value
 	}
 
-	/*
-		if s.db.parallel.isSlotDB {
-			// In parallel execution mode, it is a bit complicated to do get state .
-			// Since we do `unconfirmed reference` & `lightCopy`, the KV is accessed in order of priority:
-			//   -> 1.lightCopy's dirtyStorage
-			//   -> 2.lightCopy's pendingStorage
-			//        It was for merge, but not needed any more since StateObject in Slot will not be finalized.
-			//   -> 3.unconfirmed DB: it can be seen as unconfirmed pending
-			//   -> 4.mainStateDB committed: pending -> origin -> snopshot or trie node
-
-			value, dirty = s.pendingStorage.GetValue(key)
-			if dirty {
-				// pendingStorage check can be removed, since StateObject in SlotDB will not do finalize
-				log.Error("SlotDB should not get KV in pending", "key", key, "value", value)
-			}
-
-			// KVs in unconfirmed DB can be seen as "unconfirmed pending storage"
-			if val, ok := s.db.getKVFromUnconfirmedDB(s.address, key); ok {
-				return val
-			}
-			// The pendingStorage of slot DB is incorrect, try to get from the base DB
-			baseObj := s.db.getStateObjectNoSlot(s.address)
-			if baseObj == nil {
-				// if base StateDB did not contain the address return empty
-				log.Debug("SlotDB try to get KV from base DB, but address is nil", "addr", s.address)
-				return common.Hash{}
-			}
-			return baseObj.GetCommittedState(db, key)
-		}
-	*/
-
 	// Otherwise return the entry's original value
 	return s.GetCommittedState(db, key)
 }
@@ -436,7 +405,7 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 		return
 	}
 	// If the new value is the same as old, don't set
-	// in parallel mode, it has to get from StateDB, in case:
+	// In parallel mode, it has to get from StateDB, in case:
 	//  a.the Slot did not set the key before and try to set it to `val_1`
 	//  b.Unconfirmed DB has set the key to `val_2`
 	//  c.if we use StateObject.GetState, and the key load from the main DB is `val_1`
@@ -455,7 +424,7 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 		prevalue: prev,
 	})
 	if s.db.parallel.isSlotDB {
-		s.db.parallel.kvChangesInSlot[s.address][key] = struct{}{} // should be moved to after SetState, since there is a GetState inside of SetState
+		s.db.parallel.kvChangesInSlot[s.address][key] = struct{}{} // should be moved to here, after `s.db.GetState()`
 	}
 
 	s.setState(key, value)
@@ -688,9 +657,10 @@ func (s *StateObject) deepCopy(db *StateDB) *StateObject {
 
 func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys StateKeys) {
 	for key := range keys {
-		// better to do s.GetState(db, key) to load originStorage for this key?
-		// since originStorage was in dirtyObjs, but it works even originStorage miss the state object.
-		// In parallel mode, always GetState from StateDB, not by StateObject directly
+		// In parallel mode, always GetState by StateDB, not by StateObject directly,
+		// since it the KV could exist in unconfirmed DB.
+		// But here, it should be ok, since the KV should be changed and valid in the SlotDB,
+		// we still  do GetState by StateDB, it is not an issue.
 		val := dirtyObjs.db.GetState(s.address, key)
 		log.Debug("MergeSlotObject", "txIndex", s.db.txIndex, "addr", s.address,
 			"key", key, "val", val)

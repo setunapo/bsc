@@ -1792,6 +1792,7 @@ func (s *StateDB) Suicide(addr common.Address) bool {
 			s.parallel.nonceChangesInSlot[addr] = struct{}{}
 			s.parallel.balanceChangesInSlot[addr] = struct{}{}
 			s.parallel.codeChangesInSlot[addr] = struct{}{}
+			// s.parallel.kvChangesInSlot[addr] = make(StateKeys) // all key changes are discarded
 			log.Debug("Suicide onCreate", "SlotIndex", s.parallel.SlotIndex, "txIndex", s.txIndex,
 				"addr", addr)
 			return true
@@ -2018,6 +2019,7 @@ func (s *StateDB) createObject(addr common.Address) (newobj *StateObject) {
 		s.parallel.balanceChangesInSlot[addr] = struct{}{}
 		s.parallel.codeChangesInSlot[addr] = struct{}{}
 		// notice: all the KVs are cleared if any
+		s.parallel.kvChangesInSlot[addr] = make(StateKeys)
 	} else {
 		s.SetStateObject(newobj)
 	}

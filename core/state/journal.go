@@ -20,7 +20,6 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/log"
 )
 
 // journalEntry is a modification entry in the state change journal that can be
@@ -157,17 +156,8 @@ func (ch createObjectChange) dirtied() *common.Address {
 
 func (ch resetObjectChange) revert(s *StateDB) {
 	if s.parallel.isSlotDB {
-		// ch.prev was got from dirtiedStateObjectsInSlot, put it back
-		if ch.prev.db == s {
-			s.parallel.dirtiedStateObjectsInSlot[ch.prev.address] = ch.prev
-		} else {
-			// ch.prev was got from unconfirmed DB,
-			// dirtiedStateObjectsInSlot do not have it
-			log.Info("resetObjectChange prev was got from unconfirmed DB", "txIndex", s.txIndex,
-				"prevTxIndex", ch.prev.db.txIndex)
-			delete(s.parallel.dirtiedStateObjectsInSlot, ch.prev.address)
-		}
-
+		// ch.prev must be from dirtiedStateObjectsInSlot, put it back
+		s.parallel.dirtiedStateObjectsInSlot[ch.prev.address] = ch.prev
 	} else {
 		// ch.prev was got from main DB, put it back to main DB.
 		s.SetStateObject(ch.prev)
