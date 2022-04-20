@@ -2113,7 +2113,6 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals bool) (int, er
 		var followupInterrupt uint32
 		// For diff sync, it may fallback to full sync, so we still do prefetch
 		// parallel mode has a pipeline, similar to this prefetch, to save CPU we disable this prefetch for parallel
-		// disable prefetch for parallel bugfix
 		if !bc.parallelExecution {
 			if len(block.Transactions()) >= prefetchTxNumber {
 				throwaway := statedb.Copy()
