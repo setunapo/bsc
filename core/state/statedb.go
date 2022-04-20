@@ -40,9 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/trie"
 )
 
-const (
-	defaultNumOfSlots = 100
-)
+const defaultNumOfSlots = 100
 
 type revision struct {
 	id           int
@@ -99,7 +97,9 @@ func (s *StateDB) storeStateObj(addr common.Address, stateObject *StateObject) {
 	if s.isParallel {
 		// When a state object is stored into s.parallel.stateObjects,
 		// it belongs to base StateDB, it is confirmed and valid.
-		if s.parallel.baseStateDB != nil {
+		if s.parallel.isSlotDB {
+			// the object could be create in SlotDB, if it got the object from DB and
+			// update it to the shared `s.parallel.stateObjects``
 			stateObject.db = s.parallel.baseStateDB
 		}
 		s.parallel.stateObjects.Store(addr, stateObject)
@@ -117,17 +117,6 @@ func (s *StateDB) deleteStateObj(addr common.Address) {
 	}
 }
 
-// For parallel mode only, keep the change list for later conflict detect
-type SlotChangeList struct {
-	TxIndex            int
-	KVChangeSet        map[common.Address]StateKeys
-	BalanceChangeSet   map[common.Address]struct{}
-	CodeChangeSet      map[common.Address]struct{}
-	AddrStateChangeSet map[common.Address]bool
-	// DirtyAddrStateSet map[common.Address]int // it is address state reference, not changed
-	NonceChangeSet map[common.Address]struct{}
-}
-
 // For parallel mode only
 type ParallelState struct {
 	isSlotDB  bool // isSlotDB denotes StateDB is used in slot
@@ -139,12 +128,13 @@ type ParallelState struct {
 	// And we will merge all the changes made by the concurrent slot into it.
 	stateObjects *StateObjectSyncMap
 
-	baseStateDB               *StateDB                        // for parallel mode, there will be a base StateDB in dispatcher routine.
-	baseTxIndex               int                             // slotDB is created base on this tx index.
-	dirtiedStateObjectsInSlot map[common.Address]*StateObject // fixme: sync.Map, unconfirmed reference & main stateDB write if ownership transfered
-	// for conflict check
-	unconfirmedDBInShot map[int]*StateDB // do unconfirmed reference in same slot.
+	baseStateDB               *StateDB // for parallel mode, there will be a base StateDB in dispatcher routine.
+	baseTxIndex               int      // slotDB is created base on this tx index.
+	dirtiedStateObjectsInSlot map[common.Address]*StateObject
+	unconfirmedDBInShot       map[int]*StateDB // do unconfirmed reference in same slot.
 
+	// we will record the read detail for conflict check and
+	// the changed addr or key for object merge, the changed detail can be acheived from the dirty object
 	nonceChangesInSlot   map[common.Address]struct{}
 	nonceReadsInSlot     map[common.Address]uint64
 	balanceChangesInSlot map[common.Address]struct{} // the address's balance has been changed
@@ -213,7 +203,6 @@ type StateDB struct {
 	writeOnSharedStorage bool                        // Write to the shared origin storage of a stateObject while reading from the underlying storage layer.
 
 	isParallel bool
-	Invalid    bool          // paralle results are valid
 	parallel   ParallelState // to keep all the parallel execution elements
 
 	// DB error.
@@ -380,7 +369,7 @@ func (s *StateDB) PrepareForParallel() {
 // finalized(dirty -> pending) on execution slot, the execution results should be
 // merged back to the main StateDB.
 // And it will return and keep the slot's change list for later conflict detect.
-func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txIndex int) SlotChangeList {
+func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txIndex int) {
 	// receipt.Logs use unified log index within a block
 	// align slotDB's log index to the block stateDB's logSize
 	log.Debug("MergeSlotDB", "SlotIndex", slotDb.parallel.SlotIndex, "txIndex:", slotDb.txIndex)
@@ -395,7 +384,7 @@ func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txInd
 	if slotDb.parallel.keepSystemAddressBalance {
 		s.SetBalance(systemAddress, slotDb.GetBalance(systemAddress))
 	} else {
-		s.AddBalance(systemAddress, slotDb.GetBalance(systemAddress)) // bug
+		s.AddBalance(systemAddress, slotDb.GetBalance(systemAddress))
 	}
 
 	// only merge dirty objects
@@ -543,18 +532,6 @@ func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txInd
 		//	s.snapStorage[k] = temp
 		// }
 	}
-
-	// to create a new object to store change list for conflict detect,
-	// since slot db reuse is disabled, we do not need to do copy.
-	changeList := SlotChangeList{
-		TxIndex:            txIndex,
-		KVChangeSet:        slotDb.parallel.kvChangesInSlot,
-		BalanceChangeSet:   slotDb.parallel.balanceChangesInSlot,
-		CodeChangeSet:      slotDb.parallel.codeChangesInSlot,
-		AddrStateChangeSet: slotDb.parallel.addrStateChangesInSlot,
-		NonceChangeSet:     slotDb.parallel.nonceChangesInSlot,
-	}
-	return changeList
 }
 
 func (s *StateDB) EnableWriteOnSharedStorage() {
@@ -712,7 +689,7 @@ func (s *StateDB) SubRefund(gas uint64) {
 	s.refund -= gas
 }
 
-// For Parallel Execution Mode, this is called Penetrated Access:
+// For Parallel Execution Mode, it can be seen as Penetrated Access:
 //   -------------------------------------------------------
 //   | BaseTxIndex | Unconfirmed Txs... | Current TxIndex |
 //   -------------------------------------------------------
@@ -956,9 +933,12 @@ func (s *StateDB) Exist(addr common.Address) bool {
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty
 		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
-			// fixme: no need to check if it is deleted or not, add a check and to be removed
-			if obj.deleted {
-				log.Error("Exist in dirty, but marked as deleted", "txIndex", s.txIndex, "baseTxIndex:", s.parallel.baseTxIndex)
+			// dirty object should not be deleted, since deleted is only flagged on finalise
+			// and if it is suicided in contract call, suicide is taken as exist until it is finalised
+			// todo: add a check here, to be removed later
+			if obj.deleted || obj.suicided {
+				log.Error("Exist in dirty, but marked as deleted or suicided",
+					"txIndex", s.txIndex, "baseTxIndex:", s.parallel.baseTxIndex)
 			}
 			log.Debug("Exist in dirty", "txIndex", s.txIndex, "baseTxIndex:", s.parallel.baseTxIndex)
 			return true
@@ -994,8 +974,21 @@ func (s *StateDB) Empty(addr common.Address) bool {
 		// 1.Try to get from dirty
 		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
 			log.Debug("Empty in dirty", "txIndex", s.txIndex, "addr", addr, "ret", obj.empty())
-			// fixme: dirty object is light copied and fixup on need, empty could be wrong
-			return obj.empty()
+			// dirty object is light copied and fixup on need,
+			// empty could be wrong, except it is created with this TX
+			if _, ok := s.parallel.addrStateChangesInSlot[addr]; ok {
+				return obj.empty()
+			}
+			// so we have to check it manually
+			// empty means: Nonce == 0 && Balance == 0 && CodeHash == emptyCodeHash
+			if s.GetNonce(addr) != 0 {
+				return false
+			}
+			if s.GetBalance(addr).Sign() != 0 {
+				return false
+			}
+			codeHash := s.GetCodeHash(addr)
+			return bytes.Equal(codeHash.Bytes(), emptyCodeHash) // code is empty, the object is empty
 		}
 		// 2.Try to get from uncomfirmed & main DB
 		// 2.1 Already read before
@@ -1170,9 +1163,9 @@ func (s *StateDB) IsParallelReadsValid() bool {
 				log.Info("IsSlotDBReadsValid KV read is invalid", "addr", addr,
 					"key", keySlot.(common.Hash), "valSlot", valSlot.(common.Hash), "valMain", valMain)
 				conflict = true
-				return false
+				return false // return false, Range will be terminated.
 			}
-			return true
+			return true // return true, Range will try next KV
 		})
 		if conflict {
 			return false
@@ -1431,7 +1424,7 @@ func (s *StateDB) GetCommittedState(addr common.Address, hash common.Hash) commo
 		// 1.No need to get from pending of itself even on merge, since stateobject in SlotDB won't do finalise
 		// 2.Try to get from uncomfirmed DB or main DB
 		//   KVs in unconfirmed DB can be seen as pending storage
-		//   KVs in main DB are merged from SlotDB and has done finalise() merge, can be seen as pending storage too.
+		//   KVs in main DB are merged from SlotDB and has done finalise() on merge, can be seen as pending storage too.
 		// 2.1 Already read before
 		if storage, ok := s.parallel.kvReadsInSlot[addr]; ok {
 			if val, ok := storage.GetValue(hash); ok {
@@ -1847,6 +1840,7 @@ func (s *StateDB) deleteStateObject(obj *StateObject) {
 // getStateObject retrieves a state object given by the address, returning nil if
 // the object is not found or was deleted in this execution context. If you need
 // to differentiate between non-existent/just-deleted, use getDeletedStateObject.
+// fixme: avoid getStateObjectNoSlot, may be we define a new struct SlotDB which inherit StateDB
 func (s *StateDB) getStateObjectNoSlot(addr common.Address) *StateObject {
 	if obj := s.getDeletedStateObject(addr); obj != nil && !obj.deleted {
 		return obj

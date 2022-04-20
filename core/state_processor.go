@@ -399,8 +399,7 @@ type SlotState struct {
 	pendingTxReqChan   chan struct{}
 	pendingConfirmChan chan *ParallelTxResult
 	pendingTxReqList   []*ParallelTxRequest // maintained by dispatcher for dispatch policy
-	mergedChangeList   []state.SlotChangeList
-	slotdbChan         chan *state.StateDB // dispatch will create and send this slotDB to slot
+	slotdbChan         chan *state.StateDB  // dispatch will create and send this slotDB to slot
 	// txReqUnits         []*ParallelDispatchUnit // only dispatch can accesssd
 	unconfirmedStateDBs *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
 }
@@ -698,12 +697,7 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 	resultTxIndex := result.txReq.txIndex
 	resultSlotState := p.slotState[resultSlotIndex]
 	resultSlotState.pendingTxReqList = resultSlotState.pendingTxReqList[1:]
-
-	// Slot's mergedChangeList is produced by dispatcher, while consumed by slot.
-	// It is safe, since write and read is in sequential, do write -> notify -> read
-	// It is not good, but work right now.
-	changeList := statedb.MergeSlotDB(result.slotDB, result.receipt, resultTxIndex)
-	resultSlotState.mergedChangeList = append(resultSlotState.mergedChangeList, changeList)
+	statedb.MergeSlotDB(result.slotDB, result.receipt, resultTxIndex)
 
 	if resultTxIndex != p.mergedTxIndex+1 {
 		log.Error("ProcessParallel tx result out of order", "resultTxIndex", resultTxIndex,
@@ -806,7 +800,6 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 	}
 
 	if hasConflict {
-		slotDB.Invalid = true
 		p.debugConflictRedoNum++
 		// re-run should not have conflict, since it has the latest world state.
 		redoResult := &ParallelTxResult{
@@ -930,7 +923,6 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 			}()
 	*/
 	for _, slot := range p.slotState {
-		slot.mergedChangeList = make([]state.SlotChangeList, 0)
 		slot.pendingTxReqList = make([]*ParallelTxRequest, 0)
 		slot.unconfirmedStateDBs = new(sync.Map) // make(map[int]*state.StateDB), fixme: resue not new?
 	}
