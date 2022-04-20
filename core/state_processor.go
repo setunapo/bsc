@@ -766,7 +766,6 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 
 	// wait until the previous tx is finalized.
 	if txReq.waitTxChan != nil {
-		log.Debug("Stage wait previous Tx done", "Slot", slotIndex, "txIndex", txIndex)
 		<-txReq.waitTxChan // close the channel
 	}
 
@@ -788,8 +787,6 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 		// to check if what the slot db read is correct.
 		// refDetail := slotDB.UnconfirmedRefList()
 		if !slotDB.IsParallelReadsValid() {
-			log.Debug("Stage Execution conflict IsParallelReadsValid failed", "Slot", slotIndex,
-				"txIndex", txIndex, "slotDB.baseTxIndex", slotDB.BaseTxIndex())
 			hasConflict = true
 		}
 	}
@@ -858,7 +855,6 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 		// ** for a queued tx,
 		//    it is better to create a new SlotDB, since COW is used.
 		for _, txReq := range curSlot.pendingTxReqList {
-			log.Debug("SlotLoop received a new TxReq", "Slot", slotIndex, "txIndex", txReq.txIndex)
 			if txReq.slotDB == nil {
 				result := &ParallelTxResult{
 					updateSlotDB: true,

@@ -1055,13 +1055,13 @@ func (s *StateDB) BaseTxIndex() int {
 func (s *StateDB) IsParallelReadsValid() bool {
 	slotDB := s
 	if !slotDB.parallel.isSlotDB {
-		log.Error("IsSlotDBReadsValid slotDB should be slot DB")
+		log.Error("IsSlotDBReadsValid slotDB should be slot DB", "txIndex", slotDB.txIndex)
 		return false
 	}
 
 	mainDB := slotDB.parallel.baseStateDB
 	if mainDB.parallel.isSlotDB {
-		log.Error("IsSlotDBReadsValid s should be main DB")
+		log.Error("IsSlotDBReadsValid s should be main DB", "txIndex", slotDB.txIndex)
 		return false
 	}
 	// for nonce
@@ -1069,7 +1069,8 @@ func (s *StateDB) IsParallelReadsValid() bool {
 		nonceMain := mainDB.GetNonce(addr)
 		if nonceSlot != nonceMain {
 			log.Debug("IsSlotDBReadsValid nonce read is invalid", "addr", addr,
-				"nonceSlot", nonceSlot, "nonceMain", nonceMain)
+				"nonceSlot", nonceSlot, "nonceMain", nonceMain,
+				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
 			return false
 		}
 	}
@@ -1078,7 +1079,8 @@ func (s *StateDB) IsParallelReadsValid() bool {
 		balanceMain := mainDB.GetBalance(addr)
 		if balanceSlot.Cmp(balanceMain) != 0 {
 			log.Debug("IsSlotDBReadsValid balance read is invalid", "addr", addr,
-				"balanceSlot", balanceSlot, "balanceMain", balanceMain)
+				"balanceSlot", balanceSlot, "balanceMain", balanceMain,
+				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
 			return false
 		}
 	}
@@ -1087,7 +1089,8 @@ func (s *StateDB) IsParallelReadsValid() bool {
 		codeMain := mainDB.GetCode(addr)
 		if !bytes.Equal(codeSlot, codeMain) {
 			log.Debug("IsSlotDBReadsValid code read is invalid", "addr", addr,
-				"len codeSlot", len(codeSlot), "len codeMain", len(codeMain))
+				"len codeSlot", len(codeSlot), "len codeMain", len(codeMain),
+				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
 			return false
 		}
 	}
@@ -1096,7 +1099,8 @@ func (s *StateDB) IsParallelReadsValid() bool {
 		codeHashMain := mainDB.GetCodeHash(addr)
 		if !bytes.Equal(codeHashSlot.Bytes(), codeHashMain.Bytes()) {
 			log.Debug("IsSlotDBReadsValid codehash read is invalid", "addr", addr,
-				"codeHashSlot", codeHashSlot, "codeHashMain", codeHashMain)
+				"codeHashSlot", codeHashSlot, "codeHashMain", codeHashMain,
+				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
 			return false
 		}
 	}
@@ -1107,7 +1111,8 @@ func (s *StateDB) IsParallelReadsValid() bool {
 			valMain := mainDB.GetState(addr, keySlot.(common.Hash))
 			if !bytes.Equal(valSlot.(common.Hash).Bytes(), valMain.Bytes()) {
 				log.Debug("IsSlotDBReadsValid KV read is invalid", "addr", addr,
-					"key", keySlot.(common.Hash), "valSlot", valSlot.(common.Hash), "valMain", valMain)
+					"key", keySlot.(common.Hash), "valSlot", valSlot.(common.Hash), "valMain", valMain,
+					"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
 				conflict = true
 				return false // return false, Range will be terminated.
 			}
@@ -1125,7 +1130,8 @@ func (s *StateDB) IsParallelReadsValid() bool {
 		}
 		if stateSlot != stateMain {
 			log.Debug("IsSlotDBReadsValid addrState read invalid(true: exist, false: not exist)",
-				"addr", addr, "stateSlot", stateSlot, "stateMain", stateMain)
+				"addr", addr, "stateSlot", stateSlot, "stateMain", stateMain,
+				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
 			return false
 		}
 	}
