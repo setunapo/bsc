@@ -772,6 +772,13 @@ func (s *StateDB) getNonceFromUnconfirmedDB(addr common.Address) (uint64, bool) 
 			}
 			// nonce hit, return the nonce
 			obj := unconfirmedDb.parallel.dirtiedStateObjectsInSlot[addr]
+			if obj == nil {
+				// could not exist, if it is changed but reverted
+				// fixme: revert should remove the change record
+				log.Warn("Get nonce from UnconfirmedDB, changed but object not exist, ",
+					"txIndex", s.txIndex, "referred txIndex", i, "addr", addr)
+				continue
+			}
 			log.Debug("Get Nonce from unconfirmed",
 				"txIndex", s.txIndex, "referred txIndex", i, "addr", addr,
 				"deleted", obj.deleted, "nonce", obj.Nonce())
@@ -807,7 +814,14 @@ func (s *StateDB) getCodeFromUnconfirmedDB(addr common.Address) ([]byte, bool) {
 				// try next unconfirmedDb
 				continue
 			}
-			obj := db.parallel.dirtiedStateObjectsInSlot[addr] // must exist
+			obj := db.parallel.dirtiedStateObjectsInSlot[addr]
+			if obj == nil {
+				// could not exist, if it is changed but reverted
+				// fixme: revert should remove the change record
+				log.Warn("Get code from UnconfirmedDB, changed but object not exist, ",
+					"txIndex", s.txIndex, "referred txIndex", i, "addr", addr)
+				continue
+			}
 			code := obj.Code(s.db)
 			log.Debug("Get code from unconfirmed",
 				"txIndex", s.txIndex, "referred txIndex", i, "addr", addr, "deleted", obj.deleted)
@@ -842,7 +856,14 @@ func (s *StateDB) getCodeHashFromUnconfirmedDB(addr common.Address) (common.Hash
 				continue
 			}
 
-			obj := db.parallel.dirtiedStateObjectsInSlot[addr] // must exist
+			obj := db.parallel.dirtiedStateObjectsInSlot[addr]
+			if obj == nil {
+				// could not exist, if it is changed but reverted
+				// fixme: revert should remove the change record
+				log.Warn("Get codeHash from UnconfirmedDB, changed but object not exist, ",
+					"txIndex", s.txIndex, "referred txIndex", i, "addr", addr)
+				continue
+			}
 			codeHash := common.Hash{}
 			if !obj.deleted {
 				codeHash = common.BytesToHash(obj.CodeHash())
@@ -869,6 +890,14 @@ func (s *StateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (deleted bo
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
 			if exist, ok := db.parallel.addrStateChangesInSlot[addr]; ok {
+				if _, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
+					// could not exist, if it is changed but reverted
+					// fixme: revert should remove the change record
+					log.Warn("Get addr State from UnconfirmedDB, changed but object not exist, ",
+						"txIndex", s.txIndex, "referred txIndex", i, "addr", addr)
+					continue
+				}
+
 				log.Debug("Get AddrState from UnconfirmedDB, in drity",
 					"txIndex", s.txIndex, "referred txIndex", i,
 					"addr", addr, "exist", exist)
