@@ -741,14 +741,10 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 
 	if result.Failed() {
 		// if Tx is reverted, all its state change will be discarded
-		log.Info("TX reverted? in normal slot", "Slot", slotIndex, "txIndex", txReq.txIndex, "result.Err", result.Err)
 		slotDB.RevertSlotDB(txReq.msg.From())
 	}
 	slotDB.Finalise(true) // Finalise could write s.parallel.addrStateChangesInSlot[addr], keep Read and Write in same routine to avoid crash
 
-	log.Debug("In Slot, Stage Execution done", "Slot", slotIndex, "txIndex", txReq.txIndex,
-		"slotDB.baseTxIndex", slotDB.BaseTxIndex(),
-		"result.UsedGas", result.UsedGas)
 	return &ParallelTxResult{
 		updateSlotDB: false,
 		slotIndex:    slotIndex,
@@ -777,12 +773,11 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 	// do conflict detect
 	hasConflict := false
 	systemAddrConflict := false
-	log.Debug("Shadow Stage Execution done, do conflict check", "Slot", slotIndex, "txIndex", txIndex)
 	if txResult.err != nil {
 		log.Debug("redo, since in slot execute failed", "err", txResult.err)
 		hasConflict = true
 	} else if slotDB.SystemAddressRedo() {
-		log.Info("Stage Execution conflict for SystemAddressRedo", "Slot", slotIndex,
+		log.Debug("Stage Execution conflict for SystemAddressRedo", "Slot", slotIndex,
 			"txIndex", txIndex)
 		hasConflict = true
 		systemAddrConflict = true
@@ -793,8 +788,8 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 		// to check if what the slot db read is correct.
 		// refDetail := slotDB.UnconfirmedRefList()
 		if !slotDB.IsParallelReadsValid() {
-			log.Info("Stage Execution conflict IsParallelReadsValid failed", "Slot", slotIndex,
-				"txIndex", txIndex)
+			log.Debug("Stage Execution conflict IsParallelReadsValid failed", "Slot", slotIndex,
+				"txIndex", txIndex, "slotDB.baseTxIndex", slotDB.BaseTxIndex())
 			hasConflict = true
 		}
 	}
@@ -818,8 +813,6 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 
 		blockContext := NewEVMBlockContext(header, p.bc, nil) // can share blockContext within a block for efficiency
 		vmenv := vm.NewEVM(blockContext, vm.TxContext{}, updatedSlotDB, p.config, txReq.vmConfig)
-		log.Info("Shadow conflict redo", "Slot", slotIndex,
-			"txReq.txIndex", txReq.txIndex, "slotDB.baseTxIndex", slotDB.BaseTxIndex())
 		txResult.evm, txResult.result, txResult.err = applyTransactionStageExecution(txReq.msg,
 			gpSlot, updatedSlotDB, vmenv)
 
@@ -829,7 +822,7 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 
 		if txResult.result.Failed() {
 			// if Tx is reverted, all its state change will be discarded
-			log.Info("TX reverted?", "Slot", slotIndex, "txIndex", txIndex,
+			log.Debug("TX reverted?", "Slot", slotIndex, "txIndex", txIndex,
 				"result.Err", txResult.result.Err)
 			txResult.slotDB.RevertSlotDB(txReq.msg.From())
 		}
@@ -841,9 +834,6 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 		log.Error("gasConsumed != result.UsedGas mismatch",
 			"gasConsumed", gasConsumed, "result.UsedGas", txResult.result.UsedGas)
 	}
-
-	log.Info("ok to finalize this TX", "Slot", slotIndex, "txIndex", txIndex,
-		"result.UsedGas", txResult.result.UsedGas, "txReq.usedGas", *txReq.usedGas)
 
 	// ok, time to do finalize, stage2 should not be parallel
 	txResult.receipt, txResult.err = applyTransactionStageFinalization(txResult.evm, txResult.result,
@@ -889,14 +879,9 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 	curSlot := p.slotState[slotIndex]
 	for {
-		log.Debug("runShadowSlotLoop wait", "slotIndex", slotIndex)
 		// ParallelTxResult from pendingConfirmChan is not confirmed yet
 		unconfirmedResult := <-curSlot.pendingConfirmChan
-
-		log.Debug("runShadowSlotLoop to confirm the TxResult from master slot", "Slot", slotIndex, "txIndex", unconfirmedResult.txReq.txIndex)
 		confirmedResult := p.executeInShadowSlot(slotIndex, unconfirmedResult)
-
-		log.Debug("runShadowSlotLoop the TxReq is done", "Slot", slotIndex, "err", confirmedResult.err)
 		p.txResultChan <- confirmedResult
 	}
 }
@@ -935,7 +920,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		header  = block.Header()
 		gp      = new(GasPool).AddGas(block.GasLimit())
 	)
-	log.Warn("ProcessParallel", "block", header.Number)
+	log.Info("ProcessParallel", "block", header.Number)
 	var receipts = make([]*types.Receipt, 0)
 	txNum := len(block.Transactions())
 	p.resetState(txNum, statedb)
@@ -1006,7 +991,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 
 		// update tx result
 		if result.err != nil {
-			log.Warn("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
+			log.Error("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
 				"resultTxIndex", result.txReq.txIndex, "result.err", result.err)
 			return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txReq.txIndex, result.txReq.tx.Hash().Hex(), result.err)
 		}
@@ -1017,7 +1002,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 
 	// len(commonTxs) could be 0, such as: https://bscscan.com/block/14580486
 	if len(commonTxs) > 0 {
-		log.Warn("ProcessParallel tx all done", "block", header.Number, "usedGas", *usedGas,
+		log.Info("ProcessParallel tx all done", "block", header.Number, "usedGas", *usedGas,
 			"txNum", txNum,
 			"len(commonTxs)", len(commonTxs),
 			"errorNum", p.debugErrorRedoNum,
