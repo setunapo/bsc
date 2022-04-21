@@ -26,7 +26,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -283,7 +282,6 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 	// If we have a dirty value for this state entry, return it
 	value, dirty := s.dirtyStorage.GetValue(key)
 	if dirty {
-		log.Debug("StateObject get state in dirty", "key", key, "value", value)
 		return value
 	}
 
@@ -323,14 +321,10 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 	}
 	// If we have a pending write or clean cached, return that
 	if value, pending := s.pendingStorage.GetValue(key); pending {
-		log.Debug("StateObject get committed state in pendingStorage", "addr", s.address,
-			"key", key, "value", value)
 		return value
 	}
 
 	if value, cached := s.getOriginStorage(key); cached {
-		log.Debug("StateObject get committed state in originStorage", "addr", s.address,
-			"key", key, "value", value)
 		return value
 	}
 	// If no live objects are available, attempt to use snapshots
@@ -393,7 +387,6 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 		value.SetBytes(content)
 	}
 	s.setOriginStorage(key, value)
-	log.Debug("StateObject get committed state in DB", "addr", s.address, "key", key, "value", value)
 	return value
 }
 
@@ -414,7 +407,6 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 	// such as: https://bscscan.com/txs?block=2491181
 	prev := s.db.GetState(s.address, key)
 	if prev == value {
-		log.Debug("StateObject set state with same value", "addr", s.address, "key", key, "value", value)
 		return
 	}
 	// New value is different, update and journal the change
@@ -450,7 +442,6 @@ func (s *StateObject) SetStorage(storage map[common.Hash]common.Hash) {
 
 func (s *StateObject) setState(key, value common.Hash) {
 	s.dirtyStorage.StoreValue(key, value)
-	log.Debug("StateObject setState", "addr", s.address, "key", key, "value", value)
 }
 
 // finalise moves all dirty storage slots into the pending area to be hashed or
@@ -627,7 +618,6 @@ func (s *StateObject) setBalance(amount *big.Int) {
 func (s *StateObject) ReturnGas(gas *big.Int) {}
 
 func (s *StateObject) lightCopy(db *StateDB) *StateObject {
-	log.Debug("StateObject lightCopy", "txIndex", db.txIndex, "addr", s.address)
 	stateObject := newObject(db, s.isParallel, s.address, s.data)
 	if s.trie != nil {
 		// fixme: no need to copy trie for light copy, since light copied object won't access trie DB
@@ -662,8 +652,6 @@ func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys 
 		// But here, it should be ok, since the KV should be changed and valid in the SlotDB,
 		// we still  do GetState by StateDB, it is not an issue.
 		val := dirtyObjs.db.GetState(s.address, key)
-		log.Debug("MergeSlotObject", "txIndex", s.db.txIndex, "addr", s.address,
-			"key", key, "val", val)
 		s.SetState(db, key, val)
 	}
 }
