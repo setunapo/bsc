@@ -150,6 +150,7 @@ type StateObject struct {
 	addrHash common.Hash // hash of ethereum address of the account
 	data     Account
 	db       *StateDB
+	dbItf    StateDBer
 
 	// DB error.
 	// State objects are used by the consensus core and VM which are
@@ -218,13 +219,13 @@ func (s *StateObject) empty() bool {
 	//   Slot 0 tx 2: GetNonce, lightCopy based on main DB(balance = 100) , not empty
 	// return s.db.GetNonce(s.address) == 0 && s.db.GetBalance(s.address).Sign() == 0 && bytes.Equal(s.db.GetCodeHash(s.address).Bytes(), emptyCodeHash)
 
-	if s.db.GetBalance(s.address).Sign() != 0 { // check balance first, since it is most likely not zero
+	if s.dbItf.GetBalance(s.address).Sign() != 0 { // check balance first, since it is most likely not zero
 		return false
 	}
-	if s.db.GetNonce(s.address) != 0 {
+	if s.dbItf.GetNonce(s.address) != 0 {
 		return false
 	}
-	codeHash := s.db.GetCodeHash(s.address)
+	codeHash := s.dbItf.GetCodeHash(s.address)
 	return bytes.Equal(codeHash.Bytes(), emptyCodeHash) // code is empty, the object is empty
 
 }
@@ -239,7 +240,8 @@ type Account struct {
 }
 
 // newObject creates a state object.
-func newObject(db *StateDB, isParallel bool, address common.Address, data Account) *StateObject {
+func newObject(dbItf StateDBer, isParallel bool, address common.Address, data Account) *StateObject {
+	db := dbItf.getBaseStateDB()
 	if data.Balance == nil {
 		data.Balance = new(big.Int) // todo: why not common.Big0?
 	}
@@ -257,6 +259,7 @@ func newObject(db *StateDB, isParallel bool, address common.Address, data Accoun
 
 	return &StateObject{
 		db:                  db,
+		dbItf:               dbItf,
 		address:             address,
 		addrHash:            crypto.Keccak256Hash(address[:]),
 		data:                data,
@@ -448,7 +451,7 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 	//    this `SetState could be skipped`
 	//  d.Finally, the key's value will be `val_2`, while it should be `val_1`
 	// such as: https://bscscan.com/txs?block=2491181
-	prev := s.db.GetState(s.address, key)
+	prev := s.dbItf.GetState(s.address, key) // fixme: if it is for journal, may not necessary, we can remove this change record
 	if prev == value {
 		return
 	}
@@ -634,7 +637,6 @@ func (s *StateObject) AddBalance(amount *big.Int) {
 		return
 	}
 	s.SetBalance(new(big.Int).Add(s.Balance(), amount))
-	// s.SetBalance(new(big.Int).Add(s.db.GetBalance(s.address), amount))
 }
 
 // SubBalance removes amount from s's balance.
@@ -644,11 +646,9 @@ func (s *StateObject) SubBalance(amount *big.Int) {
 		return
 	}
 	s.SetBalance(new(big.Int).Sub(s.Balance(), amount))
-	// s.SetBalance(new(big.Int).Sub(s.db.GetBalance(s.address), amount))
 }
 
 func (s *StateObject) SetBalance(amount *big.Int) {
-	// prevBalance := new(big.Int).Set(s.db.GetBalance(s.address))
 	s.db.journal.append(balanceChange{
 		account: &s.address,
 		prev:    new(big.Int).Set(s.data.Balance), // prevBalance,
@@ -664,7 +664,7 @@ func (s *StateObject) setBalance(amount *big.Int) {
 // Return the gas back to the origin. Used by the Virtual machine or Closures
 func (s *StateObject) ReturnGas(gas *big.Int) {}
 
-func (s *StateObject) lightCopy(db *StateDB) *StateObject {
+func (s *StateObject) lightCopy(db *ParallelStateDB) *StateObject {
 	stateObject := newObject(db, s.isParallel, s.address, s.data)
 	if s.trie != nil {
 		// fixme: no need to copy trie for light copy, since light copied object won't access trie DB
@@ -744,7 +744,7 @@ func (s *StateObject) CodeSize(db Database) int {
 }
 
 func (s *StateObject) SetCode(codeHash common.Hash, code []byte) {
-	prevcode := s.db.GetCode(s.address)
+	prevcode := s.dbItf.GetCode(s.address)
 	s.db.journal.append(codeChange{
 		account:  &s.address,
 		prevhash: s.CodeHash(),
@@ -760,7 +760,7 @@ func (s *StateObject) setCode(codeHash common.Hash, code []byte) {
 }
 
 func (s *StateObject) SetNonce(nonce uint64) {
-	prevNonce := s.db.GetNonce(s.address)
+	prevNonce := s.dbItf.GetNonce(s.address)
 	s.db.journal.append(nonceChange{
 		account: &s.address,
 		prev:    prevNonce,
