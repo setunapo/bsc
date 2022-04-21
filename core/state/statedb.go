@@ -131,7 +131,7 @@ type ParallelState struct {
 	baseStateDB               *StateDB // for parallel mode, there will be a base StateDB in dispatcher routine.
 	baseTxIndex               int      // slotDB is created base on this tx index.
 	dirtiedStateObjectsInSlot map[common.Address]*StateObject
-	unconfirmedDBInShot       map[int]*StateDB // do unconfirmed reference in same slot.
+	unconfirmedDBInShot       map[int]*SlotStateDB // do unconfirmed reference in same slot.
 
 	// we will record the read detail for conflict check and
 	// the changed addr or key for object merge, the changed detail can be acheived from the dirty object
@@ -246,6 +246,45 @@ type StateDB struct {
 	SnapshotCommits      time.Duration
 }
 
+type SlotStateDB struct {
+	StateDB
+}
+
+// GetBalance retrieves the balance from the given address or 0 if object not found
+// GetFrom the dirty list => from unconfirmed DB => get from main stateDB
+func (s *SlotStateDB) GetBalance(addr common.Address) *big.Int {
+	if s.parallel.isSlotDB {
+		if addr == s.parallel.systemAddress {
+			s.parallel.systemAddressOpsCount++
+		}
+		// 1.Try to get from dirty
+		if _, ok := s.parallel.balanceChangesInSlot[addr]; ok {
+			obj := s.parallel.dirtiedStateObjectsInSlot[addr] // addr must exist in dirtiedStateObjectsInSlot
+			return obj.Balance()
+		}
+		// 2.Try to get from uncomfirmed DB or main DB
+		// 2.1 Already read before
+		if balance, ok := s.parallel.balanceReadsInSlot[addr]; ok {
+			return balance
+		}
+		// 2.2 Try to get from unconfirmed DB if exist
+		if balance := s.getBalanceFromUnconfirmedDB(addr); balance != nil {
+			s.parallel.balanceReadsInSlot[addr] = balance
+			return balance
+		}
+	}
+	// 3. Try to get from main StateObejct
+	balance := common.Big0
+	stateObject := s.getStateObjectNoSlot(addr)
+	if stateObject != nil {
+		balance = stateObject.Balance()
+	}
+	if s.parallel.isSlotDB {
+		s.parallel.balanceReadsInSlot[addr] = balance
+	}
+	return balance
+}
+
 // New creates a new state from a given trie.
 func New(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) {
 	return newStateDB(root, db, snaps)
@@ -254,7 +293,7 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) 
 // NewSlotDB creates a new State DB based on the provided StateDB.
 // With parallel, each execution slot would have its own StateDB.
 func NewSlotDB(db *StateDB, systemAddr common.Address, txIndex int, baseTxIndex int, keepSystem bool,
-	unconfirmedDBs *sync.Map /*map[int]*StateDB*/) *StateDB {
+	unconfirmedDBs *sync.Map /*map[int]*StateDB*/) *SlotStateDB {
 	slotDB := db.CopyForSlot()
 	slotDB.txIndex = txIndex
 	slotDB.originalRoot = db.originalRoot
@@ -268,7 +307,7 @@ func NewSlotDB(db *StateDB, systemAddr common.Address, txIndex int, baseTxIndex 
 	for index := baseTxIndex + 1; index < slotDB.txIndex; index++ { // txIndex
 		unconfirmedDB, ok := unconfirmedDBs.Load(index)
 		if ok {
-			slotDB.parallel.unconfirmedDBInShot[index] = unconfirmedDB.(*StateDB)
+			slotDB.parallel.unconfirmedDBInShot[index] = unconfirmedDB.(*SlotStateDB)
 		}
 	}
 
@@ -369,7 +408,7 @@ func (s *StateDB) PrepareForParallel() {
 // finalized(dirty -> pending) on execution slot, the execution results should be
 // merged back to the main StateDB.
 // And it will return and keep the slot's change list for later conflict detect.
-func (s *StateDB) MergeSlotDB(slotDb *StateDB, slotReceipt *types.Receipt, txIndex int) {
+func (s *StateDB) MergeSlotDB(slotDb *SlotStateDB, slotReceipt *types.Receipt, txIndex int) {
 	// receipt.Logs use unified log index within a block
 	// align slotDB's log index to the block stateDB's logSize
 	for _, l := range slotReceipt.Logs {
@@ -974,34 +1013,10 @@ func (s *StateDB) Empty(addr common.Address) bool {
 // GetBalance retrieves the balance from the given address or 0 if object not found
 // GetFrom the dirty list => from unconfirmed DB => get from main stateDB
 func (s *StateDB) GetBalance(addr common.Address) *big.Int {
-	if s.parallel.isSlotDB {
-		if addr == s.parallel.systemAddress {
-			s.parallel.systemAddressOpsCount++
-		}
-		// 1.Try to get from dirty
-		if _, ok := s.parallel.balanceChangesInSlot[addr]; ok {
-			obj := s.parallel.dirtiedStateObjectsInSlot[addr] // addr must exist in dirtiedStateObjectsInSlot
-			return obj.Balance()
-		}
-		// 2.Try to get from uncomfirmed DB or main DB
-		// 2.1 Already read before
-		if balance, ok := s.parallel.balanceReadsInSlot[addr]; ok {
-			return balance
-		}
-		// 2.2 Try to get from unconfirmed DB if exist
-		if balance := s.getBalanceFromUnconfirmedDB(addr); balance != nil {
-			s.parallel.balanceReadsInSlot[addr] = balance
-			return balance
-		}
-	}
-	// 3. Try to get from main StateObejct
 	balance := common.Big0
 	stateObject := s.getStateObjectNoSlot(addr)
 	if stateObject != nil {
 		balance = stateObject.Balance()
-	}
-	if s.parallel.isSlotDB {
-		s.parallel.balanceReadsInSlot[addr] = balance
 	}
 	return balance
 }
@@ -2171,12 +2186,12 @@ func (s *StateDB) SlotDBPutSyncPool() {
 }
 
 // CopyForSlot copy all the basic fields, initialize the memory ones
-func (s *StateDB) CopyForSlot() *StateDB {
+func (s *StateDB) CopyForSlot() *SlotStateDB {
 	parallel := ParallelState{
 		// use base(dispatcher) slot db's stateObjects.
 		// It is a SyncMap, only readable to slot, not writable
 		stateObjects:        s.parallel.stateObjects,
-		unconfirmedDBInShot: make(map[int]*StateDB, 100),
+		unconfirmedDBInShot: make(map[int]*SlotStateDB, 100),
 
 		codeReadsInSlot:        make(map[common.Address][]byte, 10), // addressStructPool.Get().(map[common.Address]struct{}),
 		codeHashReadsInSlot:    make(map[common.Address]common.Hash),
@@ -2193,24 +2208,26 @@ func (s *StateDB) CopyForSlot() *StateDB {
 		isSlotDB:                  true,
 		dirtiedStateObjectsInSlot: stateObjectsPool.Get().(map[common.Address]*StateObject),
 	}
-	state := &StateDB{
-		db:                  s.db,
-		trie:                s.db.CopyTrie(s.trie),
-		stateObjects:        make(map[common.Address]*StateObject), // replaced by parallel.stateObjects in parallel mode
-		stateObjectsPending: addressStructPool.Get().(map[common.Address]struct{}),
-		stateObjectsDirty:   addressStructPool.Get().(map[common.Address]struct{}),
-		refund:              s.refund, // should be 0
-		logs:                logsPool.Get().(map[common.Hash][]*types.Log),
-		logSize:             0,
-		preimages:           make(map[common.Hash][]byte, len(s.preimages)),
-		journal:             journalPool.Get().(*journal),
-		hasher:              crypto.NewKeccakState(),
-		isParallel:          true,
-		parallel:            parallel,
+	slotDB := &SlotStateDB{
+		StateDB: StateDB{
+			db:                  s.db,
+			trie:                s.db.CopyTrie(s.trie),
+			stateObjects:        make(map[common.Address]*StateObject), // replaced by parallel.stateObjects in parallel mode
+			stateObjectsPending: addressStructPool.Get().(map[common.Address]struct{}),
+			stateObjectsDirty:   addressStructPool.Get().(map[common.Address]struct{}),
+			refund:              s.refund, // should be 0
+			logs:                logsPool.Get().(map[common.Hash][]*types.Log),
+			logSize:             0,
+			preimages:           make(map[common.Hash][]byte, len(s.preimages)),
+			journal:             journalPool.Get().(*journal),
+			hasher:              crypto.NewKeccakState(),
+			isParallel:          true,
+			parallel:            parallel,
+		},
 	}
 
 	for hash, preimage := range s.preimages {
-		state.preimages[hash] = preimage
+		slotDB.preimages[hash] = preimage
 	}
 
 	if s.snaps != nil {
@@ -2218,33 +2235,34 @@ func (s *StateDB) CopyForSlot() *StateDB {
 		// to the snapshot tree, we need to copy that aswell.
 		// Otherwise, any block mined by ourselves will cause gaps in the tree,
 		// and force the miner to operate trie-backed only
-		state.snaps = s.snaps
-		state.snap = s.snap
+		slotDB.snaps = s.snaps
+		slotDB.snap = s.snap
 		// deep copy needed
-		state.snapDestructs = addressStructPool.Get().(map[common.Address]struct{})
+		slotDB.snapDestructs = addressStructPool.Get().(map[common.Address]struct{})
 		s.snapParallelLock.RLock()
 		for k, v := range s.snapDestructs {
-			state.snapDestructs[k] = v
+			slotDB.snapDestructs[k] = v
 		}
 		s.snapParallelLock.RUnlock()
 		//
-		state.snapAccounts = snapAccountPool.Get().(map[common.Address][]byte)
+		slotDB.snapAccounts = snapAccountPool.Get().(map[common.Address][]byte)
 		for k, v := range s.snapAccounts {
-			state.snapAccounts[k] = v
+			slotDB.snapAccounts[k] = v
 		}
-		state.snapStorage = snapStoragePool.Get().(map[common.Address]map[string][]byte)
+		slotDB.snapStorage = snapStoragePool.Get().(map[common.Address]map[string][]byte)
 		for k, v := range s.snapStorage {
 			temp := snapStorageValuePool.Get().(map[string][]byte)
 			for kk, vv := range v {
 				temp[kk] = vv
 			}
-			state.snapStorage[k] = temp
+			slotDB.snapStorage[k] = temp
 		}
 		// trie prefetch should be done by dispacther on StateObject Merge,
 		// disable it in parallel slot
 		// state.prefetcher = s.prefetcher
 	}
-	return state
+
+	return slotDB
 }
 
 // Snapshot returns an identifier for the current revision of the state.

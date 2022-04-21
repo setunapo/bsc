@@ -77,7 +77,7 @@ type ParallelStateProcessor struct {
 	// txReqAccountSorted   map[common.Address][]*ParallelTxRequest // fixme: *ParallelTxRequest => ParallelTxRequest?
 	slotState            []*SlotState // idle, or pending messages
 	mergedTxIndex        int          // the latest finalized tx index
-	slotDBsToRelease     []*state.StateDB
+	slotDBsToRelease     []*state.SlotStateDB
 	debugErrorRedoNum    int
 	debugConflictRedoNum int
 }
@@ -398,8 +398,8 @@ func (p *LightStateProcessor) LightProcess(diffLayer *types.DiffLayer, block *ty
 type SlotState struct {
 	pendingTxReqChan   chan struct{}
 	pendingConfirmChan chan *ParallelTxResult
-	pendingTxReqList   []*ParallelTxRequest // maintained by dispatcher for dispatch policy
-	slotdbChan         chan *state.StateDB  // dispatch will create and send this slotDB to slot
+	pendingTxReqList   []*ParallelTxRequest    // maintained by dispatcher for dispatch policy
+	slotdbChan         chan *state.SlotStateDB // dispatch will create and send this slotDB to slot
 	// txReqUnits         []*ParallelDispatchUnit // only dispatch can accesssd
 	unconfirmedStateDBs *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
 }
@@ -411,7 +411,7 @@ type ParallelTxResult struct {
 	err          error // to describe error message?
 	txReq        *ParallelTxRequest
 	receipt      *types.Receipt
-	slotDB       *state.StateDB // if updated, it is not equal to txReq.slotDB
+	slotDB       *state.SlotStateDB // if updated, it is not equal to txReq.slotDB
 	gpSlot       *GasPool
 	evm          *vm.EVM
 	result       *ExecutionResult
@@ -420,7 +420,7 @@ type ParallelTxResult struct {
 type ParallelTxRequest struct {
 	txIndex        int
 	tx             *types.Transaction
-	slotDB         *state.StateDB
+	slotDB         *state.SlotStateDB
 	gasLimit       uint64
 	msg            types.Message
 	block          *types.Block
@@ -441,7 +441,7 @@ func (p *ParallelStateProcessor) init() {
 
 	for i := 0; i < p.parallelNum; i++ {
 		p.slotState[i] = &SlotState{
-			slotdbChan:         make(chan *state.StateDB, 1),
+			slotdbChan:         make(chan *state.SlotStateDB, 1),
 			pendingTxReqChan:   make(chan struct{}, 1),
 			pendingConfirmChan: make(chan *ParallelTxResult, p.queueSize),
 		}
@@ -894,7 +894,7 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 
 	statedb.PrepareForParallel()
 
-	p.slotDBsToRelease = make([]*state.StateDB, 0, txNum)
+	p.slotDBsToRelease = make([]*state.SlotStateDB, 0, txNum)
 	/*
 		stateDBsToRelease := p.slotDBsToRelease
 			go func() {
@@ -1150,7 +1150,7 @@ func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainCon
 	return receipt, err
 }
 
-func applyTransactionStageExecution(msg types.Message, gp *GasPool, statedb *state.StateDB, evm *vm.EVM) (*vm.EVM, *ExecutionResult, error) {
+func applyTransactionStageExecution(msg types.Message, gp *GasPool, statedb *state.SlotStateDB, evm *vm.EVM) (*vm.EVM, *ExecutionResult, error) {
 	// Create a new context to be used in the EVM environment.
 	txContext := NewEVMTxContext(msg)
 	evm.Reset(txContext, statedb)
@@ -1164,7 +1164,7 @@ func applyTransactionStageExecution(msg types.Message, gp *GasPool, statedb *sta
 	return evm, result, err
 }
 
-func applyTransactionStageFinalization(evm *vm.EVM, result *ExecutionResult, msg types.Message, config *params.ChainConfig, statedb *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, receiptProcessors ...ReceiptProcessor) (*types.Receipt, error) {
+func applyTransactionStageFinalization(evm *vm.EVM, result *ExecutionResult, msg types.Message, config *params.ChainConfig, statedb *state.SlotStateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, receiptProcessors ...ReceiptProcessor) (*types.Receipt, error) {
 	// Update the state with pending changes.
 	var root []byte
 	if config.IsByzantium(header.Number) {
