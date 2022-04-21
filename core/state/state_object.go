@@ -183,6 +183,10 @@ type StateObject struct {
 // empty returns whether the account is considered empty.
 func (s *StateObject) empty() bool {
 	return s.data.Nonce == 0 && s.data.Balance.Sign() == 0 && bytes.Equal(s.data.CodeHash, emptyCodeHash)
+
+	//  in parallel mode, we should never get raw nonce, balance, codeHash any more,
+	//  since it could be invalid, if the element was read from unconfirmed DB or base DB
+	// return s.db.GetNonce(s.address) == 0 && s.db.GetBalance(s.address).Sign() == 0 && bytes.Equal(s.db.GetCodeHash(s.address).Bytes(), emptyCodeHash)
 }
 
 // Account is the Ethereum consensus representation of accounts.
@@ -591,6 +595,7 @@ func (s *StateObject) AddBalance(amount *big.Int) {
 		return
 	}
 	s.SetBalance(new(big.Int).Add(s.Balance(), amount))
+	// s.SetBalance(new(big.Int).Add(s.db.GetBalance(s.address), amount))
 }
 
 // SubBalance removes amount from s's balance.
@@ -600,12 +605,15 @@ func (s *StateObject) SubBalance(amount *big.Int) {
 		return
 	}
 	s.SetBalance(new(big.Int).Sub(s.Balance(), amount))
+	// s.SetBalance(new(big.Int).Sub(s.db.GetBalance(s.address), amount))
 }
 
 func (s *StateObject) SetBalance(amount *big.Int) {
+	// prevBalance := new(big.Int).Set(s.db.GetBalance(s.address))
 	s.db.journal.append(balanceChange{
 		account: &s.address,
-		prev:    new(big.Int).Set(s.data.Balance),
+		prev:    new(big.Int).Set(s.data.Balance), // prevBalance,
+		// prev:    prevBalance,
 	})
 	s.setBalance(amount)
 }
@@ -699,7 +707,7 @@ func (s *StateObject) CodeSize(db Database) int {
 }
 
 func (s *StateObject) SetCode(codeHash common.Hash, code []byte) {
-	prevcode := s.Code(s.db.db)
+	prevcode := s.db.GetCode(s.address)
 	s.db.journal.append(codeChange{
 		account:  &s.address,
 		prevhash: s.CodeHash(),
@@ -715,9 +723,10 @@ func (s *StateObject) setCode(codeHash common.Hash, code []byte) {
 }
 
 func (s *StateObject) SetNonce(nonce uint64) {
+	prevNonce := s.db.GetNonce(s.address)
 	s.db.journal.append(nonceChange{
 		account: &s.address,
-		prev:    s.data.Nonce,
+		prev:    prevNonce,
 	})
 	s.setNonce(nonce)
 }
