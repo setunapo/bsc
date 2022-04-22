@@ -3360,6 +3360,7 @@ func (s *ParallelStateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (bo
 }
 
 func (s *ParallelStateDB) getKVFromUnconfirmedDB(addr common.Address, key common.Hash) (common.Hash, bool) {
+	defer debug.Handler.StartRegionAuto("getKVFromUnconfirmedDB")()
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
 	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
 		db_, ok := s.parallel.unconfirmedDBs.Load(i)

@@ -1419,8 +1419,8 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	if txNum > 0 {
 		log.Info("Process", "block", header.Number, "txNum", txNum)
 	}
-	debug.Handler.EnableTraceBigBlock(block.Header().Number.Uint64(), txNum, "sequential")
 	debug.Handler.EnableTraceCapture(block.Header().Number.Uint64(), "sequential")
+	debug.Handler.EnableTraceBigBlock(block.Header().Number.Uint64(), txNum, "sequential")
 	traceMsg := "Process " + block.Header().Number.String()
 	defer debug.Handler.StartRegionAuto(traceMsg)()
 

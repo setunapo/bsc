@@ -43,7 +43,7 @@ func (h *HandlerT) StartGoTrace(file string) error {
 		h.traceFile = file
 		fileName = file
 	} else {
-		fileName = h.traceFile + "_" + strconv.Itoa(int(h.curBlockNum)) + "_" + h.fileSubfix
+		fileName = h.traceFile + "_" + strconv.Itoa(int(h.curBlockNum)) + "_phase" + strconv.Itoa(h.tracePhase) + "_" + h.fileSubfix
 	}
 	f, err := os.Create(expandHome(fileName))
 	if err != nil {
@@ -64,6 +64,10 @@ func (h *HandlerT) StartGoTrace(file string) error {
 	return nil
 }
 
+func (h *HandlerT) GetTracePhase() int {
+	return h.tracePhase
+}
+
 // user controled start & stop capture
 func (h *HandlerT) RpcEnableTraceCapture() error {
 	h.mu.Lock()
@@ -74,11 +78,14 @@ func (h *HandlerT) RpcEnableTraceCapture() error {
 		log.Info("trace task is already running")
 		return nil
 	}
-
+	h.tracePhase++
 	// create file
 	h.mu.Unlock()
 	h.StartGoTrace("")
 	h.mu.Lock()
+	if h.tracePhase == 3 {
+		h.tracePhase = 0
+	}
 	f := h.traceW
 	if err := trace.Start(f); err != nil {
 		f.Close()
