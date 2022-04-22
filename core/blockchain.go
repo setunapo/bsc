@@ -245,6 +245,7 @@ type BlockChain struct {
 	prefetcher        Prefetcher
 	validator         Validator // Block and state validator interface
 	processor         Processor // Block transaction processor interface
+	processorSeq      Processor // Block transaction processor interface
 	vmConfig          vm.Config
 	pipeCommit        bool
 	parallelExecution bool
@@ -1929,6 +1930,60 @@ func (bc *BlockChain) InsertChainWithoutSealVerification(block *types.Block) (in
 	return n, err
 }
 
+var hookBlockNum uint64 = 2282100
+var loopCount int = 0
+var blockInLoop bool = false
+
+const hookNum = 1000
+
+func BlockNext(it *insertIterator, curBlock *types.Block) (*types.Block, error) {
+	if !blockInLoop {
+		block, err := it.next()
+		return block, err
+	} else {
+		log.Info("Hook in process", "Block", hookBlockNum)
+		return curBlock, nil
+	}
+}
+
+func CheckBlockHook(blockNum uint64) {
+	if blockNum == hookBlockNum {
+		log.Info("Start Block Hook", "Block", hookBlockNum)
+		blockInLoop = true
+	}
+	if blockInLoop {
+		loopCount++
+		if loopCount > hookNum {
+			blockInLoop = false // next
+			loopCount = 0
+		}
+	}
+}
+func (bc *BlockChain) CheckParallelHook() {
+	tracePhase := debug.Handler.GetTracePhase()
+	// phase -1: trace not started
+	if tracePhase == 0 {
+		blockInLoop = false
+		bc.parallelExecution = true
+		return
+	}
+	if tracePhase == 1 {
+		log.Info("Start Block Hook", "tracePhase", tracePhase)
+		// hook next block and switch to sequential
+		blockInLoop = true
+		bc.parallelExecution = false
+	} else if tracePhase == 2 {
+		log.Info("Start Block Hook", "tracePhase", tracePhase)
+		// hook next block and switch back to parallel
+		blockInLoop = true
+		bc.parallelExecution = true
+	} else {
+		log.Info("Stop Block Hook", "tracePhase", tracePhase)
+		blockInLoop = false
+		bc.parallelExecution = true
+	}
+}
+
 // insertChain is the internal implementation of InsertChain, which assumes that
 // 1) chains are contiguous, and 2) The chain mutex is held.
 //
@@ -2053,7 +2108,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals bool) (int, er
 		}
 	}()
 
-	for ; block != nil && err == nil || err == ErrKnownBlock; block, err = it.next() {
+	for ; block != nil && err == nil || err == ErrKnownBlock; block, err = BlockNext(it, block) {
+		// CheckBlockHook(block.Number().Uint64())
+
 		// If the chain is terminating, stop processing blocks
 		if bc.insertStopped() {
 			log.Debug("Abort during block processing")
@@ -2134,13 +2191,22 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals bool) (int, er
 			statedb.EnablePipeCommit()
 		}
 		statedb.SetExpectedStateRoot(block.Root())
-		statedb, receipts, logs, usedGas, err := bc.processor.Process(block, statedb, bc.vmConfig)
+		var receipts types.Receipts
+		var logs []*types.Log
+		var usedGas uint64
+		if bc.parallelExecution {
+			statedb, receipts, logs, usedGas, err = bc.processor.Process(block, statedb, bc.vmConfig)
+		} else {
+			statedb, receipts, logs, usedGas, err = bc.processorSeq.Process(block, statedb, bc.vmConfig)
+		}
 		atomic.StoreUint32(&followupInterrupt, 1)
 		activeState = statedb
 		if err != nil {
 			bc.reportBlock(block, receipts, err)
 			return it.index, err
 		}
+		bc.CheckParallelHook()
+
 		// Update the metrics touched during block processing
 		accountReadTimer.Update(statedb.AccountReads)                 // Account reads are complete, we can mark them
 		storageReadTimer.Update(statedb.StorageReads)                 // Storage reads are complete, we can mark them
@@ -3121,6 +3187,7 @@ func EnableParallelProcessor(parallelNum int) BlockChainOption {
 		}
 		chain.parallelExecution = true
 		chain.processor = NewParallelStateProcessor(chain.Config(), chain, chain.engine, parallelNum)
+		chain.processorSeq = NewStateProcessor(chain.Config(), chain, chain.engine)
 		return chain
 	}
 }
