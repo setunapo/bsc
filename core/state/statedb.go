@@ -952,10 +952,10 @@ func (s *StateDB) Empty(addr common.Address) bool {
 			}
 			// so we have to check it manually
 			// empty means: Nonce == 0 && Balance == 0 && CodeHash == emptyCodeHash
-			if s.GetNonce(addr) != 0 {
+			if s.GetBalance(addr).Sign() != 0 { // check balance first, since it is most likely not zero
 				return false
 			}
-			if s.GetBalance(addr).Sign() != 0 {
+			if s.GetNonce(addr) != 0 {
 				return false
 			}
 			codeHash := s.GetCodeHash(addr)
@@ -1085,7 +1085,7 @@ func (s *StateDB) IsParallelReadsValid() bool {
 	for addr, nonceSlot := range slotDB.parallel.nonceReadsInSlot {
 		nonceMain := mainDB.GetNonce(addr)
 		if nonceSlot != nonceMain {
-			log.Info("IsSlotDBReadsValid nonce read is invalid", "addr", addr,
+			log.Debug("IsSlotDBReadsValid nonce read is invalid", "addr", addr,
 				"nonceSlot", nonceSlot, "nonceMain", nonceMain, "SlotIndex", slotDB.parallel.SlotIndex,
 				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
 			return false
@@ -1096,7 +1096,7 @@ func (s *StateDB) IsParallelReadsValid() bool {
 		if addr != s.parallel.systemAddress { // skip balance check for system address
 			balanceMain := mainDB.GetBalance(addr)
 			if balanceSlot.Cmp(balanceMain) != 0 {
-				log.Info("IsSlotDBReadsValid balance read is invalid", "addr", addr,
+				log.Debug("IsSlotDBReadsValid balance read is invalid", "addr", addr,
 					"balanceSlot", balanceSlot, "balanceMain", balanceMain, "SlotIndex", slotDB.parallel.SlotIndex,
 					"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
 				return false
@@ -1107,7 +1107,7 @@ func (s *StateDB) IsParallelReadsValid() bool {
 	for addr, codeSlot := range slotDB.parallel.codeReadsInSlot {
 		codeMain := mainDB.GetCode(addr)
 		if !bytes.Equal(codeSlot, codeMain) {
-			log.Info("IsSlotDBReadsValid code read is invalid", "addr", addr,
+			log.Debug("IsSlotDBReadsValid code read is invalid", "addr", addr,
 				"len codeSlot", len(codeSlot), "len codeMain", len(codeMain), "SlotIndex", slotDB.parallel.SlotIndex,
 				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
 			return false
@@ -1117,7 +1117,7 @@ func (s *StateDB) IsParallelReadsValid() bool {
 	for addr, codeHashSlot := range slotDB.parallel.codeHashReadsInSlot {
 		codeHashMain := mainDB.GetCodeHash(addr)
 		if !bytes.Equal(codeHashSlot.Bytes(), codeHashMain.Bytes()) {
-			log.Info("IsSlotDBReadsValid codehash read is invalid", "addr", addr,
+			log.Debug("IsSlotDBReadsValid codehash read is invalid", "addr", addr,
 				"codeHashSlot", codeHashSlot, "codeHashMain", codeHashMain, "SlotIndex", slotDB.parallel.SlotIndex,
 				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
 			return false
@@ -1129,7 +1129,7 @@ func (s *StateDB) IsParallelReadsValid() bool {
 		slotStorage.Range(func(keySlot, valSlot interface{}) bool {
 			valMain := mainDB.GetState(addr, keySlot.(common.Hash))
 			if !bytes.Equal(valSlot.(common.Hash).Bytes(), valMain.Bytes()) {
-				log.Info("IsSlotDBReadsValid KV read is invalid", "addr", addr,
+				log.Debug("IsSlotDBReadsValid KV read is invalid", "addr", addr,
 					"key", keySlot.(common.Hash), "valSlot", valSlot.(common.Hash),
 					"valMain", valMain, "SlotIndex", slotDB.parallel.SlotIndex,
 					"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
@@ -1151,7 +1151,7 @@ func (s *StateDB) IsParallelReadsValid() bool {
 		if stateSlot != stateMain {
 			// skip addr state check for system address
 			if addr != s.parallel.systemAddress {
-				log.Info("IsSlotDBReadsValid addrState read invalid(true: exist, false: not exist)",
+				log.Debug("IsSlotDBReadsValid addrState read invalid(true: exist, false: not exist)",
 					"addr", addr, "stateSlot", stateSlot, "stateMain", stateMain,
 					"SlotIndex", slotDB.parallel.SlotIndex,
 					"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
@@ -1164,7 +1164,7 @@ func (s *StateDB) IsParallelReadsValid() bool {
 	for addr, destructRead := range slotDB.parallel.addrSnapDestructsReadsInSlot {
 		mainObj := mainDB.getStateObjectNoSlot(addr)
 		if mainObj == nil {
-			log.Info("IsSlotDBReadsValid snapshot destructs read invalid, address should exist",
+			log.Debug("IsSlotDBReadsValid snapshot destructs read invalid, address should exist",
 				"addr", addr, "destruct", destructRead,
 				"SlotIndex", slotDB.parallel.SlotIndex,
 				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
@@ -1172,7 +1172,7 @@ func (s *StateDB) IsParallelReadsValid() bool {
 		}
 		_, destructMain := mainDB.snapDestructs[addr] // addr not exist
 		if destructRead != destructMain {
-			log.Info("IsSlotDBReadsValid snapshot destructs read invalid",
+			log.Debug("IsSlotDBReadsValid snapshot destructs read invalid",
 				"addr", addr, "destructRead", destructRead, "destructMain", destructMain,
 				"SlotIndex", slotDB.parallel.SlotIndex,
 				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
@@ -1189,7 +1189,7 @@ func (s *StateDB) IsParallelReadsValid() bool {
 // (systemAddressOpsCount > 3) means the transaction tries to access systemAddress, in
 // this case, we should redo and keep its balance on NewSlotDB()
 func (s *StateDB) SystemAddressRedo() bool {
-	return s.parallel.systemAddressOpsCount > 3
+	return s.parallel.systemAddressOpsCount > 4
 }
 
 // NeedsRedo returns true if there is any clear reason that we need to redo this transaction

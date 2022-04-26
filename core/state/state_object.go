@@ -182,11 +182,51 @@ type StateObject struct {
 
 // empty returns whether the account is considered empty.
 func (s *StateObject) empty() bool {
-	return s.data.Nonce == 0 && s.data.Balance.Sign() == 0 && bytes.Equal(s.data.CodeHash, emptyCodeHash)
+	// return s.data.Nonce == 0 && s.data.Balance.Sign() == 0 && bytes.Equal(s.data.CodeHash, emptyCodeHash)
 
-	//  in parallel mode, we should never get raw nonce, balance, codeHash any more,
-	//  since it could be invalid, if the element was read from unconfirmed DB or base DB
+	// 0426, leave some notation, empty() works so far
+	// empty() has 3 use cases:
+	// 1.StateDB.Empty(), to empty check
+	//   A: It is ok, we have handled it in Empty(), to make sure nonce, balance, codeHash are solid
+	// 2:AddBalance 0, empty check for touch event
+	//   empty() will add a touch event.
+	//   if we misjudge it, the touch event could be lost, which make address not deleted.  // fixme
+	// 3.Finalise(), to do empty delete
+	//   the address should be dirtied or touched
+	//   if it nonce dirtied, it is ok, since nonce is monotonically increasing, won't be zero
+	//   if balance is dirtied, balance could be zero, we should refer solid nonce & codeHash  // fixme
+	//   if codeHash is dirtied, it is ok, since code will not be updated.
+	//   if suicide, it is ok
+	//   if object is new created, it is ok
+	//   if CreateAccout, recreate the address, it is ok.
+
+	// Slot 0 tx 0: AddBalance(100) to addr_1, => addr_1: balance = 100, nonce = 0, code is empty
+	// Slot 1 tx 1: addr_1 Transfer 99.9979 with GasFee 0.0021, => addr_1: balance = 0, nonce = 1, code is empty
+	//              notice: balance transfer cost 21,000 gas, with gasPrice = 100Gwei, GasFee will be 0.0021
+	// Slot 0 tx 2: add balance 0 to addr_1(empty check for touch event),
+	//              the object was lightCopied from tx 0,
+
+	// in parallel mode, we should not check empty by raw nonce, balance, codeHash any more,
+	// since it could be invalid.
+	// e.g., AddBalance() to an address, we will do lightCopy to get a new StateObject, we did balance fixup to
+	// make sure object's Balance is reliable. But we did not fixup nonce or code, we only do nonce or codehash
+	// fixup on need, that's when we wanna to update the nonce or codehash.
+	// So nonce, blance
+	// Before the block is processed, addr_1 account: nonce = 0, emptyCodeHash, balance = 100
+	//   Slot 0 tx 0: no access to addr_1
+	//   Slot 1 tx 1: sub balance 100, it is empty and deleted
+	//   Slot 0 tx 2: GetNonce, lightCopy based on main DB(balance = 100) , not empty
 	// return s.db.GetNonce(s.address) == 0 && s.db.GetBalance(s.address).Sign() == 0 && bytes.Equal(s.db.GetCodeHash(s.address).Bytes(), emptyCodeHash)
+
+	if s.db.GetBalance(s.address).Sign() != 0 { // check balance first, since it is most likely not zero
+		return false
+	}
+	if s.db.GetNonce(s.address) != 0 {
+		return false
+	}
+	codeHash := s.db.GetCodeHash(s.address)
+	return bytes.Equal(codeHash.Bytes(), emptyCodeHash) // code is empty, the object is empty
+
 }
 
 // Account is the Ethereum consensus representation of accounts.
@@ -288,7 +328,6 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 	if dirty {
 		return value
 	}
-
 	// Otherwise return the entry's original value
 	return s.GetCommittedState(db, key)
 }
@@ -658,9 +697,7 @@ func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys 
 		// In parallel mode, always GetState by StateDB, not by StateObject directly,
 		// since it the KV could exist in unconfirmed DB.
 		// But here, it should be ok, since the KV should be changed and valid in the SlotDB,
-		// we still  do GetState by StateDB, it is not an issue.
-		val := dirtyObjs.db.GetState(s.address, key)
-		s.SetState(db, key, val)
+		s.SetState(db, key, dirtyObjs.GetState(db, key))
 	}
 }
 
