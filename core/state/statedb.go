@@ -994,9 +994,7 @@ func (s *StateDB) GetBalance(addr common.Address) *big.Int {
 			if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
 				// on balance fixup, addr may not exist in dirtiedStateObjectsInSlot
 				// we intend to fixup balance based on unconfirmed DB or main DB
-				balance := obj.Balance()
-				log.Debug("GetBalance in dirty", "txIndex", s.txIndex, "addr", addr, "balance", balance)
-				return balance
+				return obj.Balance()
 			}
 		}
 		// 2.Try to get from uncomfirmed DB or main DB
@@ -1029,9 +1027,7 @@ func (s *StateDB) GetNonce(addr common.Address) uint64 {
 			if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
 				// on nonce fixup, addr may not exist in dirtiedStateObjectsInSlot
 				// we intend to fixup nonce based on unconfirmed DB or main DB
-				nonce := obj.Nonce()
-				log.Debug("GetNonce in dirty", "txIndex", s.txIndex, "addr", addr, "nonce", nonce)
-				return nonce
+				return obj.Nonce()
 			}
 		}
 		// 2.Try to get from uncomfirmed DB or main DB
@@ -1729,9 +1725,6 @@ func (s *StateDB) Suicide(addr common.Address) bool {
 		// 1.Try to get from dirty, it could be suicided inside of contract call
 		stateObject = s.parallel.dirtiedStateObjectsInSlot[addr]
 		if stateObject == nil {
-			if _, ok := s.parallel.addrStateReadsInSlot[addr]; !ok {
-				log.Info("Suicide addr not in dirty", "txIndex", s.txIndex, "addr", addr)
-			}
 			// 2.Try to get from uncomfirmed, if deleted return false, since the address does not exist
 			if obj, ok := s.getStateObjectFromUnconfirmedDB(addr); ok {
 				stateObject = obj
