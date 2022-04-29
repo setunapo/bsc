@@ -30,6 +30,7 @@ type StateDB interface {
 	SubBalance(common.Address, *big.Int)
 	AddBalance(common.Address, *big.Int)
 	GetBalance(common.Address) *big.Int
+	GetBalanceOpCode(common.Address) *big.Int
 
 	GetNonce(common.Address) uint64
 	SetNonce(common.Address, uint64)
@@ -74,6 +75,7 @@ type StateDB interface {
 	AddPreimage(common.Hash, []byte)
 
 	ForEachStorage(common.Address, func(common.Hash, common.Hash) bool) error
+	ParallelMakeUp(addr common.Address, input []byte)
 }
 
 // CallContext provides a basic interface for the EVM calling conventions. The EVM
