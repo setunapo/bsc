@@ -451,7 +451,7 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 	//    this `SetState could be skipped`
 	//  d.Finally, the key's value will be `val_2`, while it should be `val_1`
 	// such as: https://bscscan.com/txs?block=2491181
-	prev := s.db.GetState(s.address, key) // fixme: if it is for journal, may not necessary, we can remove this change record
+	prev := s.dbItf.GetState(s.address, key) // fixme: if it is for journal, may not necessary, we can remove this change record
 	if prev == value {
 		return
 	}

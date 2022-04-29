@@ -908,6 +908,7 @@ func (s *StateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (*StateOb
 // Exist reports whether the given account address exists in the state.
 // Notably this also returns true for suicided accounts.
 func (s *StateDB) Exist(addr common.Address) bool {
+	log.Debug("StateDB Exist", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty
 		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
@@ -942,6 +943,8 @@ func (s *StateDB) Exist(addr common.Address) bool {
 // Empty returns whether the state object is either non-existent
 // or empty according to the EIP161 specification (balance = nonce = code = 0)
 func (s *StateDB) Empty(addr common.Address) bool {
+	log.Debug("StateDB Empty", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty
 		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
@@ -985,6 +988,8 @@ func (s *StateDB) Empty(addr common.Address) bool {
 // GetBalance retrieves the balance from the given address or 0 if object not found
 // GetFrom the dirty list => from unconfirmed DB => get from main stateDB
 func (s *StateDB) GetBalance(addr common.Address) *big.Int {
+	log.Debug("StateDB GetBalance", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	balance := common.Big0
 	stateObject := s.getStateObjectNoSlot(addr)
 	if stateObject != nil {
@@ -994,6 +999,8 @@ func (s *StateDB) GetBalance(addr common.Address) *big.Int {
 }
 
 func (s *StateDB) GetNonce(addr common.Address) uint64 {
+	log.Debug("StateDB GetNonce", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	var nonce uint64 = 0
 	stateObject := s.getStateObjectNoSlot(addr)
 	if stateObject != nil {
@@ -1147,6 +1154,8 @@ func (s *StateDB) NeedsRedo() bool {
 }
 
 func (s *StateDB) GetCode(addr common.Address) []byte {
+	log.Debug("StateDB GetCode", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.getStateObjectNoSlot(addr)
 	var code []byte
 	if stateObject != nil {
@@ -1156,6 +1165,8 @@ func (s *StateDB) GetCode(addr common.Address) []byte {
 }
 
 func (s *StateDB) GetCodeSize(addr common.Address) int {
+	log.Debug("StateDB GetCodeSize", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	// 3. Try to get from main StateObejct
 	var codeSize int = 0
 	stateObject := s.getStateObjectNoSlot(addr)
@@ -1170,6 +1181,8 @@ func (s *StateDB) GetCodeSize(addr common.Address) int {
 //  - emptyCodeHash: the address exist, but code is empty
 //  - others:        the address exist, and code is not empty
 func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
+	log.Debug("StateDB GetCodeHash", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.getStateObjectNoSlot(addr)
 	codeHash := common.Hash{}
 	if stateObject != nil {
@@ -1186,6 +1199,7 @@ func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
 //   -> pending of main StateDB
 //   -> origin
 func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
+	log.Debug("StateDB GetState", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
 	stateObject := s.getStateObjectNoSlot(addr)
 	val := common.Hash{}
 	if stateObject != nil {
@@ -1233,6 +1247,8 @@ func (s *StateDB) GetStorageProofByHash(a common.Address, key common.Hash) ([][]
 
 // GetCommittedState retrieves a value from the given account's committed storage trie.
 func (s *StateDB) GetCommittedState(addr common.Address, hash common.Hash) common.Hash {
+	log.Debug("StateDB GetCommittedState", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	if s.parallel.isSlotDB {
 		// 1.No need to get from pending of itself even on merge, since stateobject in SlotDB won't do finalise
 		// 2.Try to get from uncomfirmed DB or main DB
@@ -1325,6 +1341,8 @@ func (s *StateDB) unconfirmedLightCopy(mainObj *StateObject) *StateObject {
 
 // AddBalance adds amount to the account associated with addr.
 func (s *StateDB) AddBalance(addr common.Address, amount *big.Int) {
+	log.Debug("StateDB AddBalance", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject.AddBalance(amount)
@@ -1333,6 +1351,8 @@ func (s *StateDB) AddBalance(addr common.Address, amount *big.Int) {
 
 // SubBalance subtracts amount from the account associated with addr.
 func (s *StateDB) SubBalance(addr common.Address, amount *big.Int) {
+	log.Debug("StateDB SubBalance", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject.SubBalance(amount)
@@ -1340,6 +1360,8 @@ func (s *StateDB) SubBalance(addr common.Address, amount *big.Int) {
 }
 
 func (s *StateDB) SetBalance(addr common.Address, amount *big.Int) {
+	log.Debug("StateDB SetBalance", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject.SetBalance(amount)
@@ -1347,6 +1369,8 @@ func (s *StateDB) SetBalance(addr common.Address, amount *big.Int) {
 }
 
 func (s *StateDB) SetNonce(addr common.Address, nonce uint64) {
+	log.Debug("StateDB SetNonce", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject.SetNonce(nonce)
@@ -1354,6 +1378,8 @@ func (s *StateDB) SetNonce(addr common.Address, nonce uint64) {
 }
 
 func (s *StateDB) SetCode(addr common.Address, code []byte) {
+	log.Debug("StateDB SetCode", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		codeHash := crypto.Keccak256Hash(code)
@@ -1362,6 +1388,8 @@ func (s *StateDB) SetCode(addr common.Address, code []byte) {
 }
 
 func (s *StateDB) SetState(addr common.Address, key, value common.Hash) {
+	log.Debug("StateDB SetState", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject.SetState(s.db, key, value)
@@ -1383,6 +1411,8 @@ func (s *StateDB) SetStorage(addr common.Address, storage map[common.Hash]common
 // The account's state object is still available until the state is committed,
 // getStateObject will return a non-nil account after Suicide.
 func (s *StateDB) Suicide(addr common.Address) bool {
+	log.Debug("StateDB Suicide", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	var stateObject *StateObject
 	if stateObject == nil {
 		// 3.Try to get from main StateDB
@@ -1412,6 +1442,8 @@ func (s *StateDB) Suicide(addr common.Address) bool {
 
 // updateStateObject writes the given object to the trie.
 func (s *StateDB) updateStateObject(obj *StateObject) {
+	log.Debug("StateDB updateStateObject", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	// Track the amount of time wasted on updating the account from the trie
 	if metrics.EnabledExpensive {
 		defer func(start time.Time) { s.AccountUpdates += time.Since(start) }(time.Now())
@@ -2740,6 +2772,7 @@ type ParallelStateDB struct {
 // Exist reports whether the given account address exists in the state.
 // Notably this also returns true for suicided accounts.
 func (s *ParallelStateDB) Exist(addr common.Address) bool {
+	log.Debug("ParallelStateDB Exist", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty
 		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
@@ -2774,6 +2807,7 @@ func (s *ParallelStateDB) Exist(addr common.Address) bool {
 // Empty returns whether the state object is either non-existent
 // or empty according to the EIP161 specification (balance = nonce = code = 0)
 func (s *ParallelStateDB) Empty(addr common.Address) bool {
+	log.Debug("ParallelStateDB Empty", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty
 		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
@@ -2817,6 +2851,7 @@ func (s *ParallelStateDB) Empty(addr common.Address) bool {
 // GetBalance retrieves the balance from the given address or 0 if object not found
 // GetFrom the dirty list => from unconfirmed DB => get from main stateDB
 func (s *ParallelStateDB) GetBalance(addr common.Address) *big.Int {
+	log.Debug("ParallelStateDB GetBalance", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
 	if s.parallel.isSlotDB {
 		if addr == s.parallel.systemAddress {
 			s.parallel.systemAddressOpsCount++
@@ -2853,6 +2888,7 @@ func (s *ParallelStateDB) GetBalance(addr common.Address) *big.Int {
 }
 
 func (s *ParallelStateDB) GetNonce(addr common.Address) uint64 {
+	log.Debug("ParallelStateDB GetNonce", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty
 		if _, ok := s.parallel.nonceChangesInSlot[addr]; ok {
@@ -2887,6 +2923,7 @@ func (s *ParallelStateDB) GetNonce(addr common.Address) uint64 {
 }
 
 func (s *ParallelStateDB) GetCode(addr common.Address) []byte {
+	log.Debug("ParallelStateDB GetCode", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty
 		if _, ok := s.parallel.codeChangesInSlot[addr]; ok {
@@ -2922,6 +2959,8 @@ func (s *ParallelStateDB) GetCode(addr common.Address) []byte {
 }
 
 func (s *ParallelStateDB) GetCodeSize(addr common.Address) int {
+	log.Debug("ParallelStateDB GetCodeSize", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty
 		if _, ok := s.parallel.codeChangesInSlot[addr]; ok {
@@ -2963,6 +3002,8 @@ func (s *ParallelStateDB) GetCodeSize(addr common.Address) int {
 //  - emptyCodeHash: the address exist, but code is empty
 //  - others:        the address exist, and code is not empty
 func (s *ParallelStateDB) GetCodeHash(addr common.Address) common.Hash {
+	log.Debug("ParallelStateDB GetCodeHash", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty
 		if _, ok := s.parallel.codeChangesInSlot[addr]; ok {
@@ -3004,6 +3045,8 @@ func (s *ParallelStateDB) GetCodeHash(addr common.Address) common.Hash {
 //   -> pending of main StateDB
 //   -> origin
 func (s *ParallelStateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
+	log.Debug("ParallelStateDB GetState", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	if s.parallel.isSlotDB {
 
 		// 1.Try to get from dirty
@@ -3054,6 +3097,7 @@ func (s *ParallelStateDB) GetState(addr common.Address, hash common.Hash) common
 
 // GetCommittedState retrieves a value from the given account's committed storage trie.
 func (s *ParallelStateDB) GetCommittedState(addr common.Address, hash common.Hash) common.Hash {
+	log.Debug("ParallelStateDB GetCommittedState", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
 	if s.parallel.isSlotDB {
 		// 1.No need to get from pending of itself even on merge, since stateobject in SlotDB won't do finalise
 		// 2.Try to get from uncomfirmed DB or main DB
@@ -3090,6 +3134,8 @@ func (s *ParallelStateDB) GetCommittedState(addr common.Address, hash common.Has
 }
 
 func (s *ParallelStateDB) HasSuicided(addr common.Address) bool {
+	log.Debug("ParallelStateDB HasSuicided", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty
 		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
@@ -3118,6 +3164,7 @@ func (s *ParallelStateDB) AddBalance(addr common.Address, amount *big.Int) {
 	// s.parallel.addrStateReadsInSlot[addr] = struct{}{}
 	// }
 	// }
+	log.Debug("ParallelStateDB AddBalance", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
 
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
@@ -3162,6 +3209,8 @@ func (s *ParallelStateDB) SubBalance(addr common.Address, amount *big.Int) {
 	// s.parallel.balanceReadsInSlot[addr] = struct{}{}
 	// }
 	// }
+	log.Debug("ParallelStateDB SubBalance", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		if s.parallel.isSlotDB {
@@ -3200,6 +3249,8 @@ func (s *ParallelStateDB) SubBalance(addr common.Address, amount *big.Int) {
 }
 
 func (s *ParallelStateDB) SetBalance(addr common.Address, amount *big.Int) {
+	log.Debug("ParallelStateDB SetBalance", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		if s.parallel.isSlotDB {
@@ -3227,6 +3278,8 @@ func (s *ParallelStateDB) SetBalance(addr common.Address, amount *big.Int) {
 }
 
 func (s *ParallelStateDB) SetNonce(addr common.Address, nonce uint64) {
+	log.Debug("ParallelStateDB SetNonce", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		if s.parallel.isSlotDB {
@@ -3250,6 +3303,8 @@ func (s *ParallelStateDB) SetNonce(addr common.Address, nonce uint64) {
 }
 
 func (s *ParallelStateDB) SetCode(addr common.Address, code []byte) {
+	log.Debug("ParallelStateDB SetCode", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		codeHash := crypto.Keccak256Hash(code)
@@ -3277,6 +3332,8 @@ func (s *ParallelStateDB) SetCode(addr common.Address, code []byte) {
 }
 
 func (s *ParallelStateDB) SetState(addr common.Address, key, value common.Hash) {
+	log.Debug("ParallelStateDB SetState", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	stateObject := s.GetOrNewStateObject(addr) // attention: if StateObject's lightCopy, its storage is only a part of the full storage,
 	if stateObject != nil {
 		if s.parallel.isSlotDB {
@@ -3316,6 +3373,8 @@ func (s *ParallelStateDB) SetState(addr common.Address, key, value common.Hash) 
 // The account's state object is still available until the state is committed,
 // getStateObject will return a non-nil account after Suicide.
 func (s *ParallelStateDB) Suicide(addr common.Address) bool {
+	log.Debug("ParallelStateDB Suicide", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	var stateObject *StateObject
 	if s.parallel.isSlotDB {
 		// 1.Try to get from dirty, it could be suicided inside of contract call
@@ -3376,6 +3435,8 @@ func (s *ParallelStateDB) Suicide(addr common.Address) bool {
 // GetOrNewStateObject retrieves a state object or create a new state object if nil.
 // dirtyInSlot -> Unconfirmed DB -> main DB -> snapshot, no? create one
 func (s *ParallelStateDB) GetOrNewStateObject(addr common.Address) *StateObject {
+	log.Debug("ParallelStateDB GetOrNewStateObject", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	var stateObject *StateObject = nil
 	exist := true
 	if s.parallel.isSlotDB {
@@ -3415,6 +3476,8 @@ func (s *ParallelStateDB) GetOrNewStateObject(addr common.Address) *StateObject 
 //  b.if it is exist in SlotDB, `revert` will recover to the `prev` in SlotDB
 //  c.as `snapDestructs` it is the same
 func (s *ParallelStateDB) createObject(addr common.Address) (newobj *StateObject) {
+	log.Debug("ParallelStateDB createObject", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
 	var prev *StateObject = nil
 	if s.parallel.isSlotDB {
 		// do not get from unconfirmed DB, since it will has problem on revert
@@ -3476,4 +3539,80 @@ func (s *ParallelStateDB) CreateAccount(addr common.Address) {
 	preBalance := s.GetBalance(addr) // parallel balance read will be recorded inside of GetBalance
 	newObj := s.createObject(addr)
 	newObj.setBalance(new(big.Int).Set(preBalance)) // new big.Int for newObj
+}
+
+// getDeletedStateObject is similar to getStateObject, but instead of returning
+// nil for a deleted state object, it returns the actual object with the deleted
+// flag set. This is needed by the state journal to revert to the correct s-
+// destructed object instead of wiping all knowledge about the state object.
+func (s *ParallelStateDB) getDeletedStateObject(addr common.Address) *StateObject {
+	log.Debug("ParallelStateDB getDeletedStateObject", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
+
+	// Prefer live objects if any is available
+	if obj, _ := s.getStateObjectFromStateObjects(addr); obj != nil {
+		return obj
+	}
+	// If no live objects are available, attempt to use snapshots
+	var (
+		data *Account
+		err  error
+	)
+	if s.snap != nil {
+		if metrics.EnabledExpensive {
+			defer func(start time.Time) { s.SnapshotAccountReads += time.Since(start) }(time.Now())
+		}
+		var acc *snapshot.Account
+		if acc, err = s.snap.Account(crypto.HashData(s.hasher, addr.Bytes())); err == nil {
+			if acc == nil {
+				return nil
+			}
+			data = &Account{
+				Nonce:    acc.Nonce,
+				Balance:  acc.Balance,
+				CodeHash: acc.CodeHash,
+				Root:     common.BytesToHash(acc.Root),
+			}
+			if len(data.CodeHash) == 0 {
+				data.CodeHash = emptyCodeHash
+			}
+			if data.Root == (common.Hash{}) {
+				data.Root = emptyRoot
+			}
+		}
+	}
+	// If snapshot unavailable or reading from it failed, load from the database
+	if s.snap == nil || err != nil {
+		if s.trie == nil {
+			tr, err := s.db.OpenTrie(s.originalRoot)
+			if err != nil {
+				s.setError(fmt.Errorf("failed to open trie tree"))
+				return nil
+			}
+			s.trie = tr
+		}
+		if metrics.EnabledExpensive {
+			defer func(start time.Time) { s.AccountReads += time.Since(start) }(time.Now())
+		}
+		enc, err := s.trie.TryGet(addr.Bytes())
+		if err != nil {
+			s.setError(fmt.Errorf("getDeleteStateObject (%x) error: %v", addr.Bytes(), err))
+			return nil
+		}
+		if len(enc) == 0 {
+			return nil
+		}
+		data = new(Account)
+		if err := rlp.DecodeBytes(enc, data); err != nil {
+			log.Error("Failed to decode state object", "addr", addr, "err", err)
+			return nil
+		}
+	}
+	// Insert into the live set
+	// if obj, ok := s.loadStateObj(addr); ok {
+	// fixme: concurrent not safe, merge could update it...
+	// return obj
+	//}
+	obj := newObject(&s.StateDB, s, s.isParallel, addr, *data)
+	s.SetStateObject(obj)
+	return obj
 }
