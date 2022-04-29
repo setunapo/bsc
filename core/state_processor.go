@@ -80,6 +80,7 @@ type ParallelStateProcessor struct {
 	slotDBsToRelease     []*state.ParallelStateDB
 	debugErrorRedoNum    int
 	debugConflictRedoNum int
+	unconfirmedStateDBs  *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
 }
 
 func NewParallelStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consensus.Engine, parallelNum int, queueSize int) *ParallelStateProcessor {
@@ -401,7 +402,7 @@ type SlotState struct {
 	pendingTxReqList   []*ParallelTxRequest        // maintained by dispatcher for dispatch policy
 	slotdbChan         chan *state.ParallelStateDB // dispatch will create and send this slotDB to slot
 	// txReqUnits         []*ParallelDispatchUnit // only dispatch can accesssd
-	unconfirmedStateDBs *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
+	// unconfirmedStateDBs *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
 }
 
 type ParallelTxResult struct {
@@ -679,7 +680,7 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 			// the target slot is waiting for new slotDB
 			slotState := p.slotState[result.slotIndex]
 			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, result.txReq.txIndex,
-				p.mergedTxIndex, result.keepSystem, slotState.unconfirmedStateDBs)
+				p.mergedTxIndex, result.keepSystem, p.unconfirmedStateDBs)
 			slotDB.SetSlotIndex(result.slotIndex)
 			p.slotDBsToRelease = append(p.slotDBsToRelease, slotDB)
 			slotState.slotdbChan <- slotDB
@@ -866,7 +867,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				txReq.slotDB = <-curSlot.slotdbChan
 			}
 			result := p.executeInSlot(slotIndex, txReq)
-			curSlot.unconfirmedStateDBs.Store(txReq.txIndex, txReq.slotDB)
+			p.unconfirmedStateDBs.Store(txReq.txIndex, txReq.slotDB)
 			curSlot.pendingConfirmChan <- result
 		}
 	}
@@ -905,8 +906,9 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	*/
 	for _, slot := range p.slotState {
 		slot.pendingTxReqList = make([]*ParallelTxRequest, 0)
-		slot.unconfirmedStateDBs = new(sync.Map) // make(map[int]*state.StateDB), fixme: resue not new?
+		// slot.unconfirmedStateDBs = new(sync.Map) // make(map[int]*state.StateDB), fixme: resue not new?
 	}
+	p.unconfirmedStateDBs = new(sync.Map) // make(map[int]*state.StateDB), fixme: resue not new?
 }
 
 // Implement BEP-130: Parallel Transaction Execution.
