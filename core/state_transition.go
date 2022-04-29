@@ -53,7 +53,7 @@ type StateTransition struct {
 	initialGas uint64
 	value      *big.Int
 	data       []byte
-	state      vm.StateDBer
+	state      vm.StateDB
 	evm        *vm.EVM
 }
 

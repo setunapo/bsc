@@ -41,9 +41,9 @@ var EvmPool = sync.Pool{
 
 type (
 	// CanTransferFunc is the signature of a transfer guard function
-	CanTransferFunc func(StateDBer, common.Address, *big.Int) bool
+	CanTransferFunc func(StateDB, common.Address, *big.Int) bool
 	// TransferFunc is the signature of a transfer function
-	TransferFunc func(StateDBer, common.Address, common.Address, *big.Int)
+	TransferFunc func(StateDB, common.Address, common.Address, *big.Int)
 	// GetHashFunc returns the n'th block hash in the blockchain
 	// and is used by the BLOCKHASH EVM op code.
 	GetHashFunc func(uint64) common.Hash
@@ -124,7 +124,7 @@ type EVM struct {
 	Context BlockContext
 	TxContext
 	// StateDB gives access to the underlying state
-	StateDB StateDBer
+	StateDB StateDB
 	// Depth is the current call stack
 	depth int
 
@@ -150,7 +150,7 @@ type EVM struct {
 
 // NewEVM returns a new EVM. The returned EVM is not thread safe and should
 // only ever be used *once*.
-func NewEVM(blockCtx BlockContext, txCtx TxContext, statedb StateDBer, chainConfig *params.ChainConfig, vmConfig Config) *EVM {
+func NewEVM(blockCtx BlockContext, txCtx TxContext, statedb StateDB, chainConfig *params.ChainConfig, vmConfig Config) *EVM {
 	evm := EvmPool.Get().(*EVM)
 	evm.Context = blockCtx
 	evm.TxContext = txCtx
@@ -189,7 +189,7 @@ func NewEVM(blockCtx BlockContext, txCtx TxContext, statedb StateDBer, chainConf
 
 // Reset resets the EVM with a new transaction context.Reset
 // This is not threadsafe and should only be done very cautiously.
-func (evm *EVM) Reset(txCtx TxContext, statedb StateDBer) {
+func (evm *EVM) Reset(txCtx TxContext, statedb StateDB) {
 	evm.TxContext = txCtx
 	evm.StateDB = statedb
 }

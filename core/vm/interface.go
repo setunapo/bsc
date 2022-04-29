@@ -23,9 +23,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// StateDBer is an EVM database for full state querying.
-// It is used as the interface to StateDB right now.
-type StateDBer interface {
+// StateDB is an EVM database for full state querying.
+type StateDB interface {
 	CreateAccount(common.Address)
 
 	SubBalance(common.Address, *big.Int)
