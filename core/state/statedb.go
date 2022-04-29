@@ -2746,7 +2746,6 @@ func (s *ParallelStateDB) getDeletedStateObject(addr common.Address) *StateObjec
 	}
 	data, ok := s.getStateObjectFromSnapshotOrTrie(addr)
 	if !ok {
-		log.Warn("object not exist", "addr", addr)
 		return nil
 	}
 	// Insert into the live set
@@ -3403,4 +3402,43 @@ func (s *ParallelStateDB) CreateAccount(addr common.Address) {
 	preBalance := s.GetBalance(addr) // parallel balance read will be recorded inside of GetBalance
 	newObj := s.createObject(addr)
 	newObj.setBalance(new(big.Int).Set(preBalance)) // new big.Int for newObj
+}
+
+// RevertToSnapshot reverts all state changes made since the given revision.
+func (s *ParallelStateDB) RevertToSnapshot(revid int) {
+	// Find the snapshot in the stack of valid snapshots.
+	idx := sort.Search(len(s.validRevisions), func(i int) bool {
+		return s.validRevisions[i].id >= revid
+	})
+	if idx == len(s.validRevisions) || s.validRevisions[idx].id != revid {
+		panic(fmt.Errorf("revision id %v cannot be reverted", revid))
+	}
+	snapshot := s.validRevisions[idx].journalIndex
+
+	// Replay the journal to undo changes and remove invalidated snapshots
+	s.journal.revert(s, snapshot)
+	s.validRevisions = s.validRevisions[:idx]
+}
+
+// AddRefund adds gas to the refund counter
+// journal.append will use ParallelState for revert
+func (s *ParallelStateDB) AddRefund(gas uint64) { // fixme: not needed
+	s.journal.append(refundChange{prev: s.refund})
+	s.refund += gas
+}
+
+// SubRefund removes gas from the refund counter.
+// This method will panic if the refund counter goes below zero
+func (s *ParallelStateDB) SubRefund(gas uint64) { // fixme: not needed
+	s.journal.append(refundChange{prev: s.refund})
+	if gas > s.refund {
+		if s.isParallel {
+			// we don't need to panic here if we read the wrong state, we just need to redo this transaction
+			log.Info(fmt.Sprintf("Refund counter below zero (gas: %d > refund: %d)", gas, s.refund), "tx", s.thash.String())
+			s.parallel.needsRedo = true
+			return
+		}
+		panic(fmt.Sprintf("Refund counter below zero (gas: %d > refund: %d)", gas, s.refund))
+	}
+	s.refund -= gas
 }
