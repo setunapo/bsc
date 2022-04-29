@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -151,7 +150,7 @@ type StateObject struct {
 	addrHash common.Hash // hash of ethereum address of the account
 	data     Account
 	db       *StateDB
-	dbItf    vm.StateDBer
+	dbItf    StateDBer
 
 	// DB error.
 	// State objects are used by the consensus core and VM which are
@@ -241,7 +240,7 @@ type Account struct {
 }
 
 // newObject creates a state object.
-func newObject(db *StateDB, dbItf vm.StateDBer, isParallel bool, address common.Address, data Account) *StateObject {
+func newObject(db *StateDB, dbItf StateDBer, isParallel bool, address common.Address, data Account) *StateObject {
 	if data.Balance == nil {
 		data.Balance = new(big.Int) // todo: why not common.Big0?
 	}
