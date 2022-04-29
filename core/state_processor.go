@@ -916,10 +916,12 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		header  = block.Header()
 		gp      = new(GasPool).AddGas(block.GasLimit())
 	)
-	log.Info("ProcessParallel", "block", header.Number)
 	var receipts = make([]*types.Receipt, 0)
 	txNum := len(block.Transactions())
 	p.resetState(txNum, statedb)
+	if txNum > 0 {
+		log.Info("ProcessParallel", "block", header.Number)
+	}
 
 	// Iterate over and process the individual transactions
 	posa, isPoSA := p.engine.(consensus.PoSA)
