@@ -26,8 +26,9 @@ import (
 // StateDBer is copied from vm/interface.go
 // It is used by StateObject & Journal right now, to abstract StateDB & ParallelStateDB
 type StateDBer interface {
-	getStateObject(common.Address) *StateObject // only accessible for journal
 	getBaseStateDB() *StateDB
+	getStateObject(common.Address) *StateObject // only accessible for journal
+	storeStateObj(common.Address, *StateObject) // only accessible for journal
 
 	CreateAccount(common.Address)
 
