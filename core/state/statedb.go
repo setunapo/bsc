@@ -2263,7 +2263,7 @@ func (s *ParallelStateDB) storeStateObj(addr common.Address, stateObject *StateO
 	// it belongs to base StateDB, it is confirmed and valid.
 	stateObject.db = s.parallel.baseStateDB
 	stateObject.dbItf = s.parallel.baseStateDB
-	// the object could be create in SlotDB, if it got the object from DB and
+	// the object could be created in SlotDB, if it got the object from DB and
 	// update it to the shared `s.parallel.stateObjects``
 	stateObject.db.storeParallelLock.Lock()
 	if _, ok := s.parallel.stateObjects.Load(addr); !ok {
@@ -2291,13 +2291,13 @@ func (s *ParallelStateDB) getStateObjectNoSlot(addr common.Address) *StateObject
 
 // `prev` is used to handle revert, to recover with the `prev` object
 // In Parallel mode, we only need to recover to `prev` in SlotDB,
-//  a.if it is not in SlotDB, `revert` will remove it from the SlotDB
-//  b.if it is exist in SlotDB, `revert` will recover to the `prev` in SlotDB
+//  a.if it doesn't exist in SlotDB, `revert` will remove it from the SlotDB
+//  b.if it exists in SlotDB, `revert` will recover to the `prev` in SlotDB
 //  c.as `snapDestructs` it is the same
 func (s *ParallelStateDB) createObject(addr common.Address) (newobj *StateObject) {
 	log.Debug("ParallelStateDB createObject", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
 
-	// do not get from unconfirmed DB, since it will has problem on revert
+	// do not get from unconfirmed DB, since it will have problem on revert
 	prev := s.parallel.dirtiedStateObjectsInSlot[addr]
 
 	var prevdestruct bool
@@ -2347,7 +2347,7 @@ func (s *ParallelStateDB) getDeletedStateObject(addr common.Address) *StateObjec
 	// fixme: concurrent not safe, merge could update it...
 	// return obj
 	// }
-	// this is why we have to use a seperate getDeletedStateObject for ParallelStateDB
+	// this is why we have to use a separate getDeletedStateObject for ParallelStateDB
 	// `s` has to be the ParallelStateDB
 	obj := newObject(s, s.isParallel, addr, *data)
 	s.storeStateObj(addr, obj)
@@ -2394,7 +2394,7 @@ func (s *ParallelStateDB) Exist(addr common.Address) bool {
 		}
 		return true
 	}
-	// 2.Try to get from uncomfirmed & main DB
+	// 2.Try to get from unconfirmed & main DB
 	// 2.1 Already read before
 	if exist, ok := s.parallel.addrStateReadsInSlot[addr]; ok {
 		return exist
@@ -2433,7 +2433,7 @@ func (s *ParallelStateDB) Empty(addr common.Address) bool {
 		codeHash := s.GetCodeHash(addr)
 		return bytes.Equal(codeHash.Bytes(), emptyCodeHash) // code is empty, the object is empty
 	}
-	// 2.Try to get from uncomfirmed & main DB
+	// 2.Try to get from unconfirmed & main DB
 	// 2.1 Already read before
 	if exist, ok := s.parallel.addrStateReadsInSlot[addr]; ok {
 		// exist means not empty
@@ -2466,7 +2466,7 @@ func (s *ParallelStateDB) GetBalance(addr common.Address) *big.Int {
 			return obj.Balance()
 		}
 	}
-	// 2.Try to get from uncomfirmed DB or main DB
+	// 2.Try to get from unconfirmed DB or main DB
 	// 2.1 Already read before
 	if balance, ok := s.parallel.balanceReadsInSlot[addr]; ok {
 		return balance
@@ -2477,7 +2477,7 @@ func (s *ParallelStateDB) GetBalance(addr common.Address) *big.Int {
 		return balance
 	}
 
-	// 3. Try to get from main StateObejct
+	// 3. Try to get from main StateObject
 	balance := common.Big0
 	stateObject := s.getStateObjectNoSlot(addr)
 	if stateObject != nil {
@@ -2497,7 +2497,7 @@ func (s *ParallelStateDB) GetNonce(addr common.Address) uint64 {
 			return obj.Nonce()
 		}
 	}
-	// 2.Try to get from uncomfirmed DB or main DB
+	// 2.Try to get from unconfirmed DB or main DB
 	// 2.1 Already read before
 	if nonce, ok := s.parallel.nonceReadsInSlot[addr]; ok {
 		return nonce
@@ -2530,7 +2530,7 @@ func (s *ParallelStateDB) GetCode(addr common.Address) []byte {
 			return code
 		}
 	}
-	// 2.Try to get from uncomfirmed DB or main DB
+	// 2.Try to get from unconfirmed DB or main DB
 	// 2.1 Already read before
 	if code, ok := s.parallel.codeReadsInSlot[addr]; ok {
 		return code
@@ -2541,7 +2541,7 @@ func (s *ParallelStateDB) GetCode(addr common.Address) []byte {
 		return code
 	}
 
-	// 3. Try to get from main StateObejct
+	// 3. Try to get from main StateObject
 	stateObject := s.getStateObjectNoSlot(addr)
 	var code []byte
 	if stateObject != nil {
@@ -2562,7 +2562,7 @@ func (s *ParallelStateDB) GetCodeSize(addr common.Address) int {
 			return obj.CodeSize(s.db)
 		}
 	}
-	// 2.Try to get from uncomfirmed DB or main DB
+	// 2.Try to get from unconfirmed DB or main DB
 	// 2.1 Already read before
 	if code, ok := s.parallel.codeReadsInSlot[addr]; ok {
 		return len(code) // len(nil) is 0 too
@@ -2573,7 +2573,7 @@ func (s *ParallelStateDB) GetCodeSize(addr common.Address) int {
 		return len(code) // len(nil) is 0 too
 	}
 
-	// 3. Try to get from main StateObejct
+	// 3. Try to get from main StateObject
 	var codeSize int = 0
 	var code []byte
 	stateObject := s.getStateObjectNoSlot(addr)
@@ -2586,7 +2586,7 @@ func (s *ParallelStateDB) GetCodeSize(addr common.Address) int {
 	return codeSize
 }
 
-// return value of GetCodeHash:
+// GetCodeHash returns value of GetCodeHash:
 //  - common.Hash{}: the address does not exist
 //  - emptyCodeHash: the address exist, but code is empty
 //  - others:        the address exist, and code is not empty
@@ -2601,7 +2601,7 @@ func (s *ParallelStateDB) GetCodeHash(addr common.Address) common.Hash {
 			return common.BytesToHash(obj.CodeHash())
 		}
 	}
-	// 2.Try to get from uncomfirmed DB or main DB
+	// 2.Try to get from unconfirmed DB or main DB
 	// 2.1 Already read before
 	if codeHash, ok := s.parallel.codeHashReadsInSlot[addr]; ok {
 		return codeHash
@@ -2611,7 +2611,7 @@ func (s *ParallelStateDB) GetCodeHash(addr common.Address) common.Hash {
 		s.parallel.codeHashReadsInSlot[addr] = codeHash
 		return codeHash
 	}
-	// 3. Try to get from main StateObejct
+	// 3. Try to get from main StateObject
 	stateObject := s.getStateObjectNoSlot(addr)
 	codeHash := common.Hash{}
 	if stateObject != nil {
@@ -2645,7 +2645,7 @@ func (s *ParallelStateDB) GetState(addr common.Address, hash common.Hash) common
 			return obj.GetState(s.db, hash)
 		}
 	}
-	// 2.Try to get from uncomfirmed DB or main DB
+	// 2.Try to get from unconfirmed DB or main DB
 	// 2.1 Already read before
 	if storage, ok := s.parallel.kvReadsInSlot[addr]; ok {
 		if val, ok := storage.GetValue(hash); ok {
@@ -2677,8 +2677,8 @@ func (s *ParallelStateDB) GetState(addr common.Address, hash common.Hash) common
 // GetCommittedState retrieves a value from the given account's committed storage trie.
 func (s *ParallelStateDB) GetCommittedState(addr common.Address, hash common.Hash) common.Hash {
 	log.Debug("ParallelStateDB GetCommittedState", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
-	// 1.No need to get from pending of itself even on merge, since stateobject in SlotDB won't do finalise
-	// 2.Try to get from uncomfirmed DB or main DB
+	// 1.No need to get from pending of itself even on merge, since state object in SlotDB won't do finalise
+	// 2.Try to get from unconfirmed DB or main DB
 	//   KVs in unconfirmed DB can be seen as pending storage
 	//   KVs in main DB are merged from SlotDB and has done finalise() on merge, can be seen as pending storage too.
 	// 2.1 Already read before
@@ -2715,7 +2715,7 @@ func (s *ParallelStateDB) HasSuicided(addr common.Address) bool {
 	if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
 		return obj.suicided
 	}
-	// 2.Try to get from uncomfirmed
+	// 2.Try to get from unconfirmed
 	if exist, ok := s.getAddrStateFromUnconfirmedDB(addr); ok {
 		return !exist
 	}
@@ -2756,7 +2756,7 @@ func (s *ParallelStateDB) AddBalance(addr common.Address, amount *big.Int) {
 			return
 		}
 		// already dirty, make sure the balance if fixed up
-		// if stateObject.Balance()
+		// if stateObject.Balance() // todo: fix the comment
 		if addr != s.parallel.systemAddress {
 			if stateObject.Balance().Cmp(s.GetBalance(addr)) != 0 {
 				log.Warn("AddBalance in dirty, but balance is incorrect", "txIndex", s.txIndex, "addr", addr,
@@ -2797,7 +2797,7 @@ func (s *ParallelStateDB) SubBalance(addr common.Address, amount *big.Int) {
 			return
 		}
 		// already dirty, make sure the balance if fixed
-		// if stateObject.Balance()
+		// if stateObject.Balance() // todo: fix the comment
 		if addr != s.parallel.systemAddress {
 			if stateObject.Balance().Cmp(s.GetBalance(addr)) != 0 {
 				log.Warn("SubBalance in dirty, but balance is incorrect", "txIndex", s.txIndex, "addr", addr,
@@ -2821,7 +2821,7 @@ func (s *ParallelStateDB) SetBalance(addr common.Address, amount *big.Int) {
 		}
 		if _, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
 			newStateObject := stateObject.lightCopy(s)
-			// update balance for revert, in case child contract is revertted,
+			// update balance for revert, in case child contract is reverted,
 			// it should revert to the previous balance
 			balance := s.GetBalance(addr)
 			newStateObject.setBalance(balance)
@@ -2930,12 +2930,12 @@ func (s *ParallelStateDB) Suicide(addr common.Address) bool {
 	// 1.Try to get from dirty, it could be suicided inside of contract call
 	stateObject = s.parallel.dirtiedStateObjectsInSlot[addr]
 	if stateObject == nil {
-		// 2.Try to get from uncomfirmed, if deleted return false, since the address does not exist
+		// 2.Try to get from unconfirmed, if deleted return false, since the address does not exist
 		if obj, ok := s.getStateObjectFromUnconfirmedDB(addr); ok {
 			stateObject = obj
 			s.parallel.addrStateReadsInSlot[addr] = !stateObject.deleted // true: exist, false: deleted
 			if stateObject.deleted {
-				log.Error("Suicide addr alreay deleted in confirmed DB", "txIndex", s.txIndex, "addr", addr)
+				log.Error("Suicide addr already deleted in confirmed DB", "txIndex", s.txIndex, "addr", addr)
 				return false
 			}
 		}
@@ -2971,7 +2971,7 @@ func (s *ParallelStateDB) Suicide(addr common.Address) bool {
 		// s.parallel.kvChangesInSlot[addr] = make(StateKeys) // all key changes are discarded
 		return true
 	}
-	s.parallel.addrStateChangesInSlot[addr] = false // false: the address does not exist any more,
+	s.parallel.addrStateChangesInSlot[addr] = false // false: the address does not exist anymore,
 	s.parallel.balanceChangesInSlot[addr] = struct{}{}
 	s.parallel.codeChangesInSlot[addr] = struct{}{}
 
@@ -2994,7 +2994,7 @@ func (s *ParallelStateDB) CreateAccount(addr common.Address) {
 	// no matter it is got from dirty, unconfirmed or main DB
 	// if addr not exist, preBalance will be common.Big0, it is same as new(big.Int) which
 	// is the value newObject(),
-	preBalance := s.GetBalance(addr) // parallel balance read will be recorded inside of GetBalance
+	preBalance := s.GetBalance(addr) // parallel balance read will be recorded inside GetBalance
 	newObj := s.createObject(addr)
 	newObj.setBalance(new(big.Int).Set(preBalance)) // new big.Int for newObj
 }
@@ -3027,7 +3027,7 @@ func (s *ParallelStateDB) AddRefund(gas uint64) { // fixme: not needed
 func (s *ParallelStateDB) SubRefund(gas uint64) { // fixme: not needed
 	s.journal.append(refundChange{prev: s.refund})
 	if gas > s.refund {
-		// we don't need to panic here if we read the wrong state in parallelm mode
+		// we don't need to panic here if we read the wrong state in parallel mode
 		// we just need to redo this transaction
 		log.Info(fmt.Sprintf("Refund counter below zero (gas: %d > refund: %d)", gas, s.refund), "tx", s.thash.String())
 		s.parallel.needsRedo = true
@@ -3043,7 +3043,7 @@ func (s *ParallelStateDB) SubRefund(gas uint64) { // fixme: not needed
 // Access from the unconfirmed DB with range&priority:  txIndex -1(previous tx) -> baseTxIndex + 1
 func (s *ParallelStateDB) getBalanceFromUnconfirmedDB(addr common.Address) *big.Int {
 	if addr == s.parallel.systemAddress {
-		// never get systemaddress from unconfirmed DB
+		// never get system address from unconfirmed DB
 		return nil
 	}
 
@@ -3075,7 +3075,7 @@ func (s *ParallelStateDB) getBalanceFromUnconfirmedDB(addr common.Address) *big.
 // Similar to getBalanceFromUnconfirmedDB
 func (s *ParallelStateDB) getNonceFromUnconfirmedDB(addr common.Address) (uint64, bool) {
 	if addr == s.parallel.systemAddress {
-		// never get systemaddress from unconfirmed DB
+		// never get system address from unconfirmed DB
 		return 0, false
 	}
 
@@ -3115,7 +3115,7 @@ func (s *ParallelStateDB) getNonceFromUnconfirmedDB(addr common.Address) (uint64
 // It is not only for code, but also codeHash and codeSize, we return the *StateObject for convienence.
 func (s *ParallelStateDB) getCodeFromUnconfirmedDB(addr common.Address) ([]byte, bool) {
 	if addr == s.parallel.systemAddress {
-		// never get systemaddress from unconfirmed DB
+		// never get system address from unconfirmed DB
 		return nil, false
 	}
 
@@ -3154,7 +3154,7 @@ func (s *ParallelStateDB) getCodeFromUnconfirmedDB(addr common.Address) ([]byte,
 // but differ when address is deleted or not exist
 func (s *ParallelStateDB) getCodeHashFromUnconfirmedDB(addr common.Address) (common.Hash, bool) {
 	if addr == s.parallel.systemAddress {
-		// never get systemaddress from unconfirmed DB
+		// never get system address from unconfirmed DB
 		return common.Hash{}, false
 	}
 
@@ -3196,7 +3196,7 @@ func (s *ParallelStateDB) getCodeHashFromUnconfirmedDB(addr common.Address) (com
 // If the dirty address is empty or suicided, it will be marked as deleted, so we only need to return `deleted` or not.
 func (s *ParallelStateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (bool, bool) {
 	if addr == s.parallel.systemAddress {
-		// never get systemaddress from unconfirmed DB
+		// never get system address from unconfirmed DB
 		return false, false
 	}
 
