@@ -240,7 +240,8 @@ type Account struct {
 }
 
 // newObject creates a state object.
-func newObject(db *StateDB, dbItf StateDBer, isParallel bool, address common.Address, data Account) *StateObject {
+func newObject(dbItf StateDBer, isParallel bool, address common.Address, data Account) *StateObject {
+	db := dbItf.getBaseStateDB()
 	if data.Balance == nil {
 		data.Balance = new(big.Int) // todo: why not common.Big0?
 	}
@@ -636,7 +637,6 @@ func (s *StateObject) AddBalance(amount *big.Int) {
 		return
 	}
 	s.SetBalance(new(big.Int).Add(s.Balance(), amount))
-	// s.SetBalance(new(big.Int).Add(s.db.GetBalance(s.address), amount))
 }
 
 // SubBalance removes amount from s's balance.
@@ -646,11 +646,9 @@ func (s *StateObject) SubBalance(amount *big.Int) {
 		return
 	}
 	s.SetBalance(new(big.Int).Sub(s.Balance(), amount))
-	// s.SetBalance(new(big.Int).Sub(s.db.GetBalance(s.address), amount))
 }
 
 func (s *StateObject) SetBalance(amount *big.Int) {
-	// prevBalance := new(big.Int).Set(s.db.GetBalance(s.address))
 	s.db.journal.append(balanceChange{
 		account: &s.address,
 		prev:    new(big.Int).Set(s.data.Balance), // prevBalance,
@@ -667,7 +665,7 @@ func (s *StateObject) setBalance(amount *big.Int) {
 func (s *StateObject) ReturnGas(gas *big.Int) {}
 
 func (s *StateObject) lightCopy(db *ParallelStateDB) *StateObject {
-	stateObject := newObject(&db.StateDB, db, s.isParallel, s.address, s.data)
+	stateObject := newObject(db, s.isParallel, s.address, s.data)
 	if s.trie != nil {
 		// fixme: no need to copy trie for light copy, since light copied object won't access trie DB
 		stateObject.trie = db.db.CopyTrie(s.trie)
@@ -680,7 +678,7 @@ func (s *StateObject) lightCopy(db *ParallelStateDB) *StateObject {
 }
 
 func (s *StateObject) deepCopy(db *StateDB) *StateObject {
-	stateObject := newObject(db, db, s.isParallel, s.address, s.data)
+	stateObject := newObject(db, s.isParallel, s.address, s.data)
 	if s.trie != nil {
 		stateObject.trie = db.db.CopyTrie(s.trie)
 	}
