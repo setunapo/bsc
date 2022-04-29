@@ -909,34 +909,8 @@ func (s *StateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (*StateOb
 // Notably this also returns true for suicided accounts.
 func (s *StateDB) Exist(addr common.Address) bool {
 	log.Debug("StateDB Exist", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
-	if s.parallel.isSlotDB {
-		// 1.Try to get from dirty
-		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
-			// dirty object should not be deleted, since deleted is only flagged on finalise
-			// and if it is suicided in contract call, suicide is taken as exist until it is finalised
-			// todo: add a check here, to be removed later
-			if obj.deleted || obj.suicided {
-				log.Error("Exist in dirty, but marked as deleted or suicided",
-					"txIndex", s.txIndex, "baseTxIndex:", s.parallel.baseTxIndex)
-			}
-			return true
-		}
-		// 2.Try to get from uncomfirmed & main DB
-		// 2.1 Already read before
-		if exist, ok := s.parallel.addrStateReadsInSlot[addr]; ok {
-			return exist
-		}
-		// 2.2 Try to get from unconfirmed DB if exist
-		if exist, ok := s.getAddrStateFromUnconfirmedDB(addr); ok {
-			s.parallel.addrStateReadsInSlot[addr] = exist // update and cache
-			return exist
-		}
-	}
 	// 3.Try to get from main StateDB
 	exist := s.getStateObjectNoSlot(addr) != nil
-	if s.parallel.isSlotDB {
-		s.parallel.addrStateReadsInSlot[addr] = exist // update and cache
-	}
 	return exist
 }
 
@@ -944,44 +918,8 @@ func (s *StateDB) Exist(addr common.Address) bool {
 // or empty according to the EIP161 specification (balance = nonce = code = 0)
 func (s *StateDB) Empty(addr common.Address) bool {
 	log.Debug("StateDB Empty", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
-
-	if s.parallel.isSlotDB {
-		// 1.Try to get from dirty
-		if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
-			// dirty object is light copied and fixup on need,
-			// empty could be wrong, except it is created with this TX
-			if _, ok := s.parallel.addrStateChangesInSlot[addr]; ok {
-				return obj.empty()
-			}
-			// so we have to check it manually
-			// empty means: Nonce == 0 && Balance == 0 && CodeHash == emptyCodeHash
-			if s.GetBalance(addr).Sign() != 0 { // check balance first, since it is most likely not zero
-				return false
-			}
-			if s.GetNonce(addr) != 0 {
-				return false
-			}
-			codeHash := s.GetCodeHash(addr)
-			return bytes.Equal(codeHash.Bytes(), emptyCodeHash) // code is empty, the object is empty
-		}
-		// 2.Try to get from uncomfirmed & main DB
-		// 2.1 Already read before
-		if exist, ok := s.parallel.addrStateReadsInSlot[addr]; ok {
-			// exist means not empty
-			return !exist
-		}
-		// 2.2 Try to get from unconfirmed DB if exist
-		if exist, ok := s.getAddrStateFromUnconfirmedDB(addr); ok {
-			s.parallel.addrStateReadsInSlot[addr] = exist // update and cache
-			return !exist
-		}
-	}
-
 	so := s.getStateObjectNoSlot(addr)
 	empty := (so == nil || so.empty())
-	if s.parallel.isSlotDB {
-		s.parallel.addrStateReadsInSlot[addr] = !empty // update and cache
-	}
 	return empty
 }
 
@@ -1248,38 +1186,11 @@ func (s *StateDB) GetStorageProofByHash(a common.Address, key common.Hash) ([][]
 // GetCommittedState retrieves a value from the given account's committed storage trie.
 func (s *StateDB) GetCommittedState(addr common.Address, hash common.Hash) common.Hash {
 	log.Debug("StateDB GetCommittedState", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
-
-	if s.parallel.isSlotDB {
-		// 1.No need to get from pending of itself even on merge, since stateobject in SlotDB won't do finalise
-		// 2.Try to get from uncomfirmed DB or main DB
-		//   KVs in unconfirmed DB can be seen as pending storage
-		//   KVs in main DB are merged from SlotDB and has done finalise() on merge, can be seen as pending storage too.
-		// 2.1 Already read before
-		if storage, ok := s.parallel.kvReadsInSlot[addr]; ok {
-			if val, ok := storage.GetValue(hash); ok {
-				return val
-			}
-		}
-		// 2.2 Try to get from unconfirmed DB if exist
-		if val, ok := s.getKVFromUnconfirmedDB(addr, hash); ok {
-			if s.parallel.kvReadsInSlot[addr] == nil {
-				s.parallel.kvReadsInSlot[addr] = newStorage(false)
-			}
-			s.parallel.kvReadsInSlot[addr].StoreValue(hash, val) // update cache
-			return val
-		}
-	}
 	// 3. Try to get from main DB
 	stateObject := s.getStateObjectNoSlot(addr)
 	val := common.Hash{}
 	if stateObject != nil {
 		val = stateObject.GetCommittedState(s.db, hash)
-	}
-	if s.parallel.isSlotDB {
-		if s.parallel.kvReadsInSlot[addr] == nil {
-			s.parallel.kvReadsInSlot[addr] = newStorage(false)
-		}
-		s.parallel.kvReadsInSlot[addr].StoreValue(hash, val) // update cache
 	}
 	return val
 }
@@ -3539,80 +3450,4 @@ func (s *ParallelStateDB) CreateAccount(addr common.Address) {
 	preBalance := s.GetBalance(addr) // parallel balance read will be recorded inside of GetBalance
 	newObj := s.createObject(addr)
 	newObj.setBalance(new(big.Int).Set(preBalance)) // new big.Int for newObj
-}
-
-// getDeletedStateObject is similar to getStateObject, but instead of returning
-// nil for a deleted state object, it returns the actual object with the deleted
-// flag set. This is needed by the state journal to revert to the correct s-
-// destructed object instead of wiping all knowledge about the state object.
-func (s *ParallelStateDB) getDeletedStateObject(addr common.Address) *StateObject {
-	log.Debug("ParallelStateDB getDeletedStateObject", "SlotxIndex", s.parallel.SlotIndex, "txIndex", s.TxIndex())
-
-	// Prefer live objects if any is available
-	if obj, _ := s.getStateObjectFromStateObjects(addr); obj != nil {
-		return obj
-	}
-	// If no live objects are available, attempt to use snapshots
-	var (
-		data *Account
-		err  error
-	)
-	if s.snap != nil {
-		if metrics.EnabledExpensive {
-			defer func(start time.Time) { s.SnapshotAccountReads += time.Since(start) }(time.Now())
-		}
-		var acc *snapshot.Account
-		if acc, err = s.snap.Account(crypto.HashData(s.hasher, addr.Bytes())); err == nil {
-			if acc == nil {
-				return nil
-			}
-			data = &Account{
-				Nonce:    acc.Nonce,
-				Balance:  acc.Balance,
-				CodeHash: acc.CodeHash,
-				Root:     common.BytesToHash(acc.Root),
-			}
-			if len(data.CodeHash) == 0 {
-				data.CodeHash = emptyCodeHash
-			}
-			if data.Root == (common.Hash{}) {
-				data.Root = emptyRoot
-			}
-		}
-	}
-	// If snapshot unavailable or reading from it failed, load from the database
-	if s.snap == nil || err != nil {
-		if s.trie == nil {
-			tr, err := s.db.OpenTrie(s.originalRoot)
-			if err != nil {
-				s.setError(fmt.Errorf("failed to open trie tree"))
-				return nil
-			}
-			s.trie = tr
-		}
-		if metrics.EnabledExpensive {
-			defer func(start time.Time) { s.AccountReads += time.Since(start) }(time.Now())
-		}
-		enc, err := s.trie.TryGet(addr.Bytes())
-		if err != nil {
-			s.setError(fmt.Errorf("getDeleteStateObject (%x) error: %v", addr.Bytes(), err))
-			return nil
-		}
-		if len(enc) == 0 {
-			return nil
-		}
-		data = new(Account)
-		if err := rlp.DecodeBytes(enc, data); err != nil {
-			log.Error("Failed to decode state object", "addr", addr, "err", err)
-			return nil
-		}
-	}
-	// Insert into the live set
-	// if obj, ok := s.loadStateObj(addr); ok {
-	// fixme: concurrent not safe, merge could update it...
-	// return obj
-	//}
-	obj := newObject(&s.StateDB, s, s.isParallel, addr, *data)
-	s.SetStateObject(obj)
-	return obj
 }
