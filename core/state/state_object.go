@@ -160,8 +160,9 @@ type StateObject struct {
 	dbErr error
 
 	// Write caches.
-	trie Trie // storage trie, which becomes non-nil on first access
-	code Code // contract bytecode, which gets set when code is loaded
+	trieMutex sync.Mutex
+	trie      Trie // storage trie, which becomes non-nil on first access
+	code      Code // contract bytecode, which gets set when code is loaded
 
 	isParallel          bool      // isParallel indicates this state object is used in parallel mode
 	sharedOriginStorage *sync.Map // Storage cache of original entries to dedup rewrites, reset for every transaction
@@ -299,6 +300,11 @@ func (s *StateObject) touch() {
 }
 
 func (s *StateObject) getTrie(db Database) Trie {
+	if s.trie != nil {
+		return s.trie
+	}
+	s.trieMutex.Lock()
+	defer s.trieMutex.Unlock()
 	if s.trie == nil {
 		// Try fetching from prefetcher first
 		// We don't prefetch empty tries
@@ -666,10 +672,6 @@ func (s *StateObject) ReturnGas(gas *big.Int) {}
 
 func (s *StateObject) lightCopy(db *ParallelStateDB) *StateObject {
 	stateObject := newObject(db, s.isParallel, s.address, s.data)
-	if s.trie != nil {
-		// fixme: no need to copy trie for light copy, since light copied object won't access trie DB
-		stateObject.trie = db.db.CopyTrie(s.trie)
-	}
 	stateObject.code = s.code
 	stateObject.suicided = false        // should be false
 	stateObject.dirtyCode = s.dirtyCode // it is not used in slot, but keep it is ok
