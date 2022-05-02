@@ -37,10 +37,10 @@ var (
 //
 // Note, the prefetcher's API is not thread safe.
 type triePrefetcher struct {
-	db       Database                    // Database to fetch trie nodes through
-	root     common.Hash                 // Root hash of theaccount trie for metrics
-	fetches  map[common.Hash]Trie        // Partially or fully fetcher tries
-	fetchers map[common.Hash]*subfetcher // Subfetchers for each trie
+	db       Database             // Database to fetch trie nodes through
+	root     common.Hash          // Root hash of theaccount trie for metrics
+	fetches  map[common.Hash]Trie // Partially or fully fetcher tries
+	fetchers *subfetcherMap       // Subfetchers for each trie
 
 	abortChan chan *subfetcher
 	closeChan chan struct{}
@@ -56,13 +56,29 @@ type triePrefetcher struct {
 	storageWasteMeter metrics.Meter
 }
 
+type subfetcherMap struct {
+	sync.Map
+}
+
+func (s *subfetcherMap) storeSubfetcher(root common.Hash, fetcher *subfetcher) {
+	s.Store(root, fetcher)
+}
+
+func (s *subfetcherMap) getSubfetcher(root common.Hash) (*subfetcher, bool) {
+	fetcher, ok := s.Load(root)
+	if !ok {
+		return nil, ok
+	}
+	return fetcher.(*subfetcher), ok
+}
+
 // newTriePrefetcher
 func newTriePrefetcher(db Database, root common.Hash, namespace string) *triePrefetcher {
 	prefix := triePrefetchMetricsPrefix + namespace
 	p := &triePrefetcher{
 		db:        db,
 		root:      root,
-		fetchers:  make(map[common.Hash]*subfetcher), // Active prefetchers use the fetchers map
+		fetchers:  &subfetcherMap{}, // Active prefetchers use the fetchers map
 		abortChan: make(chan *subfetcher, abortChanSize),
 		closeChan: make(chan struct{}),
 
@@ -102,7 +118,12 @@ func (p *triePrefetcher) abortLoop() {
 // close iterates over all the subfetchers, aborts any that were left spinning
 // and reports the stats to the metrics subsystem.
 func (p *triePrefetcher) close() {
-	for _, fetcher := range p.fetchers {
+	if p.fetchers == nil {
+		close(p.closeChan)
+		return
+	}
+	p.fetchers.Range(func(root, fetch interface{}) bool {
+		fetcher := fetch.(*subfetcher)
 		p.abortChan <- fetcher // safe to do multiple times
 		<-fetcher.term
 		if metrics.EnabledExpensive {
@@ -126,7 +147,8 @@ func (p *triePrefetcher) close() {
 				p.storageWasteMeter.Mark(int64(len(fetcher.seen)))
 			}
 		}
-	}
+		return true
+	})
 	close(p.closeChan)
 	// Clear out all fetchers (will crash on a second call, deliberate)
 	p.fetchers = nil
@@ -160,8 +182,12 @@ func (p *triePrefetcher) copy() *triePrefetcher {
 		return copy
 	}
 	// Otherwise we're copying an active fetcher, retrieve the current states
-	for root, fetcher := range p.fetchers {
-		copy.fetches[root] = fetcher.peek()
+	if p.fetchers != nil {
+		p.fetchers.Range(func(key, value interface{}) bool {
+			root, fetcher := key.(common.Hash), value.(*subfetcher)
+			copy.fetches[root] = fetcher.peek()
+			return true
+		})
 	}
 	return copy
 }
@@ -173,10 +199,10 @@ func (p *triePrefetcher) prefetch(root common.Hash, keys [][]byte, accountHash c
 		return
 	}
 	// Active fetcher, schedule the retrievals
-	fetcher := p.fetchers[root]
+	fetcher, _ := p.fetchers.getSubfetcher(root)
 	if fetcher == nil {
 		fetcher = newSubfetcher(p.db, root, accountHash)
-		p.fetchers[root] = fetcher
+		p.fetchers.storeSubfetcher(root, fetcher)
 	}
 	fetcher.schedule(keys)
 }
@@ -194,7 +220,7 @@ func (p *triePrefetcher) trie(root common.Hash) Trie {
 		return p.db.CopyTrie(trie)
 	}
 	// Otherwise the prefetcher is active, bail if no trie was prefetched for this root
-	fetcher := p.fetchers[root]
+	fetcher, _ := p.fetchers.getSubfetcher(root)
 	if fetcher == nil {
 		p.deliveryMissMeter.Mark(1)
 		return nil
@@ -214,7 +240,7 @@ func (p *triePrefetcher) trie(root common.Hash) Trie {
 // used marks a batch of state items used to allow creating statistics as to
 // how useful or wasteful the prefetcher is.
 func (p *triePrefetcher) used(root common.Hash, used [][]byte) {
-	if fetcher := p.fetchers[root]; fetcher != nil {
+	if fetcher, _ := p.fetchers.getSubfetcher(root); fetcher != nil {
 		fetcher.used = used
 	}
 }
