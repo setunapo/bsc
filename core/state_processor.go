@@ -48,7 +48,11 @@ const (
 	recentDiffLayerTimeout = 5
 	farDiffLayerTimeout    = 2
 	maxUnitSize            = 10
+	dispatchPolicyStatic   = 1
+	dispatchPolicyDynamic  = 2
 )
+
+var dispatchPolicy = dispatchPolicyStatic
 
 // StateProcessor is a basic Processor, which takes care of transitioning
 // state from one point to another.
@@ -559,14 +563,21 @@ func (p *ParallelStateProcessor) dispatchToHungrySlot(statedb *state.StateDB, tx
 // Unit make policy:
 //  1.From
 //  2.To...
-/*
+
+// 及时止损!!!
 type ParallelDispatchUnit struct {
+	unitId int // unit with same id is likely has dependency, but to put them in same slot.
+	// ** preemptible: true
+	//    the unit can be preempted by dispatcher and be reallocated to other slot.
+	//    unit with same Id will be reallocated together.
+	// ** preemptible: false
+	//    can not be preempted, maybe it is the first unconfirmed unit of the current slot.
+	preemptible  bool
 	startTxIndex int
 	endTxIndex   int
 	txsSize      int
 	txReqs       []*ParallelTxRequest
 }
-*/
 
 // Try best to make the unit full, it is full when:
 //  ** maxUnitSize reached
@@ -853,20 +864,37 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 		//    the slot should be idle, it is better to create a new SlotDB, since new Tx is not related to previous Tx
 		// ** for a queued tx,
 		//    it is better to create a new SlotDB, since COW is used.
-		// for _, txReq := range curSlot.pendingTxReqList {
-		if txReq.slotDB == nil {
-			result := &ParallelTxResult{
-				updateSlotDB: true,
-				slotIndex:    slotIndex,
-				err:          nil,
-				txReq:        txReq,
+		if dispatchPolicy == dispatchPolicyStatic {
+			for _, txReq := range curSlot.pendingTxReqList {
+				if txReq.slotDB == nil {
+					result := &ParallelTxResult{
+						updateSlotDB: true,
+						slotIndex:    slotIndex,
+						err:          nil,
+						txReq:        txReq,
+					}
+					p.txResultChan <- result
+					txReq.slotDB = <-curSlot.slotdbChan
+				}
+				result := p.executeInSlot(slotIndex, txReq)
+				p.unconfirmedStateDBs.Store(txReq.txIndex, txReq.slotDB)
+				curSlot.pendingConfirmChan <- result
 			}
-			p.txResultChan <- result
-			txReq.slotDB = <-curSlot.slotdbChan
+		} else if dispatchPolicy == dispatchPolicyDynamic {
+			if txReq.slotDB == nil {
+				result := &ParallelTxResult{
+					updateSlotDB: true,
+					slotIndex:    slotIndex,
+					err:          nil,
+					txReq:        txReq,
+				}
+				p.txResultChan <- result
+				txReq.slotDB = <-curSlot.slotdbChan
+			}
+			result := p.executeInSlot(slotIndex, txReq)
+			p.unconfirmedStateDBs.Store(txReq.txIndex, txReq.slotDB)
+			curSlot.pendingConfirmChan <- result
 		}
-		result := p.executeInSlot(slotIndex, txReq)
-		p.unconfirmedStateDBs.Store(txReq.txIndex, txReq.slotDB)
-		curSlot.pendingConfirmChan <- result
 	}
 }
 
@@ -930,7 +958,8 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 
 	signer, _, bloomProcessor := p.preExecute(block, statedb, cfg, true)
 	var waitTxChan, curTxChan chan struct{}
-	// var txReqs []*ParallelTxRequest
+
+	var txReqs []*ParallelTxRequest
 	for i, tx := range block.Transactions() {
 		if isPoSA {
 			if isSystemTx, err := posa.IsSystemTransaction(tx, block.Header()); err != nil {
@@ -967,27 +996,69 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			waitTxChan:     waitTxChan,
 			curTxChan:      curTxChan,
 		}
+		txReqs = append(txReqs, txReq)
+	}
 
-		// to optimize the for { for {} } loop code style? it is ok right now.
+	if dispatchPolicy == dispatchPolicyStatic {
+		p.doStaticDispatch(statedb, txReqs) // todo: put txReqs in unit?
+		// from := txReq.msg.From()
+		// p.txReqAccountSorted[from] = append(p.txReqAccountSorted[from], txReq)
+		// Generate TxReqUnit every 80() transaction?
+		// if (i + 1)	% *(p.parallelNum *10) == 0 {
+		// 	p.txReqAccountSorted = make(map[common.Address][]*ParallelTxRequest) // fixme: memory reuse?
+		// }
+		for _, slot := range p.slotState {
+			slot.pendingTxReqChan <- nil // struct{}{}, static dispatch, TxReq is already in the slot, nil is ok
+		}
 		for {
-			if p.queueSameFromAddress(txReq) {
+			if len(commonTxs)+len(systemTxs) == txNum {
 				break
 			}
+			result := p.waitUntilNextTxDone(statedb, gp)
+			// update tx result
+			if result.err != nil {
+				log.Error("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
+					"resultTxIndex", result.txReq.txIndex, "result.err", result.err)
+				return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txReq.txIndex, result.txReq.tx.Hash().Hex(), result.err)
+			}
+			commonTxs = append(commonTxs, result.txReq.tx)
+			receipts = append(receipts, result.receipt)
+		}
+	} else if dispatchPolicy == dispatchPolicyDynamic {
+		for _, txReq := range txReqs {
+			// to optimize the for { for {} } loop code style? it is ok right now.
+			for {
+				if p.queueSameFromAddress(txReq) {
+					break
+				}
+				if p.queueSameToAddress(txReq) {
+					break
+				}
+				// if idle slot available, just dispatch and process next tx.
+				if p.dispatchToHungrySlot(statedb, txReq) {
+					break
+				}
+				log.Debug("ProcessParallel no slot available, wait", "txIndex", txReq.txIndex)
+				// no idle slot, wait until a tx is executed and merged.
+				result := p.waitUntilNextTxDone(statedb, gp)
 
-			if p.queueSameToAddress(txReq) {
-				break
+				// update tx result
+				if result.err != nil {
+					log.Warn("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
+						"resultTxIndex", result.txReq.txIndex, "result.err", result.err)
+					return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txReq.txIndex, result.txReq.tx.Hash().Hex(), result.err)
+				}
+				commonTxs = append(commonTxs, result.txReq.tx)
+				receipts = append(receipts, result.receipt)
 			}
-			// if idle slot available, just dispatch and process next tx.
-			if p.dispatchToHungrySlot(statedb, txReq) {
-				break
-			}
-			log.Debug("ProcessParallel no slot available, wait", "txIndex", txReq.txIndex)
-			// no idle slot, wait until a tx is executed and merged.
+		}
+		// wait until all tx request are done
+		for len(commonTxs)+len(systemTxs) < txNum {
 			result := p.waitUntilNextTxDone(statedb, gp)
 
 			// update tx result
 			if result.err != nil {
-				log.Warn("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
+				log.Error("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
 					"resultTxIndex", result.txReq.txIndex, "result.err", result.err)
 				return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txReq.txIndex, result.txReq.tx.Hash().Hex(), result.err)
 			}
@@ -995,37 +1066,6 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			commonTxs = append(commonTxs, result.txReq.tx)
 			receipts = append(receipts, result.receipt)
 		}
-
-		// txReqs = append(txReqs, txReq)
-		// from := txReq.msg.From()
-		// p.txReqAccountSorted[from] = append(p.txReqAccountSorted[from], txReq)
-		// Generate TxReqUnit every 80() transaction?
-		// if (i + 1)	% *(p.parallelNum *10) == 0 {
-		// 	p.txReqAccountSorted = make(map[common.Address][]*ParallelTxRequest) // fixme: memory reuse?
-		// }
-	}
-	// p.doStaticDispatch(statedb, txReqs)
-	// for _, slot := range p.slotState {
-	// slot.pendingTxReqChan <- struct{}{}
-	// }
-	// for {
-	// if len(commonTxs)+len(systemTxs) == txNum {
-	// break
-	// }
-
-	// wait until all tx request are done
-	for len(commonTxs)+len(systemTxs) < txNum {
-		result := p.waitUntilNextTxDone(statedb, gp)
-
-		// update tx result
-		if result.err != nil {
-			log.Error("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
-				"resultTxIndex", result.txReq.txIndex, "result.err", result.err)
-			return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txReq.txIndex, result.txReq.tx.Hash().Hex(), result.err)
-		}
-
-		commonTxs = append(commonTxs, result.txReq.tx)
-		receipts = append(receipts, result.receipt)
 	}
 
 	// len(commonTxs) could be 0, such as: https://bscscan.com/block/14580486
