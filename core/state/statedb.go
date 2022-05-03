@@ -864,12 +864,14 @@ func (s *StateDB) createObject(addr common.Address) (newobj *StateObject) {
 	var prevdestruct bool
 
 	if s.snap != nil && prev != nil {
+		s.snapParallelLock.Lock() // fixme: with new dispatch policy, the ending Tx could runing, while the block have processed.
 		_, prevdestruct = s.snapDestructs[prev.address]
 		if !prevdestruct {
 			// To destroy the previous trie node first and update the trie tree
 			// with the new object on block commit.
 			s.snapDestructs[prev.address] = struct{}{}
 		}
+		s.snapParallelLock.Unlock()
 	}
 	newobj = newObject(s, s.isParallel, addr, Account{})
 	newobj.setNonce(0) // sets the object to dirty
@@ -1325,9 +1327,11 @@ func (s *StateDB) Finalise(deleteEmptyObjects bool) { // fixme: concurrent safe.
 			// transactions within the same block might self destruct and then
 			// ressurrect an account; but the snapshotter needs both events.
 			if s.snap != nil {
+				s.snapParallelLock.Lock()
 				s.snapDestructs[obj.address] = struct{}{} // We need to maintain account deletions explicitly (will remain set indefinitely)
-				delete(s.snapAccounts, obj.address)       // Clear out any previously updated account data (may be recreated via a ressurrect)
-				delete(s.snapStorage, obj.address)        // Clear out any previously updated storage data (may be recreated via a ressurrect)
+				s.snapParallelLock.Unlock()
+				delete(s.snapAccounts, obj.address) // Clear out any previously updated account data (may be recreated via a ressurrect)
+				delete(s.snapStorage, obj.address)  // Clear out any previously updated storage data (may be recreated via a ressurrect)
 			}
 		} else {
 			// 1.none parallel mode, we do obj.finalise(true) as normal
@@ -2266,6 +2270,7 @@ func (s *ParallelStateDB) createObject(addr common.Address) (newobj *StateObject
 	var prevdestruct bool
 
 	if s.snap != nil && prev != nil {
+		s.snapParallelLock.Lock()
 		_, prevdestruct = s.snapDestructs[prev.address] // fixme, record the snapshot read for create Account
 		s.parallel.addrSnapDestructsReadsInSlot[addr] = prevdestruct
 		if !prevdestruct {
@@ -2273,6 +2278,8 @@ func (s *ParallelStateDB) createObject(addr common.Address) (newobj *StateObject
 			// with the new object on block commit.
 			s.snapDestructs[prev.address] = struct{}{}
 		}
+		s.snapParallelLock.Lock()
+
 	}
 	newobj = newObject(s, s.isParallel, addr, Account{})
 	newobj.setNonce(0) // sets the object to dirty
@@ -3293,7 +3300,9 @@ func (s *ParallelStateDB) IsParallelReadsValid() bool {
 				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
 			return false
 		}
+		s.snapParallelLock.RLock()                    // fixme: this lock is not needed
 		_, destructMain := mainDB.snapDestructs[addr] // addr not exist
+		s.snapParallelLock.RUnlock()
 		if destructRead != destructMain {
 			log.Debug("IsSlotDBReadsValid snapshot destructs read invalid",
 				"addr", addr, "destructRead", destructRead, "destructMain", destructMain,
