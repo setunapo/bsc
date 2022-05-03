@@ -26,9 +26,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	bloomfilter "github.com/holiman/bloomfilter/v2"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rlp"
-	bloomfilter "github.com/holiman/bloomfilter/v2"
 )
 
 var (
@@ -211,6 +212,10 @@ func newDiffLayer(parent snapshot, root common.Hash, destructs map[common.Hash]s
 	}
 	dl.memory += uint64(len(destructs) * common.HashLength)
 	return dl
+}
+
+func (dl *diffLayer) Generating() bool {
+	return dl.origin.Generating()
 }
 
 // rebloom discards the layer's current bloom and rebuilds it from scratch based

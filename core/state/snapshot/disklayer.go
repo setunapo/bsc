@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/VictoriaMetrics/fastcache"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -47,6 +48,10 @@ type diskLayer struct {
 // Root returns  root hash for which this snapshot was made.
 func (dl *diskLayer) Root() common.Hash {
 	return dl.root
+}
+
+func (dl *diskLayer) Generating() bool {
+	return dl.stale || (dl.genMarker != nil)
 }
 
 func (dl *diskLayer) WaitAndGetVerifyRes() bool {

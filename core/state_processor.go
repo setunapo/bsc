@@ -922,7 +922,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	txNum := len(block.Transactions())
 	p.resetState(txNum, statedb)
 	if txNum > 0 {
-		log.Info("ProcessParallel", "block", header.Number)
+		log.Info("ProcessParallel", "block", header.Number, "snap", statedb.IsSnapshotNil(), "isGenerating", statedb.IsSnapshotGenerating)
 	}
 
 	// Iterate over and process the individual transactions

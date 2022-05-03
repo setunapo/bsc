@@ -246,6 +246,17 @@ type StateDB struct {
 	SnapshotCommits      time.Duration
 }
 
+func (s *StateDB) IsSnapshotNil() bool {
+	return s.snap == nil
+}
+
+func (s *StateDB) IsSnapshotGenerating() bool {
+	if s.snap == nil {
+		return true
+	}
+	return s.snap.Generating()
+}
+
 // New creates a new state from a given trie.
 func New(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) {
 	return newStateDB(root, db, snaps)

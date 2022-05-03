@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/log"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/metrics"
@@ -416,6 +418,11 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 	}
 	// If snapshot unavailable or reading from it failed, load from the database
 	if s.db.snap == nil || err != nil {
+		var errMsg = ""
+		if err != nil {
+			errMsg = err.Error()
+		}
+		log.Info("get state from trie", "isSnapNil", s.db.snap == nil, "isErr", err == nil, "err", errMsg)
 		if meter != nil {
 			// If we already spent time checking the snapshot, account for it
 			// and reset the readStart
