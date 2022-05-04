@@ -440,6 +440,7 @@ type ParallelTxRequest struct {
 	usedGas        *uint64
 	curTxChan      chan int
 	systemAddrRedo bool
+	runnable       bool // we only run a Tx once or if it needs redo
 }
 
 // to create and start the execution slot goroutines
@@ -759,6 +760,7 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 			result:       result,
 		}
 	}
+	txReq.runnable = false
 	if result.Failed() {
 		// if Tx is reverted, all its state change will be discarded
 		slotDB.RevertSlotDB(txReq.msg.From())
@@ -895,8 +897,8 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 					log.Debug("runConfirmLoop conflict", "slotIndex", slotIndex,
 						"txIndex", lastResult.txReq.txIndex,
 						"enableShadowFlag", slot.enableShadowFlag)
-
-					if !slot.enableShadowFlag { // last result is from normal slot
+					lastResult.txReq.runnable = true // needs redo
+					if !slot.enableShadowFlag {      // last result is from normal slot
 						slot.enableShadowFlag = true
 						slot.pendingTxReqShadowChan <- nil
 						// notify shadow slot
@@ -935,36 +937,39 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 
 }
 
-func (p *ParallelStateProcessor) toConfirmTxResult(txResult *ParallelTxResult) bool {
+// do conflict detect
+func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult) bool {
 	txReq := txResult.txReq
 	txIndex := txReq.txIndex
 	slotDB := txResult.slotDB
-	header := txReq.block.Header()
-
-	// do conflict detect
-	hasConflict := false
-	// systemAddrConflict := false
 	if txResult.err != nil {
 		log.Debug("redo, since in slot execute failed", "err", txResult.err)
-		hasConflict = true
+		return true
 	} else if slotDB.SystemAddressRedo() {
 		log.Debug("Stage Execution conflict for SystemAddressRedo", "txIndex", txIndex)
-		hasConflict = true
-		// systemAddrConflict = true
 		txResult.txReq.systemAddrRedo = true
+		return true
 	} else if slotDB.NeedsRedo() {
 		// if this is any reason that indicates this transaction needs to redo, skip the conflict check
-		hasConflict = true
+		return true
 	} else {
 		// to check if what the slot db read is correct.
 		// refDetail := slotDB.UnconfirmedRefList()
 		if !slotDB.IsParallelReadsValid() {
-			hasConflict = true
+			return true
 		}
 	}
-	if hasConflict {
+	return false
+}
+
+func (p *ParallelStateProcessor) toConfirmTxResult(txResult *ParallelTxResult) bool {
+	txReq := txResult.txReq
+	// txIndex := txReq.txIndex
+	// slotDB := txResult.slotDB
+	if p.hasConflict(txResult) {
 		return false
 	}
+
 	// goroutine unsafe operation will be handled from here for safety
 	gasConsumed := txReq.gasLimit - txResult.gpSlot.Gas()
 	if gasConsumed != txResult.result.UsedGas {
@@ -973,6 +978,7 @@ func (p *ParallelStateProcessor) toConfirmTxResult(txResult *ParallelTxResult) b
 	}
 
 	// ok, time to do finalize, stage2 should not be parallel
+	header := txReq.block.Header()
 	txResult.receipt, txResult.err = applyTransactionStageFinalization(txResult.evm, txResult.result,
 		txReq.msg, p.config, txResult.slotDB, header,
 		txReq.tx, txReq.usedGas, txReq.bloomProcessor)
@@ -1002,9 +1008,13 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				}
 				// if interrupted,
 				if curSlot.enableShadowFlag {
-					log.Debug("runSlotLoop use Shadow now, stop the normal one", "slotIndex", slotIndex,
-						"txIndex ", txReq.txIndex)
+					log.Debug("runSlotLoop use Shadow now, stop the normal one")
 					break
+				}
+				if !txReq.runnable {
+					// log.Info("runSlotLoop tx not runnable", "slotIndex", slotIndex,
+					//	"txIndex ", txReq.txIndex)
+					continue
 				}
 
 				// if txReq.slotDB == nil {  // must update slot DB
@@ -1069,11 +1079,18 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 				if txReq.txIndex < startTxIndex {
 					continue
 				}
+
 				// if interrupted, it will re
 				if !curSlot.enableShadowFlag { // shadow conflict, switch back to normal
 					log.Debug("runShadowSlotLoop use Normal now, stop the Shadow one", "slotIndex", slotIndex,
 						"txIndex ", txReq.txIndex)
 					break
+				}
+
+				if !txReq.runnable {
+					// log.Info("runShadowSlotLoop tx not runnable", "slotIndex", slotIndex,
+					//	"txIndex ", txReq.txIndex)
+					continue
 				}
 
 				// if txReq.slotDB == nil {
@@ -1178,6 +1195,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			usedGas:        usedGas,
 			curTxChan:      make(chan int, 1),
 			systemAddrRedo: false, // set to true, when systemAddr access is detected.
+			runnable:       true,
 		}
 		txReqs = append(txReqs, txReq)
 	}
@@ -1217,9 +1235,10 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 						// log.Info("ProcessParallel try to update slot db", "slotIndex", updateDB.slotIndex)
 						slotState.slotdbChan <- nil
 						continue
-					} else {
-						// log.Info("ProcessParallel unexpected txResultChan", "slotIndex", i)
 					}
+					// else {
+					// log.Info("ProcessParallel unexpected txResultChan", "slotIndex", i)
+					// }
 				// case slotIndex := <-p.stopSlotChan:
 				case <-p.stopSlotChan:
 					// log.Info("ProcessParallel slot stopped", "slotIndex", slotIndex)
