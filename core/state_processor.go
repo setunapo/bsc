@@ -87,8 +87,9 @@ type ParallelStateProcessor struct {
 	mergedTxIndex         int          // the latest finalized tx index, fixme: use Atomic
 	slotDBsToRelease      []*state.ParallelStateDB
 	debugConflictRedoNum  int
-	unconfirmedStateDBs   *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
-	stopSlotChan          chan int  // fixme: use struct{}{}, to make sure all slot are idle
+	unconfirmedStateDBs   *sync.Map     // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
+	stopSlotChan          chan int      // fixme: use struct{}{}, to make sure all slot are idle
+	stopConfirmChan       chan struct{} // fixme: use struct{}{}, to make sure all slot are idle
 	allTxReqs             []*ParallelTxRequest
 	allTxReqProcessedOnce bool
 }
@@ -454,6 +455,7 @@ func (p *ParallelStateProcessor) init() {
 		"QueueSize", p.queueSize)
 	p.txResultChan = make(chan *ParallelTxResult, p.parallelNum)
 	p.stopSlotChan = make(chan int, 1)
+	p.stopConfirmChan = make(chan struct{}, 1)
 	p.slotState = make([]*SlotState, p.parallelNum)
 	for i := 0; i < p.parallelNum; i++ {
 		p.slotState[i] = &SlotState{
@@ -880,7 +882,18 @@ func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *Pa
 func (p *ParallelStateProcessor) runConfirmLoop() {
 	for {
 		// ParallelTxResult is not confirmed yet
-		unconfirmedResult := <-p.pendingConfirmChan
+		var unconfirmedResult *ParallelTxResult
+		select {
+		case <-p.stopConfirmChan:
+			log.Debug("runConfirmLoop stop received, drop all pendingConfirm", "len(p.pendingConfirmChan)", len(p.pendingConfirmChan))
+			for len(p.pendingConfirmChan) > 0 {
+				<-p.pendingConfirmChan
+			}
+			p.stopSlotChan <- -1
+			continue
+		case unconfirmedResult = <-p.pendingConfirmChan:
+		}
+
 		txIndex := unconfirmedResult.txReq.txIndex
 		log.Debug("runConfirmLoop receive", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
 		p.pendingConfirmResults[txIndex] = append(p.pendingConfirmResults[txIndex], unconfirmedResult)
@@ -1114,10 +1127,6 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 					"txReq.txIndex", txReq.txIndex)
 
 				p.unconfirmedStateDBs.Store(txReq.txIndex, slotDB)
-				select {
-				case <-curSlot.pendingTxReqChan: // just to consume this message
-				default:
-				}
 				log.Debug("runSlotLoop executeInSlot to send result", "slotIndex", slotIndex,
 					"txReq.txIndex", txReq.txIndex)
 
@@ -1153,11 +1162,6 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				log.Debug("runSlotLoop executeInSlot steal done", "slotIndex", slotIndex,
 					"txReq.txIndex", stealTxReq.txIndex)
 				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
-				select {
-				case <-curSlot.pendingTxReqChan: // just to consume this message
-				default:
-				}
-
 				log.Debug("runSlotLoop executeInSlot steal to send result", "slotIndex", slotIndex,
 					"txReq.txIndex", stealTxReq.txIndex)
 				p.pendingConfirmChan <- result
@@ -1252,10 +1256,6 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 					"txReq.txIndex", txReq.txIndex)
 
 				p.unconfirmedStateDBs.Store(txReq.txIndex, slotDB)
-				select {
-				case <-curSlot.pendingTxReqShadowChan: // just to consume this message
-				default:
-				}
 				log.Debug("runShadowSlotLoop executeInSlot to send result", "slotIndex", slotIndex,
 					"txReq.txIndex", txReq.txIndex)
 				p.pendingConfirmChan <- result
@@ -1291,10 +1291,6 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 					"txReq.txIndex", stealTxReq.txIndex)
 
 				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
-				select {
-				case <-curSlot.pendingTxReqShadowChan: // just to consume this message
-				default:
-				}
 				log.Debug("runShadowSlotLoop executeInSlot steal to send result", "slotIndex", slotIndex,
 					"txReq.txIndex", stealTxReq.txIndex)
 
@@ -1452,6 +1448,12 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			}
 			log.Debug("ProcessParallel shadow slot stopped", "slotIndex", i)
 		}
+		// wait until the confirm routine is stopped
+		log.Debug("ProcessParallel to stop confirm routine")
+		p.stopConfirmChan <- struct{}{}
+		<-p.stopSlotChan
+		log.Debug("ProcessParallel stopped confirm routine")
+
 		debug.Handler.EndTrace(region)
 	}
 	/*
