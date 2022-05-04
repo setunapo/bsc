@@ -3278,7 +3278,7 @@ func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (
 	return nil, false
 }
 
-func (s *ParallelStateDB) IsParallelReadsValid() bool {
+func (s *ParallelStateDB) IsParallelReadsValid(doWbnbMakeUp bool) bool {
 	slotDB := s
 	if !slotDB.parallel.isSlotDB {
 		log.Error("IsSlotDBReadsValid slotDB should be slot DB", "SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
@@ -3306,24 +3306,29 @@ func (s *ParallelStateDB) IsParallelReadsValid() bool {
 			balanceMain := mainDB.GetBalance(addr)
 			if balanceSlot.Cmp(balanceMain) != 0 {
 				if addr == WBNBAddress && slotDB.WBNBMakeUp() { // WBNB balance make up
-					balanceDelta := new(big.Int).Sub(balanceMain, balanceSlot)
-					slotDB.wbnbMakeUpLock.Lock()
-					slotDB.AddBalance(addr, balanceDelta) // fixme: concurrent not safe, unconfirmed read
-					slotDB.wbnbMakeUpLock.Unlock()
-					/*
-						if _, exist := slotDB.stateObjectsPending[addr]; !exist {
-							slotDB.stateObjectsPending[addr] = struct{}{}
-						}
-						if _, exist := slotDB.stateObjectsDirty[addr]; !exist {
-							// only read, but never change WBNB's balance or state
-							// log.Warn("IsSlotDBReadsValid balance makeup for WBNB, but it is not in dirty",
-							//	"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
-							slotDB.stateObjectsDirty[addr] = struct{}{}
-						}
-					*/
-					log.Debug("IsSlotDBReadsValid balance makeup for WBNB",
-						"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex,
-						"updated WBNB balance", slotDB.GetBalance(addr))
+					if doWbnbMakeUp {
+						balanceDelta := new(big.Int).Sub(balanceMain, balanceSlot)
+						slotDB.wbnbMakeUpLock.Lock()
+						slotDB.AddBalance(addr, balanceDelta) // fixme: concurrent not safe, unconfirmed read
+						slotDB.wbnbMakeUpLock.Unlock()
+						/*
+							if _, exist := slotDB.stateObjectsPending[addr]; !exist {
+								slotDB.stateObjectsPending[addr] = struct{}{}
+							}
+							if _, exist := slotDB.stateObjectsDirty[addr]; !exist {
+								// only read, but never change WBNB's balance or state
+								// log.Warn("IsSlotDBReadsValid balance makeup for WBNB, but it is not in dirty",
+								//	"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
+								slotDB.stateObjectsDirty[addr] = struct{}{}
+							}
+						*/
+						log.Debug("IsSlotDBReadsValid balance makeup for WBNB",
+							"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex,
+							"updated WBNB balance", slotDB.GetBalance(addr))
+					} else {
+						log.Debug("IsSlotDBReadsValid skip makeup for WBNB",
+							"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
+					}
 					continue
 				}
 

@@ -81,13 +81,14 @@ type ParallelStateProcessor struct {
 	pendingConfirmResults map[int][]*ParallelTxResult // tx could be executed several times, with several result to check
 	txResultChan          chan *ParallelTxResult      // to notify dispatcher that a tx is done
 	// txReqAccountSorted   map[common.Address][]*ParallelTxRequest // fixme: *ParallelTxRequest => ParallelTxRequest?
-	slotState            []*SlotState // idle, or pending messages
-	mergedTxIndex        int          // the latest finalized tx index, fixme: use Atomic
-	slotDBsToRelease     []*state.ParallelStateDB
-	debugConflictRedoNum int
-	unconfirmedStateDBs  *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
-	stopSlotChan         chan int  // fixme: use struct{}{}, to make sure all slot are idle
-	allTxReqs            []*ParallelTxRequest
+	slotState             []*SlotState // idle, or pending messages
+	mergedTxIndex         int          // the latest finalized tx index, fixme: use Atomic
+	slotDBsToRelease      []*state.ParallelStateDB
+	debugConflictRedoNum  int
+	unconfirmedStateDBs   *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
+	stopSlotChan          chan int  // fixme: use struct{}{}, to make sure all slot are idle
+	allTxReqs             []*ParallelTxRequest
+	allTxReqProcessedOnce bool
 }
 
 func NewParallelStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consensus.Engine, parallelNum int, queueSize int) *ParallelStateProcessor {
@@ -872,74 +873,23 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 		unconfirmedResult := <-p.pendingConfirmChan
 		txIndex := unconfirmedResult.txReq.txIndex
 		p.pendingConfirmResults[txIndex] = append(p.pendingConfirmResults[txIndex], unconfirmedResult)
-		// log.Debug("runConfirmLoop get a result", "txIndex", txIndex, "current merged TxIndex", p.mergedTxIndex)
-		var targetTxIndex int
-		for {
-			// handle a targetTxIndex in a loop
-			targetTxIndex = p.mergedTxIndex + 1
-			// select a unconfirmedResult to check
-			results := p.pendingConfirmResults[targetTxIndex]
-			resultsLen := len(results)
-			if resultsLen == 0 { // no pending result can be verified, break and wait for incoming results
-				// log.Debug("runConfirmLoop resultsLen is 0", "targetTxIndex", targetTxIndex, "merged TxIndex", p.mergedTxIndex)
-				break
+		targetTxIndex := p.mergedTxIndex + 1
+		if p.allTxReqProcessedOnce {
+			// more aggressive tx result confirm, even for these Txs not in turn
+			txSize := len(p.allTxReqs)
+			for txIndex := targetTxIndex; txIndex < txSize; txIndex++ {
+				p.toConfirmTxIndex(txIndex)
 			}
-			lastResult := results[len(results)-1]                                                          // last is the most fresh, stack based priority
-			p.pendingConfirmResults[targetTxIndex] = p.pendingConfirmResults[targetTxIndex][:resultsLen-1] // remove from the queue
-			// log.Info("runConfirmLoop", "resultsLen", resultsLen, "txIndex", lastResult.txReq.txIndex,
-			//	"targetTxIndex", targetTxIndex, "merged TxIndex", p.mergedTxIndex)
+		} else {
+			p.toConfirmTxIndex(targetTxIndex)
 
-			valid := p.toConfirmTxResult(lastResult)
-			slotIndex := lastResult.slotIndex
-			if !valid {
-				p.debugConflictRedoNum++
-				if resultsLen == 1 {
-					slot := p.slotState[slotIndex]
-					log.Debug("runConfirmLoop conflict", "slotIndex", slotIndex,
-						"txIndex", lastResult.txReq.txIndex,
-						"enableShadowFlag", slot.enableShadowFlag)
-					lastResult.txReq.runnable = true // needs redo
-					if !slot.enableShadowFlag {      // last result is from normal slot
-						slot.enableShadowFlag = true
-						slot.pendingTxReqShadowChan <- nil
-						// notify shadow slot
-					} else { // last result is from shamdow
-						slot.enableShadowFlag = false
-						slot.pendingTxReqChan <- nil
-					}
-					// this the last result for this txIndex,
-					// interrupt its current routine, and reschedule from the the other routine(shadow?)
-				} else {
-					// try next
-					log.Debug("runConfirmLoop conflict, try next result of same txIndex",
-						"slotIndex", slotIndex, "txIndex", lastResult.txReq.txIndex)
-				}
-				continue
-			}
-			log.Debug("runConfirmLoop result to deliver", "slotIndex", slotIndex,
-				"txIndex", lastResult.txReq.txIndex, "mergedTxIndex", p.mergedTxIndex)
-			// result is valid, deliver it to main processor
-			p.txResultChan <- lastResult
-			// wait until merged TxIndex is updated
-			<-lastResult.txReq.curTxChan
-			// 	close(result.txReq.curTxChan) // fixme: to close
-
-			log.Debug("runConfirmLoop result is delivered", "slotIndex", slotIndex,
-				"txIndex", lastResult.txReq.txIndex, "mergedTxIndex", p.mergedTxIndex)
-			if p.mergedTxIndex != (targetTxIndex) {
-				log.Warn("runConfirmLoop result delivered, but unexpected mergedTxIndex",
-					"mergedTxIndex", p.mergedTxIndex, "targetTxIndex", targetTxIndex)
-			}
-			// p.mergedTxIndex = targetTxIndex // fixme: cpu execute disorder,
-			continue // try validate next txIndex
 		}
-
 	}
 
 }
 
 // do conflict detect
-func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult) bool {
+func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, hit bool) bool {
 	txReq := txResult.txReq
 	txIndex := txReq.txIndex
 	slotDB := txResult.slotDB
@@ -956,19 +906,104 @@ func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult) bool {
 	} else {
 		// to check if what the slot db read is correct.
 		// refDetail := slotDB.UnconfirmedRefList()
-		if !slotDB.IsParallelReadsValid() {
+		if !slotDB.IsParallelReadsValid(hit) {
 			return true
 		}
 	}
 	return false
 }
 
-func (p *ParallelStateProcessor) toConfirmTxResult(txResult *ParallelTxResult) bool {
+// to confirm a serial TxResults with same txIndex
+func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
+	// log.Debug("runConfirmLoop get a result", "txIndex", txIndex, "current merged TxIndex", p.mergedTxIndex)
+	// var targetTxIndex int
+	hit := false
+	if targetTxIndex == p.mergedTxIndex+1 {
+		// this is the one that can been merged,
+		// others are for likely conflict check, since it is not their tuen.
+		hit = true
+	}
+	for {
+		// handle a targetTxIndex in a loop
+		// targetTxIndex = p.mergedTxIndex + 1
+		// select a unconfirmedResult to check
+		results := p.pendingConfirmResults[targetTxIndex]
+		resultsLen := len(results)
+		if resultsLen == 0 { // no pending result can be verified, break and wait for incoming results
+			// log.Debug("runConfirmLoop resultsLen is 0", "targetTxIndex", targetTxIndex, "merged TxIndex", p.mergedTxIndex)
+			break
+		}
+		lastResult := results[len(results)-1] // last is the most fresh, stack based priority
+		if hit {
+			// only remove results of the hit one
+			p.pendingConfirmResults[targetTxIndex] = p.pendingConfirmResults[targetTxIndex][:resultsLen-1] // remove from the queue
+		}
+		// log.Info("runConfirmLoop", "resultsLen", resultsLen, "txIndex", lastResult.txReq.txIndex,
+		//	"targetTxIndex", targetTxIndex, "merged TxIndex", p.mergedTxIndex)
+
+		valid := p.toConfirmTxIndexResult(lastResult, hit)
+		slotIndex := lastResult.slotIndex
+		if !valid {
+			p.debugConflictRedoNum++
+			if resultsLen == 1 || !hit { // for not hit, we only check its latest result.
+				slot := p.slotState[slotIndex]
+				log.Debug("runConfirmLoop conflict", "slotIndex", slotIndex,
+					"txIndex", lastResult.txReq.txIndex,
+					"enableShadowFlag", slot.enableShadowFlag)
+				lastResult.txReq.runnable = true // needs redo
+				if !slot.enableShadowFlag {      // last result is from normal slot
+					slot.enableShadowFlag = true
+					slot.pendingTxReqShadowChan <- nil
+					// notify shadow slot
+				} else { // last result is from shamdow
+					slot.enableShadowFlag = false
+					slot.pendingTxReqChan <- nil
+				}
+				// this the last result for this txIndex,
+				// interrupt its current routine, and reschedule from the the other routine(shadow?)
+				return
+			} else {
+				// try next
+				log.Debug("runConfirmLoop conflict, try next result of same txIndex",
+					"slotIndex", slotIndex, "txIndex", lastResult.txReq.txIndex)
+			}
+			continue
+		}
+		if !hit {
+			// likely valid, but not sure, can not deliver
+			// fixme: need to handle txResult repeatedly check?
+			return
+		}
+		log.Debug("runConfirmLoop result to deliver", "slotIndex", slotIndex,
+			"txIndex", lastResult.txReq.txIndex, "mergedTxIndex", p.mergedTxIndex)
+		// result is valid, deliver it to main processor
+		p.txResultChan <- lastResult
+		// wait until merged TxIndex is updated
+		<-lastResult.txReq.curTxChan
+		// 	close(result.txReq.curTxChan) // fixme: to close
+
+		log.Debug("runConfirmLoop result is delivered", "slotIndex", slotIndex,
+			"txIndex", lastResult.txReq.txIndex, "mergedTxIndex", p.mergedTxIndex)
+		if p.mergedTxIndex != (targetTxIndex) {
+			log.Warn("runConfirmLoop result delivered, but unexpected mergedTxIndex",
+				"mergedTxIndex", p.mergedTxIndex, "targetTxIndex", targetTxIndex)
+		}
+		// p.mergedTxIndex = targetTxIndex // fixme: cpu execute disorder,
+		continue // try validate next txIndex
+	}
+
+}
+
+// to confirm one txResult
+func (p *ParallelStateProcessor) toConfirmTxIndexResult(txResult *ParallelTxResult, hit bool) bool {
 	txReq := txResult.txReq
 	// txIndex := txReq.txIndex
 	// slotDB := txResult.slotDB
-	if p.hasConflict(txResult) {
+	if p.hasConflict(txResult, hit) {
 		return false
+	}
+	if !hit { // not its turn
+		return true // likely valid, not sure
 	}
 
 	// goroutine unsafe operation will be handled from here for safety
@@ -1061,6 +1096,13 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
 				p.pendingConfirmChan <- result
 			}
+			// most of the tx has been runned at least once, except the last batch in other slot
+			// now we will be more aggressive:
+			//   do conflcit check , as long as tx result is generated,
+			//   if lucky, it is the Tx's turn, we will do conflict check with WBNB makeup
+			//   otherwise, do conflict check without WBNB makeup, but we will ignor WBNB's balance conflict.
+			// throw these likely conflicted tx back to re-execute
+			p.allTxReqProcessedOnce = true
 		}
 		/*
 			// disable dynamic right now.
@@ -1160,6 +1202,8 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
 				p.pendingConfirmChan <- result
 			}
+			p.allTxReqProcessedOnce = true
+
 		}
 	}
 }
@@ -1175,6 +1219,7 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 
 	statedb.PrepareForParallel()
 	p.allTxReqs = make([]*ParallelTxRequest, 0)
+	p.allTxReqProcessedOnce = false
 	p.slotDBsToRelease = make([]*state.ParallelStateDB, 0, txNum)
 
 	/*
