@@ -476,7 +476,7 @@ func (p *ParallelStateProcessor) init() {
 		}(i)
 	}
 
-	p.pendingConfirmChan = make(chan *ParallelTxResult, 100)
+	p.pendingConfirmChan = make(chan *ParallelTxResult, 400)
 	go func() {
 		p.runConfirmLoop() // this loop will be permanent live
 	}()
