@@ -1138,14 +1138,14 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 					break
 				}
 				log.Debug("runSlotLoop executeInSlot", "slotIndex", slotIndex,
-					"txReq.txIndex", txReq.txIndex)
+					"txReq.txIndex", txReq.txIndex, "shadow", shadow)
 				result := p.executeInSlot(slotIndex, txReq, slotDB)
 				log.Debug("runSlotLoop executeInSlot done", "slotIndex", slotIndex,
-					"txReq.txIndex", txReq.txIndex)
+					"txReq.txIndex", txReq.txIndex, "shadow", shadow)
 
 				p.unconfirmedStateDBs.Store(txReq.txIndex, slotDB)
 				log.Debug("runSlotLoop executeInSlot to send result", "slotIndex", slotIndex,
-					"txReq.txIndex", txReq.txIndex)
+					"txReq.txIndex", txReq.txIndex, "shadow", shadow)
 
 				p.pendingConfirmChan <- result
 				debug.Handler.EndTrace(region2)
@@ -1153,40 +1153,38 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 			// txReq in this Slot have all been executed, try steal one from other slot.
 			// as long as the TxReq is runable, we steal it, mark it as stolen
 			// steal one by one
-			/*
-			   // disable steal mode
-			   			for _, stealTxReq := range p.allTxReqs {
-			   				if !stealTxReq.runnable {
-			   					continue
-			   				}
-			   				stealTxReq.runnable = false
-			   				region2 := debug.Handler.StartTrace("for a stolen TxReq")
-			   				resultUpdateDB := &ParallelTxResult{
-			   					updateSlotDB: true,
-			   					slotIndex:    slotIndex,
-			   					err:          nil,
-			   					txReq:        stealTxReq,
-			   					keepSystem:   stealTxReq.systemAddrRedo,
-			   				}
-			   				p.txResultChan <- resultUpdateDB
-			   				slotDB := <-curSlot.slotdbChan
-			   				if slotDB == nil { // block is processed
-			   					debug.Handler.EndTrace(region2)
-			   					break
-			   				}
-			   				log.Debug("runSlotLoop executeInSlot steal", "slotIndex", slotIndex,
-			   					"txReq.txIndex", stealTxReq.txIndex)
 
-			   				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
-			   				log.Debug("runSlotLoop executeInSlot steal done", "slotIndex", slotIndex,
-			   					"txReq.txIndex", stealTxReq.txIndex)
-			   				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
-			   				log.Debug("runSlotLoop executeInSlot steal to send result", "slotIndex", slotIndex,
-			   					"txReq.txIndex", stealTxReq.txIndex)
-			   				p.pendingConfirmChan <- result
-			   				debug.Handler.EndTrace(region2)
-			   			}
-			*/
+			for _, stealTxReq := range p.allTxReqs {
+				if !stealTxReq.runnable {
+					continue
+				}
+				stealTxReq.runnable = false
+				region2 := debug.Handler.StartTrace("for a stolen TxReq")
+				resultUpdateDB := &ParallelTxResult{
+					updateSlotDB: true,
+					slotIndex:    slotIndex,
+					err:          nil,
+					txReq:        stealTxReq,
+					keepSystem:   stealTxReq.systemAddrRedo,
+				}
+				p.txResultChan <- resultUpdateDB
+				slotDB := <-curSlot.slotdbChan
+				if slotDB == nil { // block is processed
+					debug.Handler.EndTrace(region2)
+					break
+				}
+				log.Debug("runSlotLoop executeInSlot steal", "slotIndex", slotIndex,
+					"txReq.txIndex", stealTxReq.txIndex, "shadow", shadow)
+
+				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
+				log.Debug("runSlotLoop executeInSlot steal done", "slotIndex", slotIndex,
+					"txReq.txIndex", stealTxReq.txIndex, "shadow", shadow)
+				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
+				log.Debug("runSlotLoop executeInSlot steal to send result", "slotIndex", slotIndex,
+					"txReq.txIndex", stealTxReq.txIndex, "shadow", shadow)
+				p.pendingConfirmChan <- result
+				debug.Handler.EndTrace(region2)
+			}
 
 			// most of the tx has been runned at least once, except the last batch in other slot
 			// now we will be more aggressive:
