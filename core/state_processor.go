@@ -467,12 +467,12 @@ func (p *ParallelStateProcessor) init() {
 		}
 		// start the shadow slot first
 		go func(slotIndex int) {
-			p.runShadowSlotLoop(slotIndex) // this loop will be permanent live
+			p.runSlotLoop(slotIndex, true) // this loop will be permanent live
 		}(i)
 
 		// start the slot's goroutine
 		go func(slotIndex int) {
-			p.runSlotLoop(slotIndex) // this loop will be permanent live
+			p.runSlotLoop(slotIndex, false) // this loop will be permanent live
 		}(i)
 	}
 
@@ -899,16 +899,16 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 		p.pendingConfirmResults[txIndex] = append(p.pendingConfirmResults[txIndex], unconfirmedResult)
 		region := debug.Handler.StartTrace("runConfirmLoop")
 		targetTxIndex := p.mergedTxIndex + 1
-		if p.allTxReqProcessedOnce {
-			// more aggressive tx result confirm, even for these Txs not in turn
-			txSize := len(p.allTxReqs)
-			for txIndex := targetTxIndex; txIndex < txSize; txIndex++ {
-				p.toConfirmTxIndex(txIndex)
-			}
-		} else {
-			p.toConfirmTxIndex(targetTxIndex)
+		// if p.allTxReqProcessedOnce {
+		// more aggressive tx result confirm, even for these Txs not in turn
+		// txSize := len(p.allTxReqs)
+		// for txIndex := targetTxIndex; txIndex < txSize; txIndex++ {
+		//	p.toConfirmTxIndex(txIndex)
+		// }
+		// } else {
+		p.toConfirmTxIndex(targetTxIndex)
 
-		}
+		// }
 		debug.Handler.EndTrace(region)
 	}
 
@@ -1072,38 +1072,53 @@ func (p *ParallelStateProcessor) toConfirmTxIndexResult(txResult *ParallelTxResu
 	return true
 }
 
-func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
+func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 	curSlot := p.slotState[slotIndex]
 	startTxIndex := 0
+	var wakeupChan chan *ParallelTxRequest
+	var stopChan chan struct{}
+
+	if !shadow {
+		wakeupChan = curSlot.pendingTxReqChan
+		stopChan = curSlot.stopChan
+	} else {
+		wakeupChan = curSlot.pendingTxReqShadowChan
+		stopChan = curSlot.stopShadowChan
+	}
 	for {
 		// wait for new TxReq
 		// txReq := <-curSlot.pendingTxReqChan
 		select {
-		case <-curSlot.stopChan:
+		case <-stopChan:
 			log.Debug("runSlotLoop stop received", "slotIndex", slotIndex)
 			p.stopSlotChan <- slotIndex
 			continue
-		case <-curSlot.pendingTxReqChan:
+		case <-wakeupChan:
 		}
+
 		traceMsg := "runSlotLoop " + strconv.Itoa(slotIndex)
+		if shadow {
+			traceMsg = traceMsg + " shadow"
+		}
 		region1 := debug.Handler.StartTrace(traceMsg)
 
 		startTxIndex = p.mergedTxIndex + 1
-		log.Debug("runSlotLoop started", "slotIndex", slotIndex, "startTxIndex", startTxIndex)
+		log.Debug("runSlotLoop started", "slotIndex", slotIndex, "startTxIndex", startTxIndex, "shadow", shadow)
 		if dispatchPolicy == dispatchPolicyStatic {
 			for _, txReq := range curSlot.pendingTxReqList {
 				if txReq.txIndex < startTxIndex {
 					continue
 				}
 				// if interrupted,
-				if curSlot.enableShadowFlag {
-					log.Debug("runSlotLoop use Shadow now, stop the normal one", "slotIndex", slotIndex,
-						"txIndex ", txReq.txIndex)
+				if curSlot.enableShadowFlag != shadow {
+					log.Debug("runSlotLoop, switch loop", "slotIndex", slotIndex,
+						"txIndex ", txReq.txIndex, "shadow", shadow)
 					break
 				}
+				// not confirmed?
 				if !txReq.runnable {
-					log.Debug("runSlotLoop tx not runnable", "slotIndex", slotIndex,
-						"txIndex ", txReq.txIndex)
+					log.Debug("runSlotLoop, tx not runnable", "slotIndex", slotIndex,
+						"txIndex ", txReq.txIndex, "shadow", shadow)
 					continue
 				}
 				txReq.runnable = false
@@ -1138,37 +1153,41 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 			// txReq in this Slot have all been executed, try steal one from other slot.
 			// as long as the TxReq is runable, we steal it, mark it as stolen
 			// steal one by one
-			for _, stealTxReq := range p.allTxReqs {
-				if !stealTxReq.runnable {
-					continue
-				}
-				stealTxReq.runnable = false
-				region2 := debug.Handler.StartTrace("for a stolen TxReq")
-				resultUpdateDB := &ParallelTxResult{
-					updateSlotDB: true,
-					slotIndex:    slotIndex,
-					err:          nil,
-					txReq:        stealTxReq,
-					keepSystem:   stealTxReq.systemAddrRedo,
-				}
-				p.txResultChan <- resultUpdateDB
-				slotDB := <-curSlot.slotdbChan
-				if slotDB == nil { // block is processed
-					debug.Handler.EndTrace(region2)
-					break
-				}
-				log.Debug("runSlotLoop executeInSlot steal", "slotIndex", slotIndex,
-					"txReq.txIndex", stealTxReq.txIndex)
+			/*
+			   // disable steal mode
+			   			for _, stealTxReq := range p.allTxReqs {
+			   				if !stealTxReq.runnable {
+			   					continue
+			   				}
+			   				stealTxReq.runnable = false
+			   				region2 := debug.Handler.StartTrace("for a stolen TxReq")
+			   				resultUpdateDB := &ParallelTxResult{
+			   					updateSlotDB: true,
+			   					slotIndex:    slotIndex,
+			   					err:          nil,
+			   					txReq:        stealTxReq,
+			   					keepSystem:   stealTxReq.systemAddrRedo,
+			   				}
+			   				p.txResultChan <- resultUpdateDB
+			   				slotDB := <-curSlot.slotdbChan
+			   				if slotDB == nil { // block is processed
+			   					debug.Handler.EndTrace(region2)
+			   					break
+			   				}
+			   				log.Debug("runSlotLoop executeInSlot steal", "slotIndex", slotIndex,
+			   					"txReq.txIndex", stealTxReq.txIndex)
 
-				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
-				log.Debug("runSlotLoop executeInSlot steal done", "slotIndex", slotIndex,
-					"txReq.txIndex", stealTxReq.txIndex)
-				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
-				log.Debug("runSlotLoop executeInSlot steal to send result", "slotIndex", slotIndex,
-					"txReq.txIndex", stealTxReq.txIndex)
-				p.pendingConfirmChan <- result
-				debug.Handler.EndTrace(region2)
-			}
+			   				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
+			   				log.Debug("runSlotLoop executeInSlot steal done", "slotIndex", slotIndex,
+			   					"txReq.txIndex", stealTxReq.txIndex)
+			   				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
+			   				log.Debug("runSlotLoop executeInSlot steal to send result", "slotIndex", slotIndex,
+			   					"txReq.txIndex", stealTxReq.txIndex)
+			   				p.pendingConfirmChan <- result
+			   				debug.Handler.EndTrace(region2)
+			   			}
+			*/
+
 			// most of the tx has been runned at least once, except the last batch in other slot
 			// now we will be more aggressive:
 			//   do conflcit check , as long as tx result is generated,
@@ -1197,113 +1216,6 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				p.pendingConfirmChan <- result
 			}
 		*/
-	}
-}
-
-func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
-	curSlot := p.slotState[slotIndex]
-	startTxIndex := 0
-	for {
-		// wait for new TxReq
-		log.Debug("runShadowSlotLoop start for loop", "slotIndex", slotIndex)
-		select {
-		case <-curSlot.stopShadowChan:
-			log.Debug("runShadowSlotLoop stop received", "slotIndex", slotIndex)
-			p.stopSlotChan <- slotIndex
-			continue
-		case <-curSlot.pendingTxReqShadowChan: // wait for restart
-		}
-		traceMsg := "runShadowSlotLoop " + strconv.Itoa(slotIndex)
-		region1 := debug.Handler.StartTrace(traceMsg)
-
-		startTxIndex = p.mergedTxIndex + 1
-		log.Debug("runShadowSlotLoop started", "slotIndex", slotIndex, "startTxIndex", startTxIndex)
-		if dispatchPolicy == dispatchPolicyStatic {
-			for _, txReq := range curSlot.pendingTxReqList {
-				if txReq.txIndex < startTxIndex {
-					continue
-				}
-				// if interrupted, it will re
-				if !curSlot.enableShadowFlag { // shadow conflict, switch back to normal
-					log.Debug("runShadowSlotLoop use Normal now, stop the Shadow one", "slotIndex", slotIndex,
-						"txIndex ", txReq.txIndex)
-					break
-				}
-
-				if !txReq.runnable {
-					log.Debug("runShadowSlotLoop tx not runnable", "slotIndex", slotIndex,
-						"txIndex ", txReq.txIndex)
-					continue
-				}
-				txReq.runnable = false
-				region2 := debug.Handler.StartTrace("for a TxReq")
-				// if txReq.slotDB == nil {
-				resultUpdateDB := &ParallelTxResult{
-					updateSlotDB: true,
-					slotIndex:    slotIndex,
-					err:          nil,
-					txReq:        txReq,
-					keepSystem:   txReq.systemAddrRedo,
-				}
-				p.txResultChan <- resultUpdateDB
-				slotDB := <-curSlot.slotdbChan
-				if slotDB == nil { // block is processed
-					debug.Handler.EndTrace(region2)
-					break
-				}
-				log.Debug("runShadowSlotLoop executeInSlot", "slotIndex", slotIndex,
-					"txReq.txIndex", txReq.txIndex)
-				result := p.executeInSlot(slotIndex, txReq, slotDB)
-				log.Debug("runShadowSlotLoop executeInSlot done", "slotIndex", slotIndex,
-					"txReq.txIndex", txReq.txIndex)
-
-				p.unconfirmedStateDBs.Store(txReq.txIndex, slotDB)
-				log.Debug("runShadowSlotLoop executeInSlot to send result", "slotIndex", slotIndex,
-					"txReq.txIndex", txReq.txIndex)
-				p.pendingConfirmChan <- result
-				debug.Handler.EndTrace(region2)
-			}
-			// txReq in this Slot have all been executed, try steal one from other slot.
-			// as long as the TxReq is runable, we steal it, mark it as stolen
-			// steal one by one
-			for _, stealTxReq := range p.allTxReqs {
-				if !stealTxReq.runnable {
-					continue
-				}
-				stealTxReq.runnable = false
-				region2 := debug.Handler.StartTrace("for a stolen TxReq")
-				resultUpdateDB := &ParallelTxResult{
-					updateSlotDB: true,
-					slotIndex:    slotIndex,
-					err:          nil,
-					txReq:        stealTxReq,
-					keepSystem:   stealTxReq.systemAddrRedo,
-				}
-				p.txResultChan <- resultUpdateDB
-				slotDB := <-curSlot.slotdbChan
-				if slotDB == nil { // block is processed
-					debug.Handler.EndTrace(region2)
-					break
-				}
-				log.Debug("runShadowSlotLoop executeInSlot steal", "slotIndex", slotIndex,
-					"txReq.txIndex", stealTxReq.txIndex)
-
-				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
-				log.Debug("runShadowSlotLoop executeInSlot steal done", "slotIndex", slotIndex,
-					"txReq.txIndex", stealTxReq.txIndex)
-
-				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
-				log.Debug("runShadowSlotLoop executeInSlot steal to send result", "slotIndex", slotIndex,
-					"txReq.txIndex", stealTxReq.txIndex)
-
-				p.pendingConfirmChan <- result
-				debug.Handler.EndTrace(region2)
-			}
-			p.allTxReqProcessedOnce = true
-
-		}
-		debug.Handler.EndTrace(region1)
-
 	}
 }
 
