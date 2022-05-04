@@ -882,6 +882,7 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 		// ParallelTxResult is not confirmed yet
 		unconfirmedResult := <-p.pendingConfirmChan
 		txIndex := unconfirmedResult.txReq.txIndex
+		log.Debug("runConfirmLoop receive", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
 		p.pendingConfirmResults[txIndex] = append(p.pendingConfirmResults[txIndex], unconfirmedResult)
 		region := debug.Handler.StartTrace("runConfirmLoop")
 		targetTxIndex := p.mergedTxIndex + 1
@@ -926,6 +927,25 @@ func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, hit boo
 	return false
 }
 
+func (p *ParallelStateProcessor) switchSlot(slot *SlotState, slotIndex int) {
+	if !slot.enableShadowFlag { // last result is from normal slot
+		slot.enableShadowFlag = true
+		select {
+		case slot.pendingTxReqShadowChan <- nil: // only notify when target is waiting
+			log.Debug("switchSlot target shadow is wait", "slotIndex", slotIndex)
+		default:
+		}
+		// notify shadow slot
+	} else { // last result is from shamdow
+		slot.enableShadowFlag = false
+		select {
+		case slot.pendingTxReqChan <- nil: // only notify when target is waiting
+			log.Debug("switchSlot target shadow is wait", "slotIndex", slotIndex)
+		default:
+		}
+	}
+}
+
 // to confirm a serial TxResults with same txIndex
 func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
 	// var targetTxIndex int
@@ -937,7 +957,7 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
 		hit = true
 	}
 	log.Debug("toConfirmTxIndex", "targetTxIndex", targetTxIndex,
-		"current merged TxIndex", p.mergedTxIndex, "hit", hit)
+		"current mergedTxIndex", p.mergedTxIndex, "hit", hit)
 	for {
 		// handle a targetTxIndex in a loop
 		// targetTxIndex = p.mergedTxIndex + 1
@@ -964,16 +984,14 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
 				slot := p.slotState[slotIndex]
 				log.Debug("runConfirmLoop conflict", "slotIndex", slotIndex,
 					"txIndex", lastResult.txReq.txIndex,
-					"enableShadowFlag", slot.enableShadowFlag)
+					"enableShadowFlag", slot.enableShadowFlag,
+					"hit", hit, "slot.enableShadowFlag", slot.enableShadowFlag)
 				lastResult.txReq.runnable = true // needs redo
-				if !slot.enableShadowFlag {      // last result is from normal slot
-					slot.enableShadowFlag = true
-					slot.pendingTxReqShadowChan <- nil
-					// notify shadow slot
-				} else { // last result is from shamdow
-					slot.enableShadowFlag = false
-					slot.pendingTxReqChan <- nil
+				if hit {                         // switch only it is hit, for none-hit, it is not that necessary,
+					p.switchSlot(slot, slotIndex)
 				}
+				log.Debug("runConfirmLoop conflict, switched", "slotIndex", slotIndex,
+					"txIndex", lastResult.txReq.txIndex)
 				// this the last result for this txIndex,
 				// interrupt its current routine, and reschedule from the the other routine(shadow?)
 				return
@@ -1073,9 +1091,9 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 						"txIndex ", txReq.txIndex)
 					continue
 				}
+				txReq.runnable = false
 
 				region2 := debug.Handler.StartTrace("for a TxReq")
-				// if txReq.slotDB == nil {  // must update slot DB
 				resultUpdateDB := &ParallelTxResult{
 					updateSlotDB: true,
 					slotIndex:    slotIndex,
@@ -1085,14 +1103,24 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				}
 				p.txResultChan <- resultUpdateDB
 				slotDB := <-curSlot.slotdbChan
-				if slotDB == nil { // block is processed
+				if slotDB == nil { // block is processed, fixme: no need to steal
 					debug.Handler.EndTrace(region2)
 					break
 				}
-				txReq.runnable = false
+				log.Debug("runSlotLoop executeInSlot", "slotIndex", slotIndex,
+					"txReq.txIndex", txReq.txIndex)
 				result := p.executeInSlot(slotIndex, txReq, slotDB)
+				log.Debug("runSlotLoop executeInSlot done", "slotIndex", slotIndex,
+					"txReq.txIndex", txReq.txIndex)
 
 				p.unconfirmedStateDBs.Store(txReq.txIndex, slotDB)
+				select {
+				case <-curSlot.pendingTxReqChan: // just to consume this message
+				default:
+				}
+				log.Debug("runSlotLoop executeInSlot to send result", "slotIndex", slotIndex,
+					"txReq.txIndex", txReq.txIndex)
+
 				p.pendingConfirmChan <- result
 				debug.Handler.EndTrace(region2)
 			}
@@ -1103,6 +1131,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				if !stealTxReq.runnable {
 					continue
 				}
+				stealTxReq.runnable = false
 				region2 := debug.Handler.StartTrace("for a stolen TxReq")
 				resultUpdateDB := &ParallelTxResult{
 					updateSlotDB: true,
@@ -1117,9 +1146,20 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 					debug.Handler.EndTrace(region2)
 					break
 				}
-				stealTxReq.runnable = false
+				log.Debug("runSlotLoop executeInSlot steal", "slotIndex", slotIndex,
+					"txReq.txIndex", stealTxReq.txIndex)
+
 				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
+				log.Debug("runSlotLoop executeInSlot steal done", "slotIndex", slotIndex,
+					"txReq.txIndex", stealTxReq.txIndex)
 				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
+				select {
+				case <-curSlot.pendingTxReqChan: // just to consume this message
+				default:
+				}
+
+				log.Debug("runSlotLoop executeInSlot steal to send result", "slotIndex", slotIndex,
+					"txReq.txIndex", stealTxReq.txIndex)
 				p.pendingConfirmChan <- result
 				debug.Handler.EndTrace(region2)
 			}
@@ -1189,6 +1229,7 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 						"txIndex ", txReq.txIndex)
 					continue
 				}
+				txReq.runnable = false
 				region2 := debug.Handler.StartTrace("for a TxReq")
 				// if txReq.slotDB == nil {
 				resultUpdateDB := &ParallelTxResult{
@@ -1204,9 +1245,19 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 					debug.Handler.EndTrace(region2)
 					break
 				}
-				txReq.runnable = false
+				log.Debug("runShadowSlotLoop executeInSlot", "slotIndex", slotIndex,
+					"txReq.txIndex", txReq.txIndex)
 				result := p.executeInSlot(slotIndex, txReq, slotDB)
+				log.Debug("runShadowSlotLoop executeInSlot done", "slotIndex", slotIndex,
+					"txReq.txIndex", txReq.txIndex)
+
 				p.unconfirmedStateDBs.Store(txReq.txIndex, slotDB)
+				select {
+				case <-curSlot.pendingTxReqShadowChan: // just to consume this message
+				default:
+				}
+				log.Debug("runShadowSlotLoop executeInSlot to send result", "slotIndex", slotIndex,
+					"txReq.txIndex", txReq.txIndex)
 				p.pendingConfirmChan <- result
 				debug.Handler.EndTrace(region2)
 			}
@@ -1217,6 +1268,7 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 				if !stealTxReq.runnable {
 					continue
 				}
+				stealTxReq.runnable = false
 				region2 := debug.Handler.StartTrace("for a stolen TxReq")
 				resultUpdateDB := &ParallelTxResult{
 					updateSlotDB: true,
@@ -1231,9 +1283,21 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 					debug.Handler.EndTrace(region2)
 					break
 				}
-				stealTxReq.runnable = false
+				log.Debug("runShadowSlotLoop executeInSlot steal", "slotIndex", slotIndex,
+					"txReq.txIndex", stealTxReq.txIndex)
+
 				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
+				log.Debug("runShadowSlotLoop executeInSlot steal done", "slotIndex", slotIndex,
+					"txReq.txIndex", stealTxReq.txIndex)
+
 				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
+				select {
+				case <-curSlot.pendingTxReqShadowChan: // just to consume this message
+				default:
+				}
+				log.Debug("runShadowSlotLoop executeInSlot steal to send result", "slotIndex", slotIndex,
+					"txReq.txIndex", stealTxReq.txIndex)
+
 				p.pendingConfirmChan <- result
 				debug.Handler.EndTrace(region2)
 			}
