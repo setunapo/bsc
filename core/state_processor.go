@@ -992,17 +992,19 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
 		valid := p.toConfirmTxIndexResult(lastResult, hit)
 		slotIndex := lastResult.slotIndex
 		if !valid {
-			p.debugConflictRedoNum++
 			if resultsLen == 1 || !hit { // for not hit, we only check its latest result.
+				if !lastResult.txReq.runnable {
+					p.debugConflictRedoNum++
+				}
 				slot := p.slotState[slotIndex]
 				log.Debug("runConfirmLoop conflict", "slotIndex", slotIndex,
 					"txIndex", lastResult.txReq.txIndex,
 					"enableShadowFlag", slot.enableShadowFlag,
 					"hit", hit, "slot.enableShadowFlag", slot.enableShadowFlag)
 				lastResult.txReq.runnable = true // needs redo
-				if hit {                         // switch only it is hit, for none-hit, it is not that necessary,
-					p.switchSlot(slot, slotIndex)
-				}
+				// if hit {                         // switch only it is hit, for none-hit, it is not that necessary,
+				p.switchSlot(slot, slotIndex)
+				//}
 				log.Debug("runConfirmLoop conflict, switched", "slotIndex", slotIndex,
 					"txIndex", lastResult.txReq.txIndex)
 				// this the last result for this txIndex,
