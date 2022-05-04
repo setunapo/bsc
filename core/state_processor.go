@@ -87,6 +87,7 @@ type ParallelStateProcessor struct {
 	debugConflictRedoNum int
 	unconfirmedStateDBs  *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
 	stopSlotChan         chan int  // fixme: use struct{}{}, to make sure all slot are idle
+	allTxReqs            []*ParallelTxRequest
 }
 
 func NewParallelStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consensus.Engine, parallelNum int, queueSize int) *ParallelStateProcessor {
@@ -743,6 +744,7 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 
 	evm, result, err := applyTransactionStageExecution(txReq.msg, gpSlot, slotDB, vmenv)
 	if err != nil {
+		txReq.runnable = true
 		// the error could be caused by unconfirmed balance reference,
 		// the balance could insufficient to pay its gas limit, which cause it preCheck.buyGas() failed
 		// redo could solve it.
@@ -760,7 +762,6 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 			result:       result,
 		}
 	}
-	txReq.runnable = false
 	if result.Failed() {
 		// if Tx is reverted, all its state change will be discarded
 		slotDB.RevertSlotDB(txReq.msg.From())
@@ -1030,10 +1031,34 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				if slotDB == nil { // block is processed
 					break
 				}
-				// }
+				txReq.runnable = false
 				result := p.executeInSlot(slotIndex, txReq, slotDB)
 
 				p.unconfirmedStateDBs.Store(txReq.txIndex, slotDB)
+				p.pendingConfirmChan <- result
+			}
+			// txReq in this Slot have all been executed, try steal one from other slot.
+			// as long as the TxReq is runable, we steal it, mark it as stolen
+			// steal one by one
+			for _, stealTxReq := range p.allTxReqs {
+				if !stealTxReq.runnable {
+					continue
+				}
+				resultUpdateDB := &ParallelTxResult{
+					updateSlotDB: true,
+					slotIndex:    slotIndex,
+					err:          nil,
+					txReq:        stealTxReq,
+					keepSystem:   stealTxReq.systemAddrRedo,
+				}
+				p.txResultChan <- resultUpdateDB
+				slotDB := <-curSlot.slotdbChan
+				if slotDB == nil { // block is processed
+					break
+				}
+				stealTxReq.runnable = false
+				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
+				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
 				p.pendingConfirmChan <- result
 			}
 		}
@@ -1106,8 +1131,33 @@ func (p *ParallelStateProcessor) runShadowSlotLoop(slotIndex int) {
 				if slotDB == nil { // block is processed
 					break
 				}
+				txReq.runnable = false
 				result := p.executeInSlot(slotIndex, txReq, slotDB)
 				p.unconfirmedStateDBs.Store(txReq.txIndex, slotDB)
+				p.pendingConfirmChan <- result
+			}
+			// txReq in this Slot have all been executed, try steal one from other slot.
+			// as long as the TxReq is runable, we steal it, mark it as stolen
+			// steal one by one
+			for _, stealTxReq := range p.allTxReqs {
+				if !stealTxReq.runnable {
+					continue
+				}
+				resultUpdateDB := &ParallelTxResult{
+					updateSlotDB: true,
+					slotIndex:    slotIndex,
+					err:          nil,
+					txReq:        stealTxReq,
+					keepSystem:   stealTxReq.systemAddrRedo,
+				}
+				p.txResultChan <- resultUpdateDB
+				slotDB := <-curSlot.slotdbChan
+				if slotDB == nil { // block is processed
+					break
+				}
+				stealTxReq.runnable = false
+				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
+				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
 				p.pendingConfirmChan <- result
 			}
 		}
@@ -1124,8 +1174,9 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	// p.txReqAccountSorted = make(map[common.Address][]*ParallelTxRequest) // fixme: to be reused?
 
 	statedb.PrepareForParallel()
-
+	p.allTxReqs = make([]*ParallelTxRequest, 0)
 	p.slotDBsToRelease = make([]*state.ParallelStateDB, 0, txNum)
+
 	/*
 		stateDBsToRelease := p.slotDBsToRelease
 			go func() {
@@ -1163,7 +1214,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	systemTxs := make([]*types.Transaction, 0, 2)
 
 	signer, _, bloomProcessor := p.preExecute(block, statedb, cfg, true)
-	var txReqs []*ParallelTxRequest
+	// var txReqs []*ParallelTxRequest
 	for i, tx := range block.Transactions() {
 		if isPoSA {
 			if isSystemTx, err := posa.IsSystemTransaction(tx, block.Header()); err != nil {
@@ -1197,11 +1248,11 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			systemAddrRedo: false, // set to true, when systemAddr access is detected.
 			runnable:       true,
 		}
-		txReqs = append(txReqs, txReq)
+		p.allTxReqs = append(p.allTxReqs, txReq)
 	}
 
 	if dispatchPolicy == dispatchPolicyStatic {
-		p.doStaticDispatch(statedb, txReqs) // todo: put txReqs in unit?
+		p.doStaticDispatch(statedb, p.allTxReqs) // todo: put txReqs in unit?
 		// after static dispatch, we notify the slot to work.
 		for _, slot := range p.slotState {
 			slot.pendingTxReqChan <- nil
