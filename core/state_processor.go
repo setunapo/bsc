@@ -909,6 +909,11 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			}
 			newTxMerged = true
 		}
+		txSize := len(p.allTxReqs)
+		if txIndex == (txSize - 1) {
+			log.Info("runConfirmLoop last txIndex received, enter stage 2", "txIndex", txIndex)
+			p.confirmInStage2 = true
+		}
 		// if no Tx is merged, we will skip the stage 2 check
 		if !newTxMerged {
 			continue
@@ -916,17 +921,15 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 
 		// stage 2,if all tx have been executed at least once, and its result has been recevied.
 		// in Stage 2, we will run check when merge is advanced.
-		txSize := len(p.allTxReqs)
-		if txIndex == (txSize - 1) {
+		if p.confirmInStage2 {
 			// more aggressive tx result confirm, even for these Txs not in turn
 			// now we will be more aggressive:
 			//   do conflcit check , as long as tx result is generated,
 			//   if lucky, it is the Tx's turn, we will do conflict check with WBNB makeup
 			//   otherwise, do conflict check without WBNB makeup, but we will ignor WBNB's balance conflict.
 			// throw these likely conflicted tx back to re-execute
-			log.Info("runConfirmLoop last txIndex received, enter stage 2", "txIndex", txIndex)
-			p.confirmInStage2 = true
 			startTxIndex := p.mergedTxIndex + 2 // stage 2's will start from the next target merge index
+			log.Info("runConfirmLoop in stage 2", "startTxIndex", startTxIndex)
 			for txIndex := startTxIndex; txIndex < txSize; txIndex++ {
 				p.toConfirmTxIndex(txIndex, true)
 			}
@@ -986,11 +989,19 @@ func (p *ParallelStateProcessor) switchSlot(slot *SlotState, slotIndex int) {
 func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bool) bool {
 	// var targetTxIndex int
 	defer debug.Handler.StartRegionAuto("toConfirmTxIndex")()
+	if targetTxIndex <= p.mergedTxIndex {
+		log.Warn("toConfirmTxIndex in stage 2, invalid txIndex",
+			"targetTxIndex", targetTxIndex, "isStage2", isStage2)
+		return false
+	}
 	if targetTxIndex == p.mergedTxIndex+1 && isStage2 {
 		// this is the one that can been merged,
 		// others are for likely conflict check, since it is not their tuen.
-		log.Warn("toConfirmTxIndex in stage 2, invalid txIndex", "targetTxIndex", targetTxIndex)
+		log.Warn("toConfirmTxIndex in stage 2, invalid txIndex",
+			"targetTxIndex", targetTxIndex, "isStage2", isStage2)
+		return false
 	}
+
 	log.Debug("toConfirmTxIndex", "targetTxIndex", targetTxIndex,
 		"current mergedTxIndex", p.mergedTxIndex, "isStage2", isStage2)
 	for {
@@ -1247,6 +1258,7 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	}
 	p.mergedTxIndex = -1
 	p.debugConflictRedoNum = 0
+	p.confirmInStage2 = false
 	// p.txReqAccountSorted = make(map[common.Address][]*ParallelTxRequest) // fixme: to be reused?
 
 	statedb.PrepareForParallel()
