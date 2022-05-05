@@ -918,7 +918,7 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			newTxMerged = true
 		}
 		txSize := len(p.allTxReqs)
-		if p.txReqExecuteCount == txSize {
+		if !p.confirmInStage2 && p.txReqExecuteCount == txSize {
 			log.Info("runConfirmLoop last txIndex received, enter stage 2", "txIndex", txIndex)
 			p.confirmInStage2 = true
 		}
@@ -1192,7 +1192,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 				debug.Handler.EndTrace(region2)
 			}
 			// switched to the other slot.
-			if interrupted {
+			if interrupted || p.confirmInStage2 {
 				debug.Handler.EndTrace(region1)
 				continue
 			}
