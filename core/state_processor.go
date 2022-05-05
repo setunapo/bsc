@@ -1026,9 +1026,9 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 		staticSlotIndex := lastResult.txReq.staticSlotIndex
 		if !valid {
 			if resultsLen == 1 || isStage2 { // for Stage 2, we only check its latest result.
-				p.debugConflictRedoNum++
 				if !isStage2 || p.txReqExecuteRecord[lastResult.txReq.txIndex] < maxRedoCounterInstage1 {
 					lastResult.txReq.runnable = 1 // needs redo
+					p.debugConflictRedoNum++
 				}
 				slot := p.slotState[staticSlotIndex]
 				log.Debug("runConfirmLoop conflict",
