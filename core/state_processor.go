@@ -92,6 +92,8 @@ type ParallelStateProcessor struct {
 	stopSlotChan         chan int      // fixme: use struct{}{}, to make sure all slot are idle
 	stopConfirmChan      chan struct{} // fixme: use struct{}{}, to make sure all slot are idle
 	allTxReqs            []*ParallelTxRequest
+	txReqExecuteRecord   map[int]int // for each the execute count of each Tx
+	txReqExecuteCount    int
 	confirmInStage2      bool
 }
 
@@ -413,7 +415,7 @@ type SlotState struct {
 	pendingTxReqShadowChan chan *ParallelTxRequest
 	pendingTxReqList       []*ParallelTxRequest        // maintained by dispatcher for dispatch policy
 	slotdbChan             chan *state.ParallelStateDB // dispatch will create and send this slotDB to slot
-	enableShadowFlag       bool                        // fixme: atomic?
+	activatedId            int32                       // 0: normal slot, 1: shadow slot
 	// idle                   bool
 	// shadowIdle             bool
 	stopChan       chan struct{}
@@ -461,19 +463,19 @@ func (p *ParallelStateProcessor) init() {
 	for i := 0; i < p.parallelNum; i++ {
 		p.slotState[i] = &SlotState{
 			slotdbChan:             make(chan *state.ParallelStateDB, 1),
-			pendingTxReqChan:       make(chan *ParallelTxRequest, p.queueSize),
-			pendingTxReqShadowChan: make(chan *ParallelTxRequest, p.queueSize),
+			pendingTxReqChan:       make(chan *ParallelTxRequest, 1),
+			pendingTxReqShadowChan: make(chan *ParallelTxRequest, 1),
 			stopChan:               make(chan struct{}, 1),
 			stopShadowChan:         make(chan struct{}, 1),
 		}
 		// start the shadow slot first
 		go func(slotIndex int) {
-			p.runSlotLoop(slotIndex, true) // this loop will be permanent live
+			p.runSlotLoop(slotIndex, 1) // this loop will be permanent live
 		}(i)
 
 		// start the slot's goroutine
 		go func(slotIndex int) {
-			p.runSlotLoop(slotIndex, false) // this loop will be permanent live
+			p.runSlotLoop(slotIndex, 0) // this loop will be permanent live
 		}(i)
 	}
 
@@ -898,6 +900,12 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 		case unconfirmedResult = <-p.pendingConfirmChan:
 		}
 		txIndex := unconfirmedResult.txReq.txIndex
+		if _, ok := p.txReqExecuteRecord[txIndex]; !ok {
+			p.txReqExecuteRecord[txIndex] = 0
+			p.txReqExecuteCount++
+		}
+		p.txReqExecuteRecord[txIndex]++
+
 		log.Debug("runConfirmLoop receive", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
 		p.pendingConfirmResults[txIndex] = append(p.pendingConfirmResults[txIndex], unconfirmedResult)
 		region := debug.Handler.StartTrace("runConfirmLoop")
@@ -910,7 +918,7 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			newTxMerged = true
 		}
 		txSize := len(p.allTxReqs)
-		if txIndex == (txSize - 1) {
+		if p.txReqExecuteCount == txSize {
 			log.Info("runConfirmLoop last txIndex received, enter stage 2", "txIndex", txIndex)
 			p.confirmInStage2 = true
 		}
@@ -968,20 +976,17 @@ func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, isStage
 }
 
 func (p *ParallelStateProcessor) switchSlot(slot *SlotState, slotIndex int) {
-	if !slot.enableShadowFlag { // last result is from normal slot
-		slot.enableShadowFlag = true
-		select {
-		case slot.pendingTxReqShadowChan <- nil: // only notify when target is waiting
-			log.Debug("switchSlot target shadow is wait", "slotIndex", slotIndex)
-		default:
+	if atomic.CompareAndSwapInt32(&slot.activatedId, 0, 1) {
+		// switch from normal to shadow slot
+		if len(slot.pendingTxReqShadowChan) == 0 {
+			slot.pendingTxReqShadowChan <- nil // only notify when target once
+			log.Debug("switchSlot to shadow", "slotIndex", slotIndex)
 		}
-		// notify shadow slot
-	} else { // last result is from shamdow
-		slot.enableShadowFlag = false
-		select {
-		case slot.pendingTxReqChan <- nil: // only notify when target is waiting
-			log.Debug("switchSlot target shadow is wait", "slotIndex", slotIndex)
-		default:
+	} else if atomic.CompareAndSwapInt32(&slot.activatedId, 1, 0) {
+		// switch from shadow to normal slot
+		if len(slot.pendingTxReqChan) == 0 {
+			slot.pendingTxReqChan <- nil // only notify when target once
+			log.Debug("switchSlot to normal", "slotIndex", slotIndex)
 		}
 	}
 }
@@ -1033,8 +1038,8 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 				slot := p.slotState[slotIndex]
 				log.Debug("runConfirmLoop conflict", "slotIndex", slotIndex,
 					"txIndex", lastResult.txReq.txIndex,
-					"enableShadowFlag", slot.enableShadowFlag,
-					"isStage2", isStage2, "slot.enableShadowFlag", slot.enableShadowFlag)
+					"activatedId", slot.activatedId,
+					"isStage2", isStage2, "slot.activatedId", slot.activatedId)
 				// if hit {                         // switch only it is hit, for none-hit, it is not that necessary,
 				p.switchSlot(slot, slotIndex)
 				//}
@@ -1105,13 +1110,13 @@ func (p *ParallelStateProcessor) toConfirmTxIndexResult(txResult *ParallelTxResu
 	return true
 }
 
-func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
+func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 	curSlot := p.slotState[slotIndex]
 	startTxIndex := 0
 	var wakeupChan chan *ParallelTxRequest
 	var stopChan chan struct{}
 
-	if !shadow {
+	if slotType == 0 { // 0: normal, 1: shadow
 		wakeupChan = curSlot.pendingTxReqChan
 		stopChan = curSlot.stopChan
 	} else {
@@ -1123,20 +1128,20 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 		// txReq := <-curSlot.pendingTxReqChan
 		select {
 		case <-stopChan:
-			log.Debug("runSlotLoop stop received", "slotIndex", slotIndex, "shadow", shadow)
+			log.Debug("runSlotLoop stop received", "slotIndex", slotIndex, "slotType", slotType)
 			p.stopSlotChan <- slotIndex
 			continue
 		case <-wakeupChan:
 		}
 
 		traceMsg := "runSlotLoop " + strconv.Itoa(slotIndex)
-		if shadow {
+		if slotType == 1 {
 			traceMsg = traceMsg + " shadow"
 		}
 		region1 := debug.Handler.StartTrace(traceMsg)
 
 		startTxIndex = p.mergedTxIndex + 1
-		log.Debug("runSlotLoop started", "slotIndex", slotIndex, "startTxIndex", startTxIndex, "shadow", shadow)
+		log.Debug("runSlotLoop started", "slotIndex", slotIndex, "startTxIndex", startTxIndex, "slotType", slotType)
 		if dispatchPolicy == dispatchPolicyStatic {
 			interrupted := false
 			for _, txReq := range curSlot.pendingTxReqList {
@@ -1144,10 +1149,10 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 					continue
 				}
 				// if interrupted,
-				if curSlot.enableShadowFlag != shadow {
+				if curSlot.activatedId != slotType {
 					log.Debug("runSlotLoop, switch loop", "slotIndex", slotIndex,
 						"txIndex ", txReq.txIndex,
-						"enableShadowFlag", curSlot.enableShadowFlag, "shadow", shadow)
+						"activatedId", curSlot.activatedId, "slotType", slotType)
 					interrupted = true
 					break
 				}
@@ -1155,7 +1160,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 				if !atomic.CompareAndSwapInt32(&txReq.runnable, 1, 0) {
 					// not swapped: txReq.runnable == 0
 					log.Debug("runSlotLoop, tx not runnable", "slotIndex", slotIndex,
-						"txIndex ", txReq.txIndex, "shadow", shadow)
+						"txIndex ", txReq.txIndex, "slotType", slotType)
 					continue
 				}
 
@@ -1174,14 +1179,14 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 					break
 				}
 				log.Debug("runSlotLoop executeInSlot", "slotIndex", slotIndex,
-					"txReq.txIndex", txReq.txIndex, "shadow", shadow)
+					"txReq.txIndex", txReq.txIndex, "slotType", slotType)
 				result := p.executeInSlot(slotIndex, txReq, slotDB)
 				log.Debug("runSlotLoop executeInSlot done", "slotIndex", slotIndex,
-					"txReq.txIndex", txReq.txIndex, "shadow", shadow)
+					"txReq.txIndex", txReq.txIndex, "slotType", slotType)
 
 				p.unconfirmedStateDBs.Store(txReq.txIndex, slotDB)
 				log.Debug("runSlotLoop executeInSlot to send result", "slotIndex", slotIndex,
-					"txReq.txIndex", txReq.txIndex, "shadow", shadow)
+					"txReq.txIndex", txReq.txIndex, "slotType", slotType)
 
 				p.pendingConfirmChan <- result
 				debug.Handler.EndTrace(region2)
@@ -1199,7 +1204,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 				if !atomic.CompareAndSwapInt32(&stealTxReq.runnable, 1, 0) {
 					// not swapped: txReq.runnable == 0
 					log.Debug("runSlotLoop, tx not runnable", "slotIndex", slotIndex,
-						"txIndex ", stealTxReq.txIndex, "shadow", shadow)
+						"txIndex ", stealTxReq.txIndex, "slotType", slotType)
 					continue
 				}
 				region2 := debug.Handler.StartTrace("for a stolen TxReq")
@@ -1217,14 +1222,14 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 					break
 				}
 				log.Debug("runSlotLoop executeInSlot steal", "slotIndex", slotIndex,
-					"txReq.txIndex", stealTxReq.txIndex, "shadow", shadow)
+					"txReq.txIndex", stealTxReq.txIndex, "slotType", slotType)
 
 				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
 				log.Debug("runSlotLoop executeInSlot steal done", "slotIndex", slotIndex,
-					"txReq.txIndex", stealTxReq.txIndex, "shadow", shadow)
+					"txReq.txIndex", stealTxReq.txIndex, "slotType", slotType)
 				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
 				log.Debug("runSlotLoop executeInSlot steal to send result", "slotIndex", slotIndex,
-					"txReq.txIndex", stealTxReq.txIndex, "shadow", shadow)
+					"txReq.txIndex", stealTxReq.txIndex, "slotType", slotType)
 				p.pendingConfirmChan <- result
 				debug.Handler.EndTrace(region2)
 			}
@@ -1277,10 +1282,12 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	*/
 	for _, slot := range p.slotState {
 		slot.pendingTxReqList = make([]*ParallelTxRequest, 0)
-		slot.enableShadowFlag = false
+		slot.activatedId = 0
 	}
 	p.unconfirmedStateDBs = new(sync.Map) // make(map[int]*state.ParallelStateDB)
 	p.pendingConfirmResults = make(map[int][]*ParallelTxResult, 200)
+	p.txReqExecuteRecord = make(map[int]int, 200)
+	p.txReqExecuteCount = 0
 }
 
 // Implement BEP-130: Parallel Transaction Execution.
