@@ -23,7 +23,6 @@ import (
 	"math/big"
 	"math/rand"
 	"runtime"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -713,8 +712,6 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 		// ok, the tx result is valid and can be merged
 		break
 	}
-	// log.Info("waitUntilNextTxDone receive a result", "result.slotIndex", result.slotIndex,
-	//	"TxIndex", result.txReq.txIndex, "result.receipt.GasUsed", result.receipt.GasUsed)
 	if err := gp.SubGas(result.receipt.GasUsed); err != nil {
 		log.Error("gas limit reached", "block", result.txReq.block.Number(),
 			"txIndex", result.txReq.txIndex, "GasUsed", result.receipt.GasUsed, "gp.Gas", gp.Gas())
@@ -734,8 +731,8 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 			"p.mergedTxIndex", p.mergedTxIndex)
 	}
 	p.mergedTxIndex = resultTxIndex
-	log.Debug("waitUntilNextTxDone result is merged", "result.slotIndex", result.slotIndex,
-		"TxIndex", result.txReq.txIndex, "p.mergedTxIndex", p.mergedTxIndex)
+	// log.Debug("waitUntilNextTxDone result is merged", "result.slotIndex", result.slotIndex,
+	//	"TxIndex", result.txReq.txIndex, "p.mergedTxIndex", p.mergedTxIndex)
 
 	// notify the following Tx, it is merged,
 	// todo(optimize): if next tx is in same slot, it do not need to wait; save this channel cost.
@@ -793,99 +790,12 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 	}
 }
 
-/*
-func (p *ParallelStateProcessor) executeInShadowSlot(slotIndex int, txResult *ParallelTxResult) *ParallelTxResult {
-	txReq := txResult.txReq
-	txIndex := txReq.txIndex
-	slotDB := txReq.slotDB
-	header := txReq.block.Header()
-
-	// wait until the previous tx is finalized.
-	if txReq.waitTxChan != nil {
-		<-txReq.waitTxChan // close the channel
-	}
-
-	// do conflict detect
-	hasConflict := false
-	systemAddrConflict := false
-	if txResult.err != nil {
-		log.Debug("redo, since in slot execute failed", "err", txResult.err)
-		hasConflict = true
-	} else if slotDB.SystemAddressRedo() {
-		log.Debug("Stage Execution conflict for SystemAddressRedo", "Slot", slotIndex,
-			"txIndex", txIndex)
-		hasConflict = true
-		systemAddrConflict = true
-	} else if slotDB.NeedsRedo() {
-		// if this is any reason that indicates this transaction needs to redo, skip the conflict check
-		hasConflict = true
-	} else {
-		// to check if what the slot db read is correct.
-		// refDetail := slotDB.UnconfirmedRefList()
-		if !slotDB.IsParallelReadsValid() {
-			hasConflict = true
-		}
-	}
-
-	if hasConflict {
-		p.debugConflictRedoNum++
-		// re-run should not have conflict, since it has the latest world state.
-		redoResult := &ParallelTxResult{
-			updateSlotDB: true,
-			keepSystem:   systemAddrConflict,
-			slotIndex:    slotIndex,
-			txReq:        txReq,
-		}
-		p.txResultChan <- redoResult
-		updatedSlotDB := <-p.slotState[slotIndex].slotdbChan
-		updatedSlotDB.Prepare(txReq.tx.Hash(), txReq.block.Hash(), txIndex)
-		gpSlot := new(GasPool).AddGas(txReq.gasLimit)
-
-		txResult.slotDB = updatedSlotDB
-		txResult.gpSlot = gpSlot
-
-		blockContext := NewEVMBlockContext(header, p.bc, nil) // can share blockContext within a block for efficiency
-		vmenv := vm.NewEVM(blockContext, vm.TxContext{}, updatedSlotDB, p.config, txReq.vmConfig)
-		txResult.evm, txResult.result, txResult.err = applyTransactionStageExecution(txReq.msg,
-			gpSlot, updatedSlotDB, vmenv)
-
-		if txResult.err != nil {
-			log.Error("Stage Execution conflict redo, error", txResult.err)
-		}
-
-		if txResult.result.Failed() {
-			// if Tx is reverted, all its state change will be discarded
-			log.Debug("TX reverted?", "Slot", slotIndex, "txIndex", txIndex,
-				"result.Err", txResult.result.Err)
-			txResult.slotDB.RevertSlotDB(txReq.msg.From())
-		}
-	}
-
-	// goroutine unsafe operation will be handled from here for safety
-	gasConsumed := txReq.gasLimit - txResult.gpSlot.Gas()
-	if gasConsumed != txResult.result.UsedGas {
-		log.Error("gasConsumed != result.UsedGas mismatch",
-			"gasConsumed", gasConsumed, "result.UsedGas", txResult.result.UsedGas)
-	}
-
-	// ok, time to do finalize, stage2 should not be parallel
-	txResult.receipt, txResult.err = applyTransactionStageFinalization(txResult.evm, txResult.result,
-		txReq.msg, p.config, txResult.slotDB, header,
-		txReq.tx, txReq.usedGas, txReq.bloomProcessor)
-
-	txResult.updateSlotDB = false
-	return txResult
-}
-*/
-
 func (p *ParallelStateProcessor) runConfirmLoop() {
 	for {
 		// ParallelTxResult is not confirmed yet
 		var unconfirmedResult *ParallelTxResult
 		select {
 		case <-p.stopConfirmChan:
-			log.Debug("runConfirmLoop stop received, drop all pendingConfirm",
-				"len(p.pendingConfirmChan)", len(p.pendingConfirmChan))
 			for len(p.pendingConfirmChan) > 0 {
 				<-p.pendingConfirmChan
 			}
@@ -899,8 +809,6 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			p.txReqExecuteCount++
 		}
 		p.txReqExecuteRecord[txIndex]++
-
-		log.Debug("runConfirmLoop receive", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
 		p.pendingConfirmResults[txIndex] = append(p.pendingConfirmResults[txIndex], unconfirmedResult)
 		newTxMerged := false
 		for {
@@ -912,7 +820,6 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 		}
 		txSize := len(p.allTxReqs)
 		if !p.confirmInStage2 && p.txReqExecuteCount == txSize {
-			log.Info("runConfirmLoop last txIndex received, enter stage 2", "txIndex", txIndex)
 			p.confirmInStage2 = true
 			for i := 0; i < txSize; i++ {
 				p.txReqExecuteRecord[txIndex] = 0 // clear it when enter stage2, for redo limit
@@ -933,7 +840,6 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			//   otherwise, do conflict check without WBNB makeup, but we will ignor WBNB's balance conflict.
 			// throw these likely conflicted tx back to re-execute
 			startTxIndex := p.mergedTxIndex + 2 // stage 2's will start from the next target merge index
-			log.Info("runConfirmLoop in stage 2", "startTxIndex", startTxIndex)
 			for txIndex := startTxIndex; txIndex < txSize; txIndex++ {
 				p.toConfirmTxIndex(txIndex, true)
 			}
@@ -945,14 +851,10 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 
 // do conflict detect
 func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, isStage2 bool) bool {
-	txReq := txResult.txReq
-	txIndex := txReq.txIndex
 	slotDB := txResult.slotDB
 	if txResult.err != nil {
-		log.Debug("redo, since in slot execute failed", "err", txResult.err)
 		return true
 	} else if slotDB.SystemAddressRedo() {
-		log.Debug("Stage Execution conflict for SystemAddressRedo", "txIndex", txIndex)
 		txResult.txReq.systemAddrRedo = true
 		return true
 	} else if slotDB.NeedsRedo() {
@@ -973,13 +875,11 @@ func (p *ParallelStateProcessor) switchSlot(slot *SlotState, slotIndex int) {
 		// switch from normal to shadow slot
 		if len(slot.pendingTxReqShadowChan) == 0 {
 			slot.pendingTxReqShadowChan <- nil // only notify when target once
-			log.Debug("switchSlot to shadow", "slotIndex", slotIndex)
 		}
 	} else if atomic.CompareAndSwapInt32(&slot.activatedId, 1, 0) {
 		// switch from shadow to normal slot
 		if len(slot.pendingTxReqChan) == 0 {
 			slot.pendingTxReqChan <- nil // only notify when target once
-			log.Debug("switchSlot to normal", "slotIndex", slotIndex)
 		}
 	}
 }
@@ -1000,8 +900,6 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 		return false
 	}
 
-	log.Debug("toConfirmTxIndex", "targetTxIndex", targetTxIndex,
-		"current mergedTxIndex", p.mergedTxIndex, "isStage2", isStage2)
 	for {
 		// handle a targetTxIndex in a loop
 		// targetTxIndex = p.mergedTxIndex + 1
@@ -1009,8 +907,6 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 		results := p.pendingConfirmResults[targetTxIndex]
 		resultsLen := len(results)
 		if resultsLen == 0 { // no pending result can be verified, break and wait for incoming results
-			log.Debug("toConfirmTxIndex resultsLen is 0", "targetTxIndex", targetTxIndex,
-				"merged TxIndex", p.mergedTxIndex, "isStage2", isStage2)
 			return false
 		}
 		lastResult := results[len(results)-1] // last is the most fresh, stack based priority
@@ -1018,11 +914,8 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 			// not remove the confirm result in Stage2, since the conflict check is guranteed.
 			p.pendingConfirmResults[targetTxIndex] = p.pendingConfirmResults[targetTxIndex][:resultsLen-1] // remove from the queue
 		}
-		log.Debug("toConfirmTxIndex", "resultsLen", resultsLen, "txIndex", lastResult.txReq.txIndex,
-			"merged TxIndex", p.mergedTxIndex, "isStage2", isStage2)
 
 		valid := p.toConfirmTxIndexResult(lastResult, isStage2)
-		executedSlotIndex := lastResult.slotIndex // could be stolen and executed in other slot.
 		staticSlotIndex := lastResult.txReq.staticSlotIndex
 		if !valid {
 			if resultsLen == 1 || isStage2 { // for Stage 2, we only check its latest result.
@@ -1031,28 +924,9 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 					p.debugConflictRedoNum++
 				}
 				slot := p.slotState[staticSlotIndex]
-				log.Debug("runConfirmLoop conflict",
-					"staticSlotIndex", staticSlotIndex,
-					"executedSlotIndex", executedSlotIndex,
-					"txIndex", lastResult.txReq.txIndex,
-					"activatedId", slot.activatedId,
-					"isStage2", isStage2, "slot.activatedId", slot.activatedId)
-				// if hit {                         // switch only it is hit, for none-hit, it is not that necessary,
+				// interrupt its current routine, and switch to the other routine
 				p.switchSlot(slot, staticSlotIndex)
-				//}
-				log.Debug("runConfirmLoop conflict, switched",
-					"staticSlotIndex", staticSlotIndex,
-					"executedSlotIndex", executedSlotIndex,
-					"txIndex", lastResult.txReq.txIndex)
-				// this the last result for this txIndex,
-				// interrupt its current routine, and reschedule from the the other routine(shadow?)
 				return false
-			} else {
-				// try next
-				log.Debug("runConfirmLoop conflict, try next result of same txIndex",
-					"staticSlotIndex", staticSlotIndex,
-					"executedSlotIndex", executedSlotIndex,
-					"txIndex", lastResult.txReq.txIndex)
 			}
 			continue
 		}
@@ -1061,20 +935,12 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 			// fixme: need to handle txResult repeatedly check?
 			return false
 		}
-		log.Debug("runConfirmLoop result to deliver",
-			"staticSlotIndex", staticSlotIndex,
-			"executedSlotIndex", executedSlotIndex,
-			"txIndex", lastResult.txReq.txIndex, "mergedTxIndex", p.mergedTxIndex)
 		// result is valid, deliver it to main processor
 		p.txResultChan <- lastResult
 		// wait until merged TxIndex is updated
 		<-lastResult.txReq.curTxChan
 		// 	close(result.txReq.curTxChan) // fixme: to close
 
-		log.Debug("runConfirmLoop result is delivered",
-			"staticSlotIndex", staticSlotIndex,
-			"executedSlotIndex", executedSlotIndex,
-			"txIndex", lastResult.txReq.txIndex, "mergedTxIndex", p.mergedTxIndex)
 		if p.mergedTxIndex != (targetTxIndex) {
 			log.Warn("runConfirmLoop result delivered, but unexpected mergedTxIndex",
 				"mergedTxIndex", p.mergedTxIndex, "targetTxIndex", targetTxIndex)
@@ -1131,19 +997,11 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 		// txReq := <-curSlot.pendingTxReqChan
 		select {
 		case <-stopChan:
-			log.Debug("runSlotLoop stop received", "slotIndex", slotIndex, "slotType", slotType)
 			p.stopSlotChan <- slotIndex
 			continue
 		case <-wakeupChan:
 		}
-
-		traceMsg := "runSlotLoop " + strconv.Itoa(slotIndex)
-		if slotType == 1 {
-			traceMsg = traceMsg + " shadow"
-		}
-
 		startTxIndex = p.mergedTxIndex + 1
-		log.Debug("runSlotLoop started", "slotIndex", slotIndex, "startTxIndex", startTxIndex, "slotType", slotType)
 		if dispatchPolicy == dispatchPolicyStatic {
 			interrupted := false
 			for _, txReq := range curSlot.pendingTxReqList {
@@ -1152,17 +1010,12 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 				}
 				// if interrupted,
 				if curSlot.activatedId != slotType {
-					log.Debug("runSlotLoop, switch loop", "slotIndex", slotIndex,
-						"txIndex ", txReq.txIndex,
-						"activatedId", curSlot.activatedId, "slotType", slotType)
 					interrupted = true
 					break
 				}
 
 				if !atomic.CompareAndSwapInt32(&txReq.runnable, 1, 0) {
 					// not swapped: txReq.runnable == 0
-					log.Debug("runSlotLoop, tx not runnable", "slotIndex", slotIndex,
-						"txIndex ", txReq.txIndex, "slotType", slotType)
 					continue
 				}
 
@@ -1178,16 +1031,8 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 				if slotDB == nil { // block is processed, fixme: no need to steal
 					break
 				}
-				log.Debug("runSlotLoop executeInSlot", "slotIndex", slotIndex,
-					"txReq.txIndex", txReq.txIndex, "slotType", slotType)
 				result := p.executeInSlot(slotIndex, txReq, slotDB)
-				log.Debug("runSlotLoop executeInSlot done", "slotIndex", slotIndex,
-					"txReq.txIndex", txReq.txIndex, "slotType", slotType)
-
 				p.unconfirmedStateDBs.Store(txReq.txIndex, slotDB)
-				log.Debug("runSlotLoop executeInSlot to send result", "slotIndex", slotIndex,
-					"txReq.txIndex", txReq.txIndex, "slotType", slotType)
-
 				p.pendingConfirmChan <- result
 			}
 			// switched to the other slot.
@@ -1201,8 +1046,6 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 			for _, stealTxReq := range p.allTxReqs {
 				if !atomic.CompareAndSwapInt32(&stealTxReq.runnable, 1, 0) {
 					// not swapped: txReq.runnable == 0
-					log.Debug("runSlotLoop, tx not runnable", "slotIndex", slotIndex,
-						"txIndex ", stealTxReq.txIndex, "slotType", slotType)
 					continue
 				}
 				resultUpdateDB := &ParallelTxResult{
@@ -1217,15 +1060,9 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 				if slotDB == nil { // block is processed
 					break
 				}
-				log.Debug("runSlotLoop executeInSlot steal", "slotIndex", slotIndex,
-					"txReq.txIndex", stealTxReq.txIndex, "slotType", slotType)
 
 				result := p.executeInSlot(slotIndex, stealTxReq, slotDB)
-				log.Debug("runSlotLoop executeInSlot steal done", "slotIndex", slotIndex,
-					"txReq.txIndex", stealTxReq.txIndex, "slotType", slotType)
 				p.unconfirmedStateDBs.Store(stealTxReq.txIndex, slotDB)
-				log.Debug("runSlotLoop executeInSlot steal to send result", "slotIndex", slotIndex,
-					"txReq.txIndex", stealTxReq.txIndex, "slotType", slotType)
 				p.pendingConfirmChan <- result
 			}
 
@@ -1365,7 +1202,6 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		}
 		// wait unitl all slot are stopped
 		for _, slot := range p.slotState {
-			// log.Info("ProcessParallel to stop", "slotIndex", i)
 			slot.stopChan <- struct{}{}
 			slot.stopShadowChan <- struct{}{}
 			stopCount := 0
@@ -1374,29 +1210,20 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 				case updateDB := <-p.txResultChan: // in case a slot is requesting a new DB...
 					if updateDB.updateSlotDB {
 						slotState := p.slotState[updateDB.slotIndex]
-						// log.Info("ProcessParallel try to update slot db", "slotIndex", updateDB.slotIndex)
 						slotState.slotdbChan <- nil
 						continue
 					}
-					// else {
-					// log.Info("ProcessParallel unexpected txResultChan", "slotIndex", i)
-					// }
-				// case slotIndex := <-p.stopSlotChan:
 				case <-p.stopSlotChan:
-					// log.Info("ProcessParallel slot stopped", "slotIndex", slotIndex)
 					stopCount++
 				}
 				if stopCount == 2 {
 					break
 				}
 			}
-			// log.Info("ProcessParallel shadow slot stopped", "slotIndex", i)
 		}
 		// wait until the confirm routine is stopped
-		log.Debug("ProcessParallel to stop confirm routine")
 		p.stopConfirmChan <- struct{}{}
 		<-p.stopSlotChan
-		log.Debug("ProcessParallel stopped confirm routine")
 	}
 	/*
 		else if dispatchPolicy == dispatchPolicyDynamic {

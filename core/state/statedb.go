@@ -2486,7 +2486,7 @@ func (s *ParallelStateDB) GetBalanceOpCode(addr common.Address) *big.Int {
 	if addr == WBNBAddress {
 		// s.wbnbBalanceAccessed++
 		s.wbnbMakeUp = false
-		log.Debug("GetBalanceOpCode for WBNB", "txIndex", s.TxIndex())
+		// log.Debug("GetBalanceOpCode for WBNB", "txIndex", s.TxIndex())
 	}
 	return s.GetBalance(addr)
 }
@@ -3517,7 +3517,7 @@ func (s *ParallelStateDB) ParallelMakeUp(addr common.Address, input []byte) {
 		// return
 		// }
 
-		log.Warn("ParallelMakeUp for WBNB unknown method id", "input size", len(input), "input", input)
+		// log.Warn("ParallelMakeUp for WBNB unknown method id", "input size", len(input), "input", input)
 		s.wbnbMakeUp = false
 	}
 
