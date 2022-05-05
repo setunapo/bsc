@@ -53,6 +53,7 @@ const (
 	maxUnitSize            = 10
 	dispatchPolicyStatic   = 1
 	dispatchPolicyDynamic  = 2 // not supported
+	maxRedoCounterInstage1 = 2 // try 2, 4, 10, or no limit?
 )
 
 var dispatchPolicy = dispatchPolicyStatic
@@ -923,6 +924,9 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 		if !p.confirmInStage2 && p.txReqExecuteCount == txSize {
 			log.Info("runConfirmLoop last txIndex received, enter stage 2", "txIndex", txIndex)
 			p.confirmInStage2 = true
+			for i := 0; i < txSize; i++ {
+				p.txReqExecuteRecord[txIndex] = 0 // clear it when enter stage2, for redo limit
+			}
 		}
 		// if no Tx is merged, we will skip the stage 2 check
 		if !newTxMerged {
@@ -1037,7 +1041,9 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 		if !valid {
 			if resultsLen == 1 || isStage2 { // for Stage 2, we only check its latest result.
 				p.debugConflictRedoNum++
-				lastResult.txReq.runnable = 1 // needs redo
+				if !isStage2 || p.txReqExecuteRecord[lastResult.txReq.txIndex] < maxRedoCounterInstage1 {
+					lastResult.txReq.runnable = 1 // needs redo
+				}
 				slot := p.slotState[staticSlotIndex]
 				log.Debug("runConfirmLoop conflict",
 					"staticSlotIndex", staticSlotIndex,
