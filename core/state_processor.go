@@ -916,6 +916,7 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 		}
 		// if no Tx is merged, we will skip the stage 2 check
 		if !newTxMerged {
+			debug.Handler.EndTrace(region)
 			continue
 		}
 
@@ -941,7 +942,7 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 }
 
 // do conflict detect
-func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, hit bool) bool {
+func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, isStage2 bool) bool {
 	txReq := txResult.txReq
 	txIndex := txReq.txIndex
 	slotDB := txResult.slotDB
@@ -959,7 +960,7 @@ func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, hit boo
 	} else {
 		// to check if what the slot db read is correct.
 		// refDetail := slotDB.UnconfirmedRefList()
-		if !slotDB.IsParallelReadsValid(hit) {
+		if !slotDB.IsParallelReadsValid(isStage2) {
 			return true
 		}
 	}
@@ -1187,6 +1188,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 			}
 			// switched to the other slot.
 			if interrupted {
+				debug.Handler.EndTrace(region1)
 				continue
 			}
 			// txReq in this Slot have all been executed, try steal one from other slot.
