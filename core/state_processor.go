@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -445,7 +446,7 @@ type ParallelTxRequest struct {
 	usedGas        *uint64
 	curTxChan      chan int
 	systemAddrRedo bool
-	runnable       bool // we only run a Tx once or if it needs redo
+	runnable       int32 // we only run a Tx once or if it needs redo
 }
 
 // to create and start the execution slot goroutines
@@ -754,7 +755,9 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 
 	evm, result, err := applyTransactionStageExecution(txReq.msg, gpSlot, slotDB, vmenv)
 	if err != nil {
-		txReq.runnable = true
+		// txReq.runnable must be flase, switch it to true
+		atomic.CompareAndSwapInt32(&txReq.runnable, 0, 1)
+
 		// the error could be caused by unconfirmed balance reference,
 		// the balance could insufficient to pay its gas limit, which cause it preCheck.buyGas() failed
 		// redo could solve it.
@@ -998,15 +1001,13 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) bool {
 		slotIndex := lastResult.slotIndex
 		if !valid {
 			if resultsLen == 1 || !hit { // for not hit, we only check its latest result.
-				if !lastResult.txReq.runnable {
-					p.debugConflictRedoNum++
-				}
+				p.debugConflictRedoNum++
+				lastResult.txReq.runnable = 1 // needs redo
 				slot := p.slotState[slotIndex]
 				log.Debug("runConfirmLoop conflict", "slotIndex", slotIndex,
 					"txIndex", lastResult.txReq.txIndex,
 					"enableShadowFlag", slot.enableShadowFlag,
 					"hit", hit, "slot.enableShadowFlag", slot.enableShadowFlag)
-				lastResult.txReq.runnable = true // needs redo
 				// if hit {                         // switch only it is hit, for none-hit, it is not that necessary,
 				p.switchSlot(slot, slotIndex)
 				//}
@@ -1110,6 +1111,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 		startTxIndex = p.mergedTxIndex + 1
 		log.Debug("runSlotLoop started", "slotIndex", slotIndex, "startTxIndex", startTxIndex, "shadow", shadow)
 		if dispatchPolicy == dispatchPolicyStatic {
+			interrupted := false
 			for _, txReq := range curSlot.pendingTxReqList {
 				if txReq.txIndex < startTxIndex {
 					continue
@@ -1119,15 +1121,16 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 					log.Debug("runSlotLoop, switch loop", "slotIndex", slotIndex,
 						"txIndex ", txReq.txIndex,
 						"enableShadowFlag", curSlot.enableShadowFlag, "shadow", shadow)
+					interrupted = true
 					break
 				}
-				// not confirmed?
-				if !txReq.runnable {
+
+				if !atomic.CompareAndSwapInt32(&txReq.runnable, 1, 0) {
+					// not swapped: txReq.runnable == 0
 					log.Debug("runSlotLoop, tx not runnable", "slotIndex", slotIndex,
 						"txIndex ", txReq.txIndex, "shadow", shadow)
 					continue
 				}
-				txReq.runnable = false
 
 				region2 := debug.Handler.StartTrace("for a TxReq")
 				resultUpdateDB := &ParallelTxResult{
@@ -1156,15 +1159,21 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 				p.pendingConfirmChan <- result
 				debug.Handler.EndTrace(region2)
 			}
+			// switched to the other slot.
+			if interrupted {
+				continue
+			}
 			// txReq in this Slot have all been executed, try steal one from other slot.
 			// as long as the TxReq is runable, we steal it, mark it as stolen
 			// steal one by one
 
 			for _, stealTxReq := range p.allTxReqs {
-				if !stealTxReq.runnable {
+				if !atomic.CompareAndSwapInt32(&stealTxReq.runnable, 1, 0) {
+					// not swapped: txReq.runnable == 0
+					log.Debug("runSlotLoop, tx not runnable", "slotIndex", slotIndex,
+						"txIndex ", stealTxReq.txIndex, "shadow", shadow)
 					continue
 				}
-				stealTxReq.runnable = false
 				region2 := debug.Handler.StartTrace("for a stolen TxReq")
 				resultUpdateDB := &ParallelTxResult{
 					updateSlotDB: true,
@@ -1310,7 +1319,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			usedGas:        usedGas,
 			curTxChan:      make(chan int, 1),
 			systemAddrRedo: false, // set to true, when systemAddr access is detected.
-			runnable:       true,
+			runnable:       1,     // 0: not runnable, 1: runnable
 		}
 		p.allTxReqs = append(p.allTxReqs, txReq)
 	}
