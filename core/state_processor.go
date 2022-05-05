@@ -885,7 +885,8 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 		var unconfirmedResult *ParallelTxResult
 		select {
 		case <-p.stopConfirmChan:
-			log.Debug("runConfirmLoop stop received, drop all pendingConfirm", "len(p.pendingConfirmChan)", len(p.pendingConfirmChan))
+			log.Debug("runConfirmLoop stop received, drop all pendingConfirm",
+				"len(p.pendingConfirmChan)", len(p.pendingConfirmChan))
 			for len(p.pendingConfirmChan) > 0 {
 				<-p.pendingConfirmChan
 			}
@@ -898,7 +899,6 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 		log.Debug("runConfirmLoop receive", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
 		p.pendingConfirmResults[txIndex] = append(p.pendingConfirmResults[txIndex], unconfirmedResult)
 		region := debug.Handler.StartTrace("runConfirmLoop")
-		targetTxIndex := p.mergedTxIndex + 1
 		// if p.allTxReqProcessedOnce {
 		// more aggressive tx result confirm, even for these Txs not in turn
 		// txSize := len(p.allTxReqs)
@@ -906,7 +906,12 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 		//	p.toConfirmTxIndex(txIndex)
 		// }
 		// } else {
-		p.toConfirmTxIndex(targetTxIndex)
+		for {
+			targetTxIndex := p.mergedTxIndex + 1
+			if delivered := p.toConfirmTxIndex(targetTxIndex); !delivered {
+				break
+			}
+		}
 
 		// }
 		debug.Handler.EndTrace(region)
@@ -960,7 +965,7 @@ func (p *ParallelStateProcessor) switchSlot(slot *SlotState, slotIndex int) {
 }
 
 // to confirm a serial TxResults with same txIndex
-func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
+func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) bool {
 	// var targetTxIndex int
 	defer debug.Handler.StartRegionAuto("toConfirmTxIndex")()
 	hit := false
@@ -979,7 +984,7 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
 		resultsLen := len(results)
 		if resultsLen == 0 { // no pending result can be verified, break and wait for incoming results
 			log.Debug("toConfirmTxIndex resultsLen is 0", "targetTxIndex", targetTxIndex, "merged TxIndex", p.mergedTxIndex)
-			break
+			return false
 		}
 		lastResult := results[len(results)-1] // last is the most fresh, stack based priority
 		if hit {
@@ -1009,7 +1014,7 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
 					"txIndex", lastResult.txReq.txIndex)
 				// this the last result for this txIndex,
 				// interrupt its current routine, and reschedule from the the other routine(shadow?)
-				return
+				return false
 			} else {
 				// try next
 				log.Debug("runConfirmLoop conflict, try next result of same txIndex",
@@ -1020,7 +1025,7 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
 		if !hit {
 			// likely valid, but not sure, can not deliver
 			// fixme: need to handle txResult repeatedly check?
-			return
+			return false
 		}
 		log.Debug("runConfirmLoop result to deliver", "slotIndex", slotIndex,
 			"txIndex", lastResult.txReq.txIndex, "mergedTxIndex", p.mergedTxIndex)
@@ -1039,7 +1044,7 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int) {
 				"mergedTxIndex", p.mergedTxIndex, "targetTxIndex", targetTxIndex)
 		}
 		// p.mergedTxIndex = targetTxIndex // fixme: cpu execute disorder,
-		continue // try validate next txIndex
+		return true // try validate next txIndex
 	}
 }
 
@@ -1090,7 +1095,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 		// txReq := <-curSlot.pendingTxReqChan
 		select {
 		case <-stopChan:
-			log.Debug("runSlotLoop stop received", "slotIndex", slotIndex)
+			log.Debug("runSlotLoop stop received", "slotIndex", slotIndex, "shadow", shadow)
 			p.stopSlotChan <- slotIndex
 			continue
 		case <-wakeupChan:
@@ -1112,7 +1117,8 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, shadow bool) {
 				// if interrupted,
 				if curSlot.enableShadowFlag != shadow {
 					log.Debug("runSlotLoop, switch loop", "slotIndex", slotIndex,
-						"txIndex ", txReq.txIndex, "shadow", shadow)
+						"txIndex ", txReq.txIndex,
+						"enableShadowFlag", curSlot.enableShadowFlag, "shadow", shadow)
 					break
 				}
 				// not confirmed?
