@@ -52,7 +52,7 @@ const (
 	dispatchPolicyStatic   = 1
 	dispatchPolicyDynamic  = 2     // not supported
 	maxRedoCounterInstage1 = 10000 // try 2, 4, 10, or no limit?
-	stage2CheckNumber      = 10
+	stage2CheckNumber      = 20
 )
 
 var dispatchPolicy = dispatchPolicyStatic
@@ -868,7 +868,7 @@ func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, isStage
 	} else {
 		// to check if what the slot db read is correct.
 		// refDetail := slotDB.UnconfirmedRefList()
-		if !slotDB.IsParallelReadsValid(isStage2) {
+		if !slotDB.IsParallelReadsValid(isStage2, p.mergedTxIndex) {
 			return true
 		}
 	}
