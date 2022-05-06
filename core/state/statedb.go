@@ -3387,8 +3387,12 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int,
 		if addr != slotDB.parallel.systemAddress { // skip balance check for system address
 			balanceMain := mainDB.GetBalance(addr)
 			if balanceSlot.Cmp(balanceMain) != 0 {
-
 				if addr == WBNBAddress && slotDB.WBNBMakeUp() { // WBNB balance make up
+					if isStage2 {
+						log.Debug("IsSlotDBReadsValid skip makeup for WBNB in stage 2",
+							"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
+						continue // stage2 will skip WBNB check, no balance makeup
+					}
 					balanceDelta := new(big.Int).Sub(balanceMain, balanceSlot)
 					slotDB.wbnbMakeUpLock.Lock()
 					slotDB.AddBalance(addr, balanceDelta) // fixme: concurrent not safe, unconfirmed read
