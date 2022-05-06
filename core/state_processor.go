@@ -860,7 +860,10 @@ func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, isStage
 	if txResult.err != nil {
 		return true
 	} else if slotDB.SystemAddressRedo() {
-		txResult.txReq.systemAddrRedo = true
+		if !isStage2 {
+			// for system addr redo, it has to wait until it's turn to keep the system address balance
+			txResult.txReq.systemAddrRedo = true
+		}
 		return true
 	} else if slotDB.NeedsRedo() {
 		// if this is any reason that indicates this transaction needs to redo, skip the conflict check

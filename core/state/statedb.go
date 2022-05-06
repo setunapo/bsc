@@ -3531,7 +3531,14 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 //  the other is for AddBalance(GasFee) at the end.
 // (systemAddressOpsCount > 3) means the transaction tries to access systemAddress, in
 // this case, we should redo and keep its balance on NewSlotDB()
+// for example:
+// https://bscscan.com/tx/0xe469f1f948de90e9508f96da59a96ed84b818e71432ca11c5176eb60eb66671b
 func (s *ParallelStateDB) SystemAddressRedo() bool {
+	if s.parallel.systemAddressOpsCount > 4 {
+		log.Info("SystemAddressRedo", "SlotIndex", s.parallel.SlotIndex,
+			"txIndex", s.txIndex,
+			"systemAddressOpsCount", s.parallel.systemAddressOpsCount)
+	}
 	return s.parallel.systemAddressOpsCount > 4
 }
 
