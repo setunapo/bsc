@@ -3531,8 +3531,9 @@ func (s *ParallelStateDB) SystemAddressRedo() bool {
 		log.Info("SystemAddressRedo", "SlotIndex", s.parallel.SlotIndex,
 			"txIndex", s.txIndex,
 			"systemAddressOpsCount", s.parallel.systemAddressOpsCount)
+		return true
 	}
-	return s.parallel.systemAddressOpsCount > 4
+	return false
 }
 
 // NeedsRedo returns true if there is any clear reason that we need to redo this transaction

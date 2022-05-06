@@ -52,8 +52,9 @@ const (
 	dispatchPolicyStatic   = 1
 	dispatchPolicyDynamic  = 2     // not supported
 	maxRedoCounterInstage1 = 10000 // try 2, 4, 10, or no limit? not needed
-	stage2CheckNumber      = 10
-	stage2RedoNumber       = 5
+	stage2CheckNumber      = 20    // not fixed, use decrease?
+	stage2RedoNumber       = 8
+	stage2ReservedNum      = 7 // ?
 )
 
 var dispatchPolicy = dispatchPolicyStatic
@@ -821,7 +822,13 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			newTxMerged = true
 		}
 		txSize := len(p.allTxReqs)
-		if !p.inConfirmStage2 && p.txReqExecuteCount == txSize {
+		// usually, the the last Tx could be the bottleneck it could be very slow,
+		// so it is better for us to enter stage 2 a bit earlier
+		targetStage2Count := txSize
+		if txSize > 50 {
+			targetStage2Count = txSize - stage2ReservedNum
+		}
+		if !p.inConfirmStage2 && p.txReqExecuteCount == targetStage2Count {
 			p.inConfirmStage2 = true
 			for i := 0; i < txSize; i++ {
 				p.txReqExecuteRecord[txIndex] = 0 // clear it when enter stage2, for redo limit
