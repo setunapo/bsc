@@ -51,8 +51,9 @@ const (
 	maxUnitSize            = 10
 	dispatchPolicyStatic   = 1
 	dispatchPolicyDynamic  = 2     // not supported
-	maxRedoCounterInstage1 = 10000 // try 2, 4, 10, or no limit?
-	stage2CheckNumber      = 20
+	maxRedoCounterInstage1 = 10000 // try 2, 4, 10, or no limit? not needed
+	stage2CheckNumber      = 10
+	stage2RedoNumber       = 5
 )
 
 var dispatchPolicy = dispatchPolicyStatic
@@ -94,7 +95,7 @@ type ParallelStateProcessor struct {
 	allTxReqs            []*ParallelTxRequest
 	txReqExecuteRecord   map[int]int // for each the execute count of each Tx
 	txReqExecuteCount    int
-	confirmInStage2      bool
+	inConfirmStage2      bool
 }
 
 func NewParallelStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consensus.Engine, parallelNum int, queueSize int) *ParallelStateProcessor {
@@ -820,8 +821,8 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			newTxMerged = true
 		}
 		txSize := len(p.allTxReqs)
-		if !p.confirmInStage2 && p.txReqExecuteCount == txSize {
-			p.confirmInStage2 = true
+		if !p.inConfirmStage2 && p.txReqExecuteCount == txSize {
+			p.inConfirmStage2 = true
 			for i := 0; i < txSize; i++ {
 				p.txReqExecuteRecord[txIndex] = 0 // clear it when enter stage2, for redo limit
 			}
@@ -833,7 +834,7 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 
 		// stage 2,if all tx have been executed at least once, and its result has been recevied.
 		// in Stage 2, we will run check when merge is advanced.
-		if p.confirmInStage2 {
+		if p.inConfirmStage2 {
 			// more aggressive tx result confirm, even for these Txs not in turn
 			// now we will be more aggressive:
 			//   do conflcit check , as long as tx result is generated,
@@ -845,8 +846,14 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			if endTxIndex > (txSize - 1) {
 				endTxIndex = txSize - 1
 			}
+			conflictNumMark := p.debugConflictRedoNum
 			for txIndex := startTxIndex; txIndex < endTxIndex; txIndex++ {
 				p.toConfirmTxIndex(txIndex, true)
+				newConflictNum := p.debugConflictRedoNum - conflictNumMark
+				// if many redo is scheduled, stop now
+				if newConflictNum >= stage2RedoNumber {
+					break
+				}
 			}
 		}
 
@@ -871,7 +878,7 @@ func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, isStage
 	} else {
 		// to check if what the slot db read is correct.
 		// refDetail := slotDB.UnconfirmedRefList()
-		if !slotDB.IsParallelReadsValid(isStage2, p.mergedTxIndex) {
+		if !slotDB.IsParallelReadsValid(isStage2, p.mergedTxIndex, p.unconfirmedStateDBs) {
 			return true
 		}
 	}
@@ -1044,7 +1051,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 				p.pendingConfirmChan <- result
 			}
 			// switched to the other slot.
-			if interrupted || p.confirmInStage2 {
+			if interrupted || p.inConfirmStage2 {
 				continue
 			}
 			// txReq in this Slot have all been executed, try steal one from other slot.
@@ -1103,7 +1110,7 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	}
 	p.mergedTxIndex = -1
 	p.debugConflictRedoNum = 0
-	p.confirmInStage2 = false
+	p.inConfirmStage2 = false
 	// p.txReqAccountSorted = make(map[common.Address][]*ParallelTxRequest) // fixme: to be reused?
 
 	statedb.PrepareForParallel()

@@ -3321,9 +3321,19 @@ func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (
 	}
 	return nil, 0, false
 }
+func (s *ParallelStateDB) UpdateUnConfirmDBs(baseTxIndex int,
+	unconfirmedDBs *sync.Map /*map[int]*ParallelStateDB*/) {
+	s.parallel.unconfirmedDBInShot = make(map[int]*ParallelStateDB, 100)
+	for index := baseTxIndex + 1; index < s.txIndex; index++ {
+		unconfirmedDB, ok := unconfirmedDBs.Load(index)
+		if ok {
+			s.parallel.unconfirmedDBInShot[index] = unconfirmedDB.(*ParallelStateDB)
+		}
+	}
+}
 
 // in stage2, we do unconfirmed conflict detect
-func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int) bool {
+func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int, unconfirmedDBs *sync.Map) bool {
 	slotDB := s
 	if !slotDB.parallel.isSlotDB {
 		log.Error("IsSlotDBReadsValid slotDB should be slot DB", "SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
@@ -3335,18 +3345,21 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 		log.Error("IsSlotDBReadsValid s should be main DB", "SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
 		return false
 	}
+	if isStage2 { // update slotDB's unconfirmed DB list and try
+		slotDB.UpdateUnConfirmDBs(mergedTxIndex, unconfirmedDBs)
+	}
 	// for nonce
 	for addr, nonceSlot := range slotDB.parallel.nonceReadsInSlot {
-		if isStage2 {
-			readTxIndex := slotDB.parallel.nonceReadsInSlotFromTxIndex[addr]
-			if readTxIndex > mergedTxIndex {
-				log.Debug("IsSlotDBReadsValid skip nonce check in stage 2",
-					"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex,
-					"readTxIndex", readTxIndex, "mergedTxIndex", mergedTxIndex)
-				continue
+		if isStage2 { // update slotDB's unconfirmed DB list and try
+			if nonceUnconfirm, _, ok := slotDB.getNonceFromUnconfirmedDB(addr); ok {
+				if nonceSlot != nonceUnconfirm {
+					log.Debug("IsSlotDBReadsValid nonce read is invalid in unconfirmed", "addr", addr,
+						"nonceSlot", nonceSlot, "nonceUnconfirm", nonceUnconfirm, "SlotIndex", slotDB.parallel.SlotIndex,
+						"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
+					return false
+				}
 			}
 		}
-
 		nonceMain := mainDB.GetNonce(addr)
 		if nonceSlot != nonceMain {
 			log.Debug("IsSlotDBReadsValid nonce read is invalid", "addr", addr,
@@ -3357,26 +3370,25 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 	}
 	// balance
 	for addr, balanceSlot := range slotDB.parallel.balanceReadsInSlot {
-		if isStage2 {
-			readTxIndex := slotDB.parallel.balanceReadsInSlotFromTxIndex[addr]
-			if readTxIndex > mergedTxIndex {
-				log.Debug("IsSlotDBReadsValid skip balance check in stage 2",
-					"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex,
-					"readTxIndex", readTxIndex, "mergedTxIndex", mergedTxIndex)
-				continue
+		if isStage2 { // update slotDB's unconfirmed DB list and try
+			if balanceUnconfirm, _ := slotDB.getBalanceFromUnconfirmedDB(addr); balanceUnconfirm != nil {
+				if balanceSlot.Cmp(balanceUnconfirm) == 0 {
+					continue
+				}
+				if addr == WBNBAddress && slotDB.WBNBMakeUp() {
+					log.Debug("IsSlotDBReadsValid skip makeup for WBNB in stage 2",
+						"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
+					continue // stage2 will skip WBNB check, no balance makeup
+				}
+				return false
 			}
 		}
 
-		if addr != s.parallel.systemAddress { // skip balance check for system address
+		if addr != slotDB.parallel.systemAddress { // skip balance check for system address
 			balanceMain := mainDB.GetBalance(addr)
 			if balanceSlot.Cmp(balanceMain) != 0 {
 
 				if addr == WBNBAddress && slotDB.WBNBMakeUp() { // WBNB balance make up
-					if isStage2 {
-						log.Debug("IsSlotDBReadsValid skip makeup for WBNB in stage 2",
-							"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
-						continue // stage2 will skip WBNB check, no balance makeup
-					}
 					balanceDelta := new(big.Int).Sub(balanceMain, balanceSlot)
 					slotDB.wbnbMakeUpLock.Lock()
 					slotDB.AddBalance(addr, balanceDelta) // fixme: concurrent not safe, unconfirmed read
@@ -3405,55 +3417,21 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 			}
 		}
 	}
-	// check code
-	for addr, codeSlot := range slotDB.parallel.codeReadsInSlot {
-		if isStage2 {
-			readTxIndex := slotDB.parallel.codeReadsInSlotFromTxIndex[addr]
-			if readTxIndex > mergedTxIndex {
-				log.Debug("IsSlotDBReadsValid skip code check in stage 2",
-					"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex,
-					"readTxIndex", readTxIndex, "mergedTxIndex", mergedTxIndex)
-				continue
-			}
-		}
-		codeMain := mainDB.GetCode(addr)
-		if !bytes.Equal(codeSlot, codeMain) {
-			log.Debug("IsSlotDBReadsValid code read is invalid", "addr", addr,
-				"len codeSlot", len(codeSlot), "len codeMain", len(codeMain), "SlotIndex", slotDB.parallel.SlotIndex,
-				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
-			return false
-		}
-	}
-	// check codeHash
-	for addr, codeHashSlot := range slotDB.parallel.codeHashReadsInSlot {
-		if isStage2 {
-			readTxIndex := slotDB.parallel.codeHashReadsInSlotFromTxIndex[addr]
-			if readTxIndex > mergedTxIndex {
-				log.Debug("IsSlotDBReadsValid skip codeHash check in stage 2",
-					"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex,
-					"readTxIndex", readTxIndex, "mergedTxIndex", mergedTxIndex)
-				continue
-			}
-		}
-		codeHashMain := mainDB.GetCodeHash(addr)
-		if !bytes.Equal(codeHashSlot.Bytes(), codeHashMain.Bytes()) {
-			log.Debug("IsSlotDBReadsValid codehash read is invalid", "addr", addr,
-				"codeHashSlot", codeHashSlot, "codeHashMain", codeHashMain, "SlotIndex", slotDB.parallel.SlotIndex,
-				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
-			return false
-		}
-	}
+
 	// check KV
 	for addr, slotStorage := range slotDB.parallel.kvReadsInSlot {
 		conflict := false
 		slotStorage.Range(func(keySlot, valSlot interface{}) bool {
-			if isStage2 {
-				readTxIndex := slotDB.parallel.kvReadsInSlotFromTxIndex[addr][keySlot.(common.Hash)]
-				if readTxIndex > mergedTxIndex {
-					log.Debug("IsSlotDBReadsValid skip nonce check in stage 2",
-						"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex,
-						"readTxIndex", readTxIndex, "mergedTxIndex", mergedTxIndex)
-					return true // return true, Range will try next KV
+			if isStage2 { // update slotDB's unconfirmed DB list and try
+				if valUnconfirm, _, ok := slotDB.getKVFromUnconfirmedDB(addr, valSlot.(common.Hash)); ok {
+					if !bytes.Equal(valSlot.(common.Hash).Bytes(), valUnconfirm.Bytes()) {
+						log.Debug("IsSlotDBReadsValid nonce read is invalid in unconfirmed", "addr", addr,
+							"valSlot", valSlot.(common.Hash), "valUnconfirm", valUnconfirm,
+							"SlotIndex", slotDB.parallel.SlotIndex,
+							"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
+						conflict = true
+						return false // return false, Range will be terminated.
+					}
 				}
 			}
 			valMain := mainDB.GetState(addr, keySlot.(common.Hash))
@@ -3471,25 +3449,39 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 			return false
 		}
 	}
+	if isStage2 { // stage2 skip check code, or state, since they are likely unchanged.
+		return true
+	}
+
+	// check code
+	for addr, codeSlot := range slotDB.parallel.codeReadsInSlot {
+		codeMain := mainDB.GetCode(addr)
+		if !bytes.Equal(codeSlot, codeMain) {
+			log.Debug("IsSlotDBReadsValid code read is invalid", "addr", addr,
+				"len codeSlot", len(codeSlot), "len codeMain", len(codeMain), "SlotIndex", slotDB.parallel.SlotIndex,
+				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
+			return false
+		}
+	}
+	// check codeHash
+	for addr, codeHashSlot := range slotDB.parallel.codeHashReadsInSlot {
+		codeHashMain := mainDB.GetCodeHash(addr)
+		if !bytes.Equal(codeHashSlot.Bytes(), codeHashMain.Bytes()) {
+			log.Debug("IsSlotDBReadsValid codehash read is invalid", "addr", addr,
+				"codeHashSlot", codeHashSlot, "codeHashMain", codeHashMain, "SlotIndex", slotDB.parallel.SlotIndex,
+				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
+			return false
+		}
+	}
 	// addr state check
 	for addr, stateSlot := range slotDB.parallel.addrStateReadsInSlot {
-		if isStage2 {
-			readTxIndex := slotDB.parallel.addrStateReadsInSlotFromTxIndex[addr]
-			if readTxIndex > mergedTxIndex {
-				log.Debug("IsSlotDBReadsValid skip addr state check in stage 2",
-					"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex,
-					"readTxIndex", readTxIndex, "mergedTxIndex", mergedTxIndex)
-				continue
-			}
-		}
 		stateMain := false // addr not exist
 		if mainDB.getStateObject(addr) != nil {
 			stateMain = true // addr exist in main DB
 		}
 		if stateSlot != stateMain {
-
 			// skip addr state check for system address
-			if addr != s.parallel.systemAddress {
+			if addr != slotDB.parallel.systemAddress {
 				log.Debug("IsSlotDBReadsValid addrState read invalid(true: exist, false: not exist)",
 					"addr", addr, "stateSlot", stateSlot, "stateMain", stateMain,
 					"SlotIndex", slotDB.parallel.SlotIndex,
@@ -3497,9 +3489,6 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 				return false
 			}
 		}
-	}
-	if isStage2 { // stage2 skip snapshot destructs check
-		return true
 	}
 	// snapshot destructs check
 	for addr, destructRead := range slotDB.parallel.addrSnapDestructsReadsInSlot {
@@ -3511,9 +3500,9 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
 			return false
 		}
-		s.snapParallelLock.RLock()                    // fixme: this lock is not needed
+		slotDB.snapParallelLock.RLock()               // fixme: this lock is not needed
 		_, destructMain := mainDB.snapDestructs[addr] // addr not exist
-		s.snapParallelLock.RUnlock()
+		slotDB.snapParallelLock.RUnlock()
 		if destructRead != destructMain {
 			log.Debug("IsSlotDBReadsValid snapshot destructs read invalid",
 				"addr", addr, "destructRead", destructRead, "destructMain", destructMain,
