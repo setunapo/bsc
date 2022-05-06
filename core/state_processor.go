@@ -50,8 +50,9 @@ const (
 	farDiffLayerTimeout    = 2
 	maxUnitSize            = 10
 	dispatchPolicyStatic   = 1
-	dispatchPolicyDynamic  = 2 // not supported
-	maxRedoCounterInstage1 = 2 // try 2, 4, 10, or no limit?
+	dispatchPolicyDynamic  = 2     // not supported
+	maxRedoCounterInstage1 = 10000 // try 2, 4, 10, or no limit?
+	stage2CheckNumber      = 10
 )
 
 var dispatchPolicy = dispatchPolicyStatic
@@ -840,7 +841,11 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			//   otherwise, do conflict check without WBNB makeup, but we will ignor WBNB's balance conflict.
 			// throw these likely conflicted tx back to re-execute
 			startTxIndex := p.mergedTxIndex + 2 // stage 2's will start from the next target merge index
-			for txIndex := startTxIndex; txIndex < txSize; txIndex++ {
+			endTxIndex := startTxIndex + stage2CheckNumber
+			if endTxIndex > (txSize - 1) {
+				endTxIndex = txSize - 1
+			}
+			for txIndex := startTxIndex; txIndex < endTxIndex; txIndex++ {
 				p.toConfirmTxIndex(txIndex, true)
 			}
 		}
