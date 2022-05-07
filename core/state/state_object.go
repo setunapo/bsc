@@ -150,6 +150,7 @@ type StateObject struct {
 	addrHash common.Hash // hash of ethereum address of the account
 	data     Account
 	db       *StateDB
+	dbItf    StateDBer
 
 	// DB error.
 	// State objects are used by the consensus core and VM which are
@@ -182,7 +183,51 @@ type StateObject struct {
 
 // empty returns whether the account is considered empty.
 func (s *StateObject) empty() bool {
-	return s.data.Nonce == 0 && s.data.Balance.Sign() == 0 && bytes.Equal(s.data.CodeHash, emptyCodeHash)
+	// return s.data.Nonce == 0 && s.data.Balance.Sign() == 0 && bytes.Equal(s.data.CodeHash, emptyCodeHash)
+
+	// 0426, leave some notation, empty() works so far
+	// empty() has 3 use cases:
+	// 1.StateDB.Empty(), to empty check
+	//   A: It is ok, we have handled it in Empty(), to make sure nonce, balance, codeHash are solid
+	// 2:AddBalance 0, empty check for touch event
+	//   empty() will add a touch event.
+	//   if we misjudge it, the touch event could be lost, which make address not deleted.  // fixme
+	// 3.Finalise(), to do empty delete
+	//   the address should be dirtied or touched
+	//   if it nonce dirtied, it is ok, since nonce is monotonically increasing, won't be zero
+	//   if balance is dirtied, balance could be zero, we should refer solid nonce & codeHash  // fixme
+	//   if codeHash is dirtied, it is ok, since code will not be updated.
+	//   if suicide, it is ok
+	//   if object is new created, it is ok
+	//   if CreateAccout, recreate the address, it is ok.
+
+	// Slot 0 tx 0: AddBalance(100) to addr_1, => addr_1: balance = 100, nonce = 0, code is empty
+	// Slot 1 tx 1: addr_1 Transfer 99.9979 with GasFee 0.0021, => addr_1: balance = 0, nonce = 1, code is empty
+	//              notice: balance transfer cost 21,000 gas, with gasPrice = 100Gwei, GasFee will be 0.0021
+	// Slot 0 tx 2: add balance 0 to addr_1(empty check for touch event),
+	//              the object was lightCopied from tx 0,
+
+	// in parallel mode, we should not check empty by raw nonce, balance, codeHash any more,
+	// since it could be invalid.
+	// e.g., AddBalance() to an address, we will do lightCopy to get a new StateObject, we did balance fixup to
+	// make sure object's Balance is reliable. But we did not fixup nonce or code, we only do nonce or codehash
+	// fixup on need, that's when we wanna to update the nonce or codehash.
+	// So nonce, blance
+	// Before the block is processed, addr_1 account: nonce = 0, emptyCodeHash, balance = 100
+	//   Slot 0 tx 0: no access to addr_1
+	//   Slot 1 tx 1: sub balance 100, it is empty and deleted
+	//   Slot 0 tx 2: GetNonce, lightCopy based on main DB(balance = 100) , not empty
+	// return s.db.GetNonce(s.address) == 0 && s.db.GetBalance(s.address).Sign() == 0 && bytes.Equal(s.db.GetCodeHash(s.address).Bytes(), emptyCodeHash)
+
+	if s.dbItf.GetBalance(s.address).Sign() != 0 { // check balance first, since it is most likely not zero
+		return false
+	}
+	if s.dbItf.GetNonce(s.address) != 0 {
+		return false
+	}
+	codeHash := s.dbItf.GetCodeHash(s.address)
+	return bytes.Equal(codeHash.Bytes(), emptyCodeHash) // code is empty, the object is empty
+
 }
 
 // Account is the Ethereum consensus representation of accounts.
@@ -195,9 +240,10 @@ type Account struct {
 }
 
 // newObject creates a state object.
-func newObject(db *StateDB, isParallel bool, address common.Address, data Account) *StateObject {
+func newObject(dbItf StateDBer, isParallel bool, address common.Address, data Account) *StateObject {
+	db := dbItf.getBaseStateDB()
 	if data.Balance == nil {
-		data.Balance = new(big.Int)
+		data.Balance = new(big.Int) // todo: why not common.Big0?
 	}
 	if data.CodeHash == nil {
 		data.CodeHash = emptyCodeHash
@@ -213,6 +259,7 @@ func newObject(db *StateDB, isParallel bool, address common.Address, data Accoun
 
 	return &StateObject{
 		db:                  db,
+		dbItf:               dbItf,
 		address:             address,
 		addrHash:            crypto.Keccak256Hash(address[:]),
 		data:                data,
@@ -353,9 +400,12 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 		//   1) resurrect happened, and new slot values were set -- those should
 		//      have been handles via pendingStorage above.
 		//   2) we don't have new values, and can deliver empty response back
-		if _, destructed := s.db.snapDestructs[s.address]; destructed {
+		s.db.snapParallelLock.RLock()
+		if _, destructed := s.db.snapDestructs[s.address]; destructed { // fixme: use sync.Map, instead of RWMutex?
+			s.db.snapParallelLock.RUnlock()
 			return common.Hash{}
 		}
+		s.db.snapParallelLock.RUnlock()
 		enc, err = s.db.snap.Storage(s.addrHash, crypto.Keccak256Hash(key.Bytes()))
 	}
 	// If snapshot unavailable or reading from it failed, load from the database
@@ -394,7 +444,14 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 		return
 	}
 	// If the new value is the same as old, don't set
-	prev := s.GetState(db, key)
+	// In parallel mode, it has to get from StateDB, in case:
+	//  a.the Slot did not set the key before and try to set it to `val_1`
+	//  b.Unconfirmed DB has set the key to `val_2`
+	//  c.if we use StateObject.GetState, and the key load from the main DB is `val_1`
+	//    this `SetState could be skipped`
+	//  d.Finally, the key's value will be `val_2`, while it should be `val_1`
+	// such as: https://bscscan.com/txs?block=2491181
+	prev := s.dbItf.GetState(s.address, key) // fixme: if it is for journal, may not necessary, we can remove this change record
 	if prev == value {
 		return
 	}
@@ -404,6 +461,10 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 		key:      key,
 		prevalue: prev,
 	})
+	if s.db.parallel.isSlotDB {
+		s.db.parallel.kvChangesInSlot[s.address][key] = struct{}{} // should be moved to here, after `s.db.GetState()`
+	}
+
 	s.setState(key, value)
 }
 
@@ -484,7 +545,7 @@ func (s *StateObject) updateTrie(db Database) Trie {
 			return true
 		}
 
-		s.originStorage.StoreValue(k.(common.Hash), v.(common.Hash))
+		s.setOriginStorage(key, value)
 
 		var vs []byte
 		if (value == common.Hash{}) {
@@ -590,7 +651,8 @@ func (s *StateObject) SubBalance(amount *big.Int) {
 func (s *StateObject) SetBalance(amount *big.Int) {
 	s.db.journal.append(balanceChange{
 		account: &s.address,
-		prev:    new(big.Int).Set(s.data.Balance),
+		prev:    new(big.Int).Set(s.data.Balance), // prevBalance,
+		// prev:    prevBalance,
 	})
 	s.setBalance(amount)
 }
@@ -601,6 +663,19 @@ func (s *StateObject) setBalance(amount *big.Int) {
 
 // Return the gas back to the origin. Used by the Virtual machine or Closures
 func (s *StateObject) ReturnGas(gas *big.Int) {}
+
+func (s *StateObject) lightCopy(db *ParallelStateDB) *StateObject {
+	stateObject := newObject(db, s.isParallel, s.address, s.data)
+	if s.trie != nil {
+		// fixme: no need to copy trie for light copy, since light copied object won't access trie DB
+		stateObject.trie = db.db.CopyTrie(s.trie)
+	}
+	stateObject.code = s.code
+	stateObject.suicided = false        // should be false
+	stateObject.dirtyCode = s.dirtyCode // it is not used in slot, but keep it is ok
+	stateObject.deleted = false         // should be false
+	return stateObject
+}
 
 func (s *StateObject) deepCopy(db *StateDB) *StateObject {
 	stateObject := newObject(db, s.isParallel, s.address, s.data)
@@ -619,8 +694,9 @@ func (s *StateObject) deepCopy(db *StateDB) *StateObject {
 
 func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys StateKeys) {
 	for key := range keys {
-		// better to do s.GetState(db, key) to load originStorage for this key?
-		// since originStorage was in dirtyObjs, but it works even originStorage miss the state object.
+		// In parallel mode, always GetState by StateDB, not by StateObject directly,
+		// since it the KV could exist in unconfirmed DB.
+		// But here, it should be ok, since the KV should be changed and valid in the SlotDB,
 		s.SetState(db, key, dirtyObjs.GetState(db, key))
 	}
 }
@@ -668,7 +744,7 @@ func (s *StateObject) CodeSize(db Database) int {
 }
 
 func (s *StateObject) SetCode(codeHash common.Hash, code []byte) {
-	prevcode := s.Code(s.db.db)
+	prevcode := s.dbItf.GetCode(s.address)
 	s.db.journal.append(codeChange{
 		account:  &s.address,
 		prevhash: s.CodeHash(),
@@ -684,9 +760,10 @@ func (s *StateObject) setCode(codeHash common.Hash, code []byte) {
 }
 
 func (s *StateObject) SetNonce(nonce uint64) {
+	prevNonce := s.dbItf.GetNonce(s.address)
 	s.db.journal.append(nonceChange{
 		account: &s.address,
-		prev:    s.data.Nonce,
+		prev:    prevNonce,
 	})
 	s.setNonce(nonce)
 }
