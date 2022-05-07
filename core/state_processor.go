@@ -50,11 +50,11 @@ const (
 	farDiffLayerTimeout    = 2
 	maxUnitSize            = 10
 	dispatchPolicyStatic   = 1
-	dispatchPolicyDynamic  = 2     // not supported
-	maxRedoCounterInstage1 = 10000 // try 2, 4, 10, or no limit? not needed
-	stage2CheckNumber      = 20    // not fixed, use decrease?
-	stage2RedoNumber       = 8
-	stage2ReservedNum      = 7 // ?
+	dispatchPolicyDynamic  = 2  // not supported
+	maxRedoCounterInstage1 = 4  // try 2, 4, 10, or no limit? not needed
+	stage2CheckNumber      = 20 // not fixed, use decrease?
+	stage2RedoNumber       = 3
+	stage2ReservedNum      = 3 // ?
 )
 
 var dispatchPolicy = dispatchPolicyStatic
@@ -863,7 +863,6 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 				}
 			}
 		}
-
 	}
 
 }
@@ -935,6 +934,9 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 		if !isStage2 {
 			// not remove the confirm result in Stage2, since the conflict check is guranteed.
 			p.pendingConfirmResults[targetTxIndex] = p.pendingConfirmResults[targetTxIndex][:resultsLen-1] // remove from the queue
+			if atomic.CompareAndSwapInt32(&lastResult.txReq.runnable, 1, 1) {                              // if runnable, no conflict detect
+				return false
+			}
 		}
 
 		valid := p.toConfirmTxIndexResult(lastResult, isStage2)
