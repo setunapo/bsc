@@ -837,7 +837,7 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			continue
 		}
 
-		if unconfirmedResult.err != nil {
+		if unconfirmedResult.err == nil {
 			if _, ok := p.txReqExecuteRecord[txIndex]; !ok {
 				p.txReqExecuteRecord[txIndex] = 0
 				p.txReqExecuteCount++
@@ -859,7 +859,7 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			newTxMerged = true
 		}
 		//  schedule prefetch once, and only when  unconfirmedResult is valid and is not merged
-		if unconfirmedResult.err != nil && txIndex > p.mergedTxIndex {
+		if unconfirmedResult.err == nil && txIndex > p.mergedTxIndex {
 			if _, ok := p.txReqPrefetchRecord[txIndex]; !ok {
 				p.txReqPrefetchRecord[txIndex] = struct{}{}
 				// do prefetch in advance.
