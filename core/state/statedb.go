@@ -182,7 +182,8 @@ type ParallelState struct {
 	keepSystemAddressBalance bool
 
 	// we may need to redo for some specific reasons, like we read the wrong state and need to panic in sequential mode in SubRefund
-	needsRedo bool
+	needsRedo           bool
+	addressesToPrefetch [][]byte
 }
 
 // StateDB structs within the ethereum protocol are used to store anything
@@ -1391,6 +1392,8 @@ func (s *StateDB) Finalise(deleteEmptyObjects bool) { // fixme: concurrent safe.
 	}
 	if s.prefetcher != nil && len(addressesToPrefetch) > 0 {
 		s.prefetcher.prefetch(s.originalRoot, addressesToPrefetch, emptyAddr)
+	} else {
+		s.parallel.addressesToPrefetch = addressesToPrefetch
 	}
 	// Invalidate journal because reverting across transactions is not allowed.
 	s.clearJournalAndRefund()
@@ -2030,6 +2033,12 @@ func (s *StateDB) GetStorage(address common.Address) *sync.Map {
 func (s *StateDB) PrepareForParallel() {
 	s.isParallel = true
 	s.parallel.stateObjects = &StateObjectSyncMap{}
+}
+
+func (s *StateDB) AddrPrefetch(slotDb *ParallelStateDB) {
+	if s.prefetcher != nil && len(slotDb.parallel.addressesToPrefetch) > 0 {
+		s.prefetcher.prefetch(s.originalRoot, slotDb.parallel.addressesToPrefetch, emptyAddr)
+	}
 }
 
 // MergeSlotDB is for Parallel execution mode, when the transaction has been
@@ -3332,6 +3341,7 @@ func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (
 	}
 	return nil, 0, false
 }
+
 func (s *ParallelStateDB) UpdateUnConfirmDBs(baseTxIndex int,
 	unconfirmedDBs *sync.Map /*map[int]*ParallelStateDB*/) {
 	s.parallel.unconfirmedDBInShot = make(map[int]*ParallelStateDB, 100)

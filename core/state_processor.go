@@ -99,7 +99,8 @@ type ParallelStateProcessor struct {
 	confirmStage2Chan     chan int
 	stopConfirmStage2Chan chan struct{}
 	allTxReqs             []*ParallelTxRequest
-	txReqExecuteRecord    map[int]int // for each the execute count of each Tx
+	txReqExecuteRecord    map[int]int      // for each the execute count of each Tx
+	txReqPrefetchRecord   map[int]struct{} // for each the execute count of each Tx
 	txReqExecuteCount     int
 	inConfirmStage2       bool
 }
@@ -431,6 +432,7 @@ type SlotState struct {
 }
 
 type ParallelTxResult struct {
+	prefetchAddr bool  // for redo and pending tx quest, slot needs new slotDB,
 	updateSlotDB bool  // for redo and pending tx quest, slot needs new slotDB,
 	keepSystem   bool  // for redo, should keep system address's balance
 	slotIndex    int   // slot index
@@ -725,6 +727,10 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 			slotState.slotdbChan <- slotDB
 			continue
 		}
+		if result.prefetchAddr {
+			statedb.AddrPrefetch(result.slotDB)
+			continue
+		}
 		// ok, the tx result is valid and can be merged
 		break
 	}
@@ -797,7 +803,6 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 		slotDB.RevertSlotDB(txReq.msg.From())
 	}
 	slotDB.Finalise(true) // Finalise could write s.parallel.addrStateChangesInSlot[addr], keep Read and Write in same routine to avoid crash
-
 	return &ParallelTxResult{
 		updateSlotDB: false,
 		slotIndex:    slotIndex,
@@ -825,11 +830,18 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 		case unconfirmedResult = <-p.pendingConfirmChan:
 		}
 		txIndex := unconfirmedResult.txReq.txIndex
-		if _, ok := p.txReqExecuteRecord[txIndex]; !ok {
-			p.txReqExecuteRecord[txIndex] = 0
-			p.txReqExecuteCount++
+		if txIndex <= p.mergedTxIndex {
+			log.Warn("runConfirmLoop drop merged txReq", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
+			continue
 		}
-		p.txReqExecuteRecord[txIndex]++
+
+		if unconfirmedResult.err != nil {
+			if _, ok := p.txReqExecuteRecord[txIndex]; !ok {
+				p.txReqExecuteRecord[txIndex] = 0
+				p.txReqExecuteCount++
+			}
+			p.txReqExecuteRecord[txIndex]++
+		}
 
 		region := debug.Handler.StartTrace("runConfirmLoop")
 		log.Debug("runConfirmLoop receive", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
@@ -844,6 +856,16 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			}
 			newTxMerged = true
 		}
+		//  schedule prefetch once, and only when  unconfirmedResult is valid and is not merged
+		if unconfirmedResult.err != nil && txIndex > p.mergedTxIndex {
+			if _, ok := p.txReqPrefetchRecord[txIndex]; !ok {
+				p.txReqPrefetchRecord[txIndex] = struct{}{}
+				// do prefetch in advance.
+				unconfirmedResult.prefetchAddr = true
+				p.txResultChan <- unconfirmedResult
+			}
+		}
+
 		txSize := len(p.allTxReqs)
 		// usually, the the last Tx could be the bottleneck it could be very slow,
 		// so it is better for us to enter stage 2 a bit earlier
@@ -898,7 +920,7 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 	for {
 		var mergedTxIndex int
 		select {
-		case <-p.stopConfirmChan:
+		case <-p.stopConfirmStage2Chan:
 			for len(p.confirmStage2Chan) > 0 {
 				<-p.confirmStage2Chan
 			}
@@ -1044,6 +1066,7 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 			"txIndex", lastResult.txReq.txIndex, "mergedTxIndex", p.mergedTxIndex)
 		region2 := debug.Handler.StartTrace("valid, deliver to process")
 		// result is valid, deliver it to main processor
+		lastResult.prefetchAddr = false
 		p.txResultChan <- lastResult
 		// wait until merged TxIndex is updated
 		<-lastResult.txReq.curTxChan
@@ -1241,6 +1264,7 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	p.unconfirmedStateDBs = new(sync.Map) // make(map[int]*state.ParallelStateDB)
 	p.pendingConfirmResults = make(map[int][]*ParallelTxResult, 200)
 	p.txReqExecuteRecord = make(map[int]int, 200)
+	p.txReqPrefetchRecord = make(map[int]struct{}, 200)
 	p.txReqExecuteCount = 0
 }
 
@@ -1352,6 +1376,11 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 				}
 			}
 			log.Debug("ProcessParallel shadow slot stopped", "slotIndex", i)
+		}
+		for {
+			if len(p.txResultChan) > 0 { // drop prefetch addr?
+				<-p.txResultChan
+			}
 		}
 		// wait until the confirm routine is stopped
 		p.stopConfirmChan <- struct{}{}
