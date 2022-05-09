@@ -728,6 +728,8 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 			continue
 		}
 		if result.prefetchAddr {
+			log.Info("waitUntilNextTxDone prefetchAddr", "p.mergedTxIndex", p.mergedTxIndex,
+				"result.txReq.txIndex", result.txReq.txIndex)
 			statedb.AddrPrefetch(result.slotDB)
 			continue
 		}
@@ -931,6 +933,7 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 				mergedTxIndex = <-p.confirmStage2Chan // drain the chan to get the latest merged txIndex
 			}
 		}
+
 		// stage 2,if all tx have been executed at least once, and its result has been recevied.
 		// in Stage 2, we will run check when merge is advanced.
 		// more aggressive tx result confirm, even for these Txs not in turn
@@ -946,6 +949,7 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 		if endTxIndex > (txSize - 1) {
 			endTxIndex = txSize - 1
 		}
+		log.Info("runConfirmStage2Loop", "startTxIndex", startTxIndex, "endTxIndex", endTxIndex)
 		conflictNumMark := p.debugConflictRedoNum
 		for txIndex := startTxIndex; txIndex < endTxIndex; txIndex++ {
 			p.toConfirmTxIndex(txIndex, true)
