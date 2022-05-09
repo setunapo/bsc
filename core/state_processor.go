@@ -728,8 +728,8 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 			continue
 		}
 		if result.prefetchAddr {
-			log.Info("waitUntilNextTxDone prefetchAddr", "p.mergedTxIndex", p.mergedTxIndex,
-				"result.txReq.txIndex", result.txReq.txIndex)
+			// log.Debug("waitUntilNextTxDone prefetchAddr", "p.mergedTxIndex", p.mergedTxIndex,
+			//	"result.txReq.txIndex", result.txReq.txIndex)
 			statedb.AddrPrefetch(result.slotDB)
 			continue
 		}
@@ -949,7 +949,7 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 		if endTxIndex > (txSize - 1) {
 			endTxIndex = txSize - 1
 		}
-		log.Info("runConfirmStage2Loop", "startTxIndex", startTxIndex, "endTxIndex", endTxIndex)
+		// log.Debug("runConfirmStage2Loop", "startTxIndex", startTxIndex, "endTxIndex", endTxIndex)
 		conflictNumMark := p.debugConflictRedoNum
 		for txIndex := startTxIndex; txIndex < endTxIndex; txIndex++ {
 			p.toConfirmTxIndex(txIndex, true)
@@ -1047,8 +1047,16 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 		valid := p.toConfirmTxIndexResult(lastResult, isStage2)
 		staticSlotIndex := lastResult.txReq.staticSlotIndex
 		if !valid {
-			if resultsLen == 1 || isStage2 { // for Stage 2, we only check its latest result.
-				if !isStage2 || p.txReqExecuteRecord[lastResult.txReq.txIndex] < maxRedoCounterInstage1 {
+			if isStage2 {
+				lastResult.txReq.runnable = 1 // needs redo
+				p.debugConflictRedoNum++
+				slot := p.slotState[staticSlotIndex]
+				// interrupt its current routine, and switch to the other routine
+				p.switchSlot(slot, staticSlotIndex)
+				return false
+			}
+			if resultsLen == 1 { // for Stage 2, we only check its latest result.
+				if p.txReqExecuteRecord[lastResult.txReq.txIndex] < maxRedoCounterInstage1 {
 					lastResult.txReq.runnable = 1 // needs redo
 					p.debugConflictRedoNum++
 				}
