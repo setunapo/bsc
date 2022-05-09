@@ -728,8 +728,8 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 			continue
 		}
 		if result.prefetchAddr {
-			// log.Debug("waitUntilNextTxDone prefetchAddr", "p.mergedTxIndex", p.mergedTxIndex,
-			//	"result.txReq.txIndex", result.txReq.txIndex)
+			log.Debug("waitUntilNextTxDone prefetchAddr", "p.mergedTxIndex", p.mergedTxIndex,
+				"result.txReq.txIndex", result.txReq.txIndex)
 			statedb.AddrPrefetch(result.slotDB)
 			continue
 		}
@@ -920,7 +920,7 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 
 func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 	for {
-		var mergedTxIndex int
+		// var mergedTxIndex int
 		select {
 		case <-p.stopConfirmStage2Chan:
 			for len(p.confirmStage2Chan) > 0 {
@@ -928,9 +928,9 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 			}
 			p.stopSlotChan <- -1
 			continue
-		case mergedTxIndex = <-p.confirmStage2Chan:
+		case <-p.confirmStage2Chan:
 			for len(p.confirmStage2Chan) > 0 {
-				mergedTxIndex = <-p.confirmStage2Chan // drain the chan to get the latest merged txIndex
+				<-p.confirmStage2Chan // drain the chan to get the latest merged txIndex
 			}
 		}
 
@@ -943,13 +943,13 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 		//   otherwise, do conflict check without WBNB makeup, but we will ignor WBNB's balance conflict.
 		// throw these likely conflicted tx back to re-execute
 		region := debug.Handler.StartTrace("runConfirmStage2Loop")
-		startTxIndex := mergedTxIndex + 2 // stage 2's will start from the next target merge index
+		startTxIndex := p.mergedTxIndex + 2 // stage 2's will start from the next target merge index
 		endTxIndex := startTxIndex + stage2CheckNumber
 		txSize := len(p.allTxReqs)
 		if endTxIndex > (txSize - 1) {
 			endTxIndex = txSize - 1
 		}
-		// log.Debug("runConfirmStage2Loop", "startTxIndex", startTxIndex, "endTxIndex", endTxIndex)
+		log.Debug("runConfirmStage2Loop", "startTxIndex", startTxIndex, "endTxIndex", endTxIndex)
 		conflictNumMark := p.debugConflictRedoNum
 		for txIndex := startTxIndex; txIndex < endTxIndex; txIndex++ {
 			p.toConfirmTxIndex(txIndex, true)
@@ -1008,15 +1008,15 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 	defer debug.Handler.StartRegionAuto("toConfirmTxIndex")()
 	// var targetTxIndex int
 	if targetTxIndex <= p.mergedTxIndex {
-		log.Warn("toConfirmTxIndex in stage 2, invalid txIndex",
-			"targetTxIndex", targetTxIndex, "isStage2", isStage2)
+		log.Warn("toConfirmTxIndex, invalid txIndex",
+			"targetTxIndex", targetTxIndex, "p.mergedTxIndex", p.mergedTxIndex, "isStage2", isStage2)
 		return false
 	}
 	if targetTxIndex == p.mergedTxIndex+1 && isStage2 {
 		// this is the one that can been merged,
 		// others are for likely conflict check, since it is not their tuen.
 		log.Warn("toConfirmTxIndex in stage 2, invalid txIndex",
-			"targetTxIndex", targetTxIndex, "isStage2", isStage2)
+			"targetTxIndex", targetTxIndex, "p.mergedTxIndex", p.mergedTxIndex)
 		return false
 	}
 
