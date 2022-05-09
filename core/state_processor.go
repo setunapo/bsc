@@ -52,11 +52,11 @@ const (
 	farDiffLayerTimeout    = 2
 	maxUnitSize            = 10
 	dispatchPolicyStatic   = 1
-	dispatchPolicyDynamic  = 2  // not supported
-	maxRedoCounterInstage1 = 4  // try 2, 4, 10, or no limit? not needed
-	stage2CheckNumber      = 20 // not fixed, use decrease?
-	stage2RedoNumber       = 3
-	stage2ReservedNum      = 3 // ?
+	dispatchPolicyDynamic  = 2 // not supported
+	// maxRedoCounterInstage1 = 4  // try 2, 4, 10, or no limit? not needed
+	stage2CheckNumber = 20 // not fixed, use decrease?
+	stage2RedoNumber  = 3
+	stage2ReservedNum = 3 // ?
 )
 
 var dispatchPolicy = dispatchPolicyStatic
@@ -1056,10 +1056,8 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 				return false
 			}
 			if resultsLen == 1 { // for Stage 2, we only check its latest result.
-				if p.txReqExecuteRecord[lastResult.txReq.txIndex] < maxRedoCounterInstage1 {
-					lastResult.txReq.runnable = 1 // needs redo
-					p.debugConflictRedoNum++
-				}
+				lastResult.txReq.runnable = 1 // needs redo
+				p.debugConflictRedoNum++
 				slot := p.slotState[staticSlotIndex]
 				// interrupt its current routine, and switch to the other routine
 				p.switchSlot(slot, staticSlotIndex)
