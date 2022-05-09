@@ -939,7 +939,7 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 		//   if lucky, it is the Tx's turn, we will do conflict check with WBNB makeup
 		//   otherwise, do conflict check without WBNB makeup, but we will ignor WBNB's balance conflict.
 		// throw these likely conflicted tx back to re-execute
-		region := debug.Handler.StartTrace("runConfirmLoop")
+		region := debug.Handler.StartTrace("runConfirmStage2Loop")
 		startTxIndex := mergedTxIndex + 2 // stage 2's will start from the next target merge index
 		endTxIndex := startTxIndex + stage2CheckNumber
 		txSize := len(p.allTxReqs)
