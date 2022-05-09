@@ -447,6 +447,7 @@ type ParallelTxResult struct {
 
 type ParallelTxRequest struct {
 	txIndex         int
+	baseTxIndex     int
 	staticSlotIndex int // static dispatched id
 	tx              *types.Transaction
 	// slotDB         *state.ParallelStateDB
@@ -458,7 +459,7 @@ type ParallelTxRequest struct {
 	usedGas        *uint64
 	curTxChan      chan int
 	systemAddrRedo bool
-	runnable       int32 // we only run a Tx once or if it needs redo
+	runnable       int32 // we only run a Tx once or if it needs redo, 0: runnable, 1: running, 2: confirming
 }
 
 // to create and start the execution slot goroutines
@@ -720,6 +721,7 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 		if result.updateSlotDB {
 			// the target slot is waiting for new slotDB
 			slotState := p.slotState[result.slotIndex]
+			result.txReq.baseTxIndex = p.mergedTxIndex
 			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, result.txReq.txIndex,
 				p.mergedTxIndex, result.keepSystem, p.unconfirmedStateDBs)
 			slotDB.SetSlotIndex(result.slotIndex)
@@ -1008,8 +1010,8 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 	defer debug.Handler.StartRegionAuto("toConfirmTxIndex")()
 	// var targetTxIndex int
 	if targetTxIndex <= p.mergedTxIndex {
-		log.Warn("toConfirmTxIndex, invalid txIndex",
-			"targetTxIndex", targetTxIndex, "p.mergedTxIndex", p.mergedTxIndex, "isStage2", isStage2)
+		// log.Warn("toConfirmTxIndex, invalid txIndex",
+		//	"targetTxIndex", targetTxIndex, "p.mergedTxIndex", p.mergedTxIndex, "isStage2", isStage2)
 		return false
 	}
 	if targetTxIndex == p.mergedTxIndex+1 && isStage2 {
@@ -1196,6 +1198,11 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 				if stealTxReq.txIndex < startTxIndex {
 					continue
 				}
+				if curSlot.activatedId != slotType {
+					interrupted = true
+					break
+				}
+
 				if !atomic.CompareAndSwapInt32(&stealTxReq.runnable, 1, 0) {
 					// not swapped: txReq.runnable == 0
 					continue

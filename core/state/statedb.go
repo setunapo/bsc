@@ -2037,6 +2037,8 @@ func (s *StateDB) PrepareForParallel() {
 
 func (s *StateDB) AddrPrefetch(slotDb *ParallelStateDB) {
 	if s.prefetcher != nil && len(slotDb.parallel.addressesToPrefetch) > 0 {
+		// log.Info("AddrPrefetch", "slotDb.TxIndex", slotDb.TxIndex(),
+		//	"len(addressesToPrefetch)", len(slotDb.parallel.addressesToPrefetch))
 		s.prefetcher.prefetch(s.originalRoot, slotDb.parallel.addressesToPrefetch, emptyAddr)
 	}
 }
