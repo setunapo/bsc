@@ -1380,7 +1380,9 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		for {
 			if len(p.txResultChan) > 0 { // drop prefetch addr?
 				<-p.txResultChan
+				continue
 			}
+			break
 		}
 		// wait until the confirm routine is stopped
 		p.stopConfirmChan <- struct{}{}
