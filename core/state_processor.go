@@ -1225,6 +1225,44 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 	return result
 }
 
+func (p *ParallelStateProcessor) doCleanUp() {
+	// 1.clean up all slot: primary and shadow, to make sure they are stopped
+	for _, slot := range p.slotState {
+		slot.primaryStopChan <- struct{}{}
+		slot.shadowStopChan <- struct{}{}
+		stopCount := 0
+		for {
+			select {
+			case updateDB := <-p.txResultChan: // in case a slot is requesting a new DB...
+				if updateDB.updateSlotDB {
+					slotState := p.slotState[updateDB.slotIndex]
+					slotState.slotDBChan <- nil
+					continue
+				}
+			case <-p.stopSlotChan:
+				stopCount++
+			}
+			if stopCount == 2 {
+				break
+			}
+		}
+	}
+	// 2.discard delayed txResults if any
+	for {
+		if len(p.txResultChan) > 0 { // drop prefetch addr?
+			<-p.txResultChan
+			continue
+		}
+		break
+	}
+	// 3.make sure the confirm routines are stopped
+	p.stopConfirmChan <- struct{}{}
+	<-p.stopSlotChan
+	log.Debug("ProcessParallel stopped confirm routine")
+	p.stopConfirmStage2Chan <- struct{}{}
+	<-p.stopSlotChan
+}
+
 // Implement BEP-130: Parallel Transaction Execution.
 func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (*state.StateDB, types.Receipts, []*types.Log, uint64, error) {
 	var (
@@ -1305,86 +1343,9 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			commonTxs = append(commonTxs, result.txReq.tx)
 			receipts = append(receipts, result.receipt)
 		}
-		// wait unitl all slot are stopped
-		for _, slot := range p.slotState {
-			slot.primaryStopChan <- struct{}{}
-			slot.shadowStopChan <- struct{}{}
-			stopCount := 0
-			for {
-				select {
-				case updateDB := <-p.txResultChan: // in case a slot is requesting a new DB...
-					if updateDB.updateSlotDB {
-						slotState := p.slotState[updateDB.slotIndex]
-						slotState.slotDBChan <- nil
-						continue
-					}
-				case <-p.stopSlotChan:
-					stopCount++
-				}
-				if stopCount == 2 {
-					break
-				}
-			}
-		}
-		for {
-			if len(p.txResultChan) > 0 { // drop prefetch addr?
-				<-p.txResultChan
-				continue
-			}
-			break
-		}
-		// wait until the confirm routine is stopped
-		p.stopConfirmChan <- struct{}{}
-		<-p.stopSlotChan
-		log.Debug("ProcessParallel stopped confirm routine")
-		p.stopConfirmStage2Chan <- struct{}{}
-		<-p.stopSlotChan
+		// to do clean up when the block is processed
+		p.doCleanUp()
 	}
-	/*
-		else if dispatchPolicy == dispatchPolicyDynamic {
-			for _, txReq := range txReqs {
-				// to optimize the for { for {} } loop code style? it is ok right now.
-				for {
-					if p.queueSameFromAddress(txReq) {
-						break
-					}
-					if p.queueSameToAddress(txReq) {
-						break
-					}
-					// if idle slot available, just dispatch and process next tx.
-					if p.dispatchToHungrySlot(statedb, txReq) {
-						break
-					}
-					log.Debug("ProcessParallel no slot available, wait", "txIndex", txReq.txIndex)
-					// no idle slot, wait until a tx is executed and merged.
-					result := p.waitUntilNextTxDone(statedb, gp)
-
-					// update tx result
-					if result.err != nil {
-						log.Warn("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
-							"resultTxIndex", result.txReq.txIndex, "result.err", result.err)
-						return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txReq.txIndex, result.txReq.tx.Hash().Hex(), result.err)
-					}
-					commonTxs = append(commonTxs, result.txReq.tx)
-					receipts = append(receipts, result.receipt)
-				}
-			}
-			// wait until all tx request are done
-			for len(commonTxs)+len(systemTxs) < txNum {
-				result := p.waitUntilNextTxDone(statedb, gp)
-
-				// update tx result
-				if result.err != nil {
-					log.Error("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
-						"resultTxIndex", result.txReq.txIndex, "result.err", result.err)
-					return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txReq.txIndex, result.txReq.tx.Hash().Hex(), result.err)
-				}
-
-				commonTxs = append(commonTxs, result.txReq.tx)
-				receipts = append(receipts, result.receipt)
-			}
-		}
-	*/
 
 	// len(commonTxs) could be 0, such as: https://bscscan.com/block/14580486
 	if len(commonTxs) > 0 {
