@@ -199,9 +199,10 @@ type StateDB struct {
 	fullProcessed  bool
 	pipeCommit     bool
 
-	snapMux           sync.Mutex
 	snaps             *snapshot.Tree
 	snap              snapshot.Snapshot
+	snapAccountMux    sync.Mutex // Mutex for snap account access
+	snapStorageMux    sync.Mutex // Mutex for snap storage access
 	storeParallelLock sync.RWMutex
 	snapParallelLock  sync.RWMutex // for parallel mode, for main StateDB, slot will read snapshot, while processor will write.
 	snapDestructs     map[common.Address]struct{}
@@ -1463,10 +1464,10 @@ func (s *StateDB) AccountsIntermediateRoot() {
 				// enough to track account updates at commit time, deletions need tracking
 				// at transaction boundary level to ensure we capture state clearing.
 				if s.snap != nil && !obj.deleted {
-					s.snapMux.Lock()
+					s.snapAccountMux.Lock()
 					// It is possible to add unnecessary change, but it is fine.
 					s.snapAccounts[obj.address] = snapshot.SlimAccountRLP(obj.data.Nonce, obj.data.Balance, obj.data.Root, obj.data.CodeHash)
-					s.snapMux.Unlock()
+					s.snapAccountMux.Unlock()
 				}
 				data, err := rlp.EncodeToBytes(obj)
 				if err != nil {
