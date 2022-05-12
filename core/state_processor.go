@@ -1023,6 +1023,9 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 				continue
 			}
 			result := p.executeInSlot(slotIndex, stealTxReq)
+			if result == nil { // fixme: code improve, nil means block processed, to be stopped
+				break
+			}
 			p.pendingConfirmChan <- result
 		}
 	}
