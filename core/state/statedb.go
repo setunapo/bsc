@@ -162,13 +162,6 @@ type ParallelState struct {
 	addrStateReadsInSlot   map[common.Address]bool // true: exist, false: not exist or deleted
 	addrStateChangesInSlot map[common.Address]bool // true: created, false: deleted
 
-	nonceReadsInSlotFromTxIndex     map[common.Address]int                 // -1: main db
-	balanceReadsInSlotFromTxIndex   map[common.Address]int                 // -1: main db
-	codeReadsInSlotFromTxIndex      map[common.Address]int                 // -1: main db
-	codeHashReadsInSlotFromTxIndex  map[common.Address]int                 // -1: main db
-	kvReadsInSlotFromTxIndex        map[common.Address]map[common.Hash]int // -1: main db
-	addrStateReadsInSlotFromTxIndex map[common.Address]int                 // -1: main db
-
 	addrSnapDestructsReadsInSlot map[common.Address]bool
 	// addrSnapDestructsChangesInSlot map[common.Address]struct{} // no use to get from unconfirmed DB for efficiency
 
@@ -1213,16 +1206,8 @@ func (s *StateDB) CopyForSlot() *ParallelStateDB {
 		nonceChangesInSlot:           make(map[common.Address]struct{}),     // addressStructPool.Get().(map[common.Address]struct{}),
 		nonceReadsInSlot:             make(map[common.Address]uint64),
 		addrSnapDestructsReadsInSlot: make(map[common.Address]bool),
-
-		nonceReadsInSlotFromTxIndex:     make(map[common.Address]int),
-		balanceReadsInSlotFromTxIndex:   make(map[common.Address]int),
-		codeReadsInSlotFromTxIndex:      make(map[common.Address]int),
-		codeHashReadsInSlotFromTxIndex:  make(map[common.Address]int),
-		kvReadsInSlotFromTxIndex:        make(map[common.Address]map[common.Hash]int),
-		addrStateReadsInSlotFromTxIndex: make(map[common.Address]int),
-
-		isSlotDB:                  true,
-		dirtiedStateObjectsInSlot: make(map[common.Address]*StateObject), // stateObjectsPool.Get().(map[common.Address]*StateObject),
+		isSlotDB:                     true,
+		dirtiedStateObjectsInSlot:    make(map[common.Address]*StateObject), // stateObjectsPool.Get().(map[common.Address]*StateObject),
 	}
 	state := &ParallelStateDB{
 		StateDB: StateDB{
@@ -2384,13 +2369,10 @@ func (s *ParallelStateDB) GetOrNewStateObject(addr common.Address) *StateObject 
 	if stateObject, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
 		return stateObject
 	}
-	var fromTxIndex int = -1
-	stateObject, dbTxIndex, _ := s.getStateObjectFromUnconfirmedDB(addr)
+	stateObject, _ = s.getStateObjectFromUnconfirmedDB(addr)
 
 	if stateObject == nil {
 		stateObject = s.getStateObjectNoSlot(addr) // try to get from base db
-	} else {
-		fromTxIndex = dbTxIndex
 	}
 	if stateObject == nil || stateObject.deleted || stateObject.suicided {
 		stateObject = s.createObject(addr)
@@ -2398,7 +2380,6 @@ func (s *ParallelStateDB) GetOrNewStateObject(addr common.Address) *StateObject 
 	}
 
 	s.parallel.addrStateReadsInSlot[addr] = exist // true: exist, false: not exist
-	s.parallel.addrStateReadsInSlotFromTxIndex[addr] = fromTxIndex
 	return stateObject
 }
 
@@ -2422,16 +2403,14 @@ func (s *ParallelStateDB) Exist(addr common.Address) bool {
 		return exist
 	}
 	// 2.2 Try to get from unconfirmed DB if exist
-	if exist, txIndex, ok := s.getAddrStateFromUnconfirmedDB(addr); ok {
+	if exist, ok := s.getAddrStateFromUnconfirmedDB(addr); ok {
 		s.parallel.addrStateReadsInSlot[addr] = exist // update and cache
-		s.parallel.addrStateReadsInSlotFromTxIndex[addr] = txIndex
 		return exist
 	}
 
 	// 3.Try to get from main StateDB
 	exist := s.getStateObjectNoSlot(addr) != nil
 	s.parallel.addrStateReadsInSlot[addr] = exist // update and cache
-	s.parallel.addrStateReadsInSlotFromTxIndex[addr] = -1
 	return exist
 }
 
@@ -2463,16 +2442,14 @@ func (s *ParallelStateDB) Empty(addr common.Address) bool {
 		return !exist
 	}
 	// 2.2 Try to get from unconfirmed DB if exist
-	if exist, txIndex, ok := s.getAddrStateFromUnconfirmedDB(addr); ok {
+	if exist, ok := s.getAddrStateFromUnconfirmedDB(addr); ok {
 		s.parallel.addrStateReadsInSlot[addr] = exist // update and cache
-		s.parallel.addrStateReadsInSlotFromTxIndex[addr] = txIndex
 		return !exist
 	}
 
 	so := s.getStateObjectNoSlot(addr)
 	empty := (so == nil || so.empty())
 	s.parallel.addrStateReadsInSlot[addr] = !empty // update and cache
-	s.parallel.addrStateReadsInSlotFromTxIndex[addr] = -1
 	return empty
 }
 
@@ -2496,9 +2473,8 @@ func (s *ParallelStateDB) GetBalance(addr common.Address) *big.Int {
 		return balance
 	}
 	// 2.2 Try to get from unconfirmed DB if exist
-	if balance, txIndex := s.getBalanceFromUnconfirmedDB(addr); balance != nil {
+	if balance := s.getBalanceFromUnconfirmedDB(addr); balance != nil {
 		s.parallel.balanceReadsInSlot[addr] = balance
-		s.parallel.balanceReadsInSlotFromTxIndex[addr] = txIndex
 		return balance
 	}
 
@@ -2509,7 +2485,6 @@ func (s *ParallelStateDB) GetBalance(addr common.Address) *big.Int {
 		balance = stateObject.Balance()
 	}
 	s.parallel.balanceReadsInSlot[addr] = balance
-	s.parallel.balanceReadsInSlotFromTxIndex[addr] = -1
 	return balance
 }
 
@@ -2537,9 +2512,8 @@ func (s *ParallelStateDB) GetNonce(addr common.Address) uint64 {
 		return nonce
 	}
 	// 2.2 Try to get from unconfirmed DB if exist
-	if nonce, txIndex, ok := s.getNonceFromUnconfirmedDB(addr); ok {
+	if nonce, ok := s.getNonceFromUnconfirmedDB(addr); ok {
 		s.parallel.nonceReadsInSlot[addr] = nonce
-		s.parallel.nonceReadsInSlotFromTxIndex[addr] = txIndex
 		return nonce
 	}
 
@@ -2550,8 +2524,6 @@ func (s *ParallelStateDB) GetNonce(addr common.Address) uint64 {
 		nonce = stateObject.Nonce()
 	}
 	s.parallel.nonceReadsInSlot[addr] = nonce
-	s.parallel.nonceReadsInSlotFromTxIndex[addr] = -1
-
 	return nonce
 }
 
@@ -2571,9 +2543,8 @@ func (s *ParallelStateDB) GetCode(addr common.Address) []byte {
 		return code
 	}
 	// 2.2 Try to get from unconfirmed DB if exist
-	if code, txIndex, ok := s.getCodeFromUnconfirmedDB(addr); ok {
+	if code, ok := s.getCodeFromUnconfirmedDB(addr); ok {
 		s.parallel.codeReadsInSlot[addr] = code
-		s.parallel.codeReadsInSlotFromTxIndex[addr] = txIndex
 		return code
 	}
 
@@ -2584,7 +2555,6 @@ func (s *ParallelStateDB) GetCode(addr common.Address) []byte {
 		code = stateObject.Code(s.db)
 	}
 	s.parallel.codeReadsInSlot[addr] = code
-	s.parallel.codeReadsInSlotFromTxIndex[addr] = -1
 	return code
 }
 
@@ -2603,9 +2573,8 @@ func (s *ParallelStateDB) GetCodeSize(addr common.Address) int {
 		return len(code) // len(nil) is 0 too
 	}
 	// 2.2 Try to get from unconfirmed DB if exist
-	if code, txIndex, ok := s.getCodeFromUnconfirmedDB(addr); ok {
+	if code, ok := s.getCodeFromUnconfirmedDB(addr); ok {
 		s.parallel.codeReadsInSlot[addr] = code
-		s.parallel.codeReadsInSlotFromTxIndex[addr] = txIndex
 		return len(code) // len(nil) is 0 too
 	}
 
@@ -2619,7 +2588,6 @@ func (s *ParallelStateDB) GetCodeSize(addr common.Address) int {
 		codeSize = stateObject.CodeSize(s.db)
 	}
 	s.parallel.codeReadsInSlot[addr] = code
-	s.parallel.codeReadsInSlotFromTxIndex[addr] = -1
 	return codeSize
 }
 
@@ -2642,9 +2610,8 @@ func (s *ParallelStateDB) GetCodeHash(addr common.Address) common.Hash {
 		return codeHash
 	}
 	// 2.2 Try to get from unconfirmed DB if exist
-	if codeHash, txIndex, ok := s.getCodeHashFromUnconfirmedDB(addr); ok {
+	if codeHash, ok := s.getCodeHashFromUnconfirmedDB(addr); ok {
 		s.parallel.codeHashReadsInSlot[addr] = codeHash
-		s.parallel.codeHashReadsInSlotFromTxIndex[addr] = txIndex
 		return codeHash
 	}
 	// 3. Try to get from main StateObejct
@@ -2654,7 +2621,6 @@ func (s *ParallelStateDB) GetCodeHash(addr common.Address) common.Hash {
 		codeHash = common.BytesToHash(stateObject.CodeHash())
 	}
 	s.parallel.codeHashReadsInSlot[addr] = codeHash
-	s.parallel.codeHashReadsInSlotFromTxIndex[addr] = -1
 	return codeHash
 }
 
@@ -2688,13 +2654,11 @@ func (s *ParallelStateDB) GetState(addr common.Address, hash common.Hash) common
 		}
 	}
 	// 2.2 Try to get from unconfirmed DB if exist
-	if val, txIndex, ok := s.getKVFromUnconfirmedDB(addr, hash); ok {
+	if val, ok := s.getKVFromUnconfirmedDB(addr, hash); ok {
 		if s.parallel.kvReadsInSlot[addr] == nil {
 			s.parallel.kvReadsInSlot[addr] = newStorage(false)
-			s.parallel.kvReadsInSlotFromTxIndex[addr] = make(map[common.Hash]int)
 		}
 		s.parallel.kvReadsInSlot[addr].StoreValue(hash, val) // update cache
-		s.parallel.kvReadsInSlotFromTxIndex[addr][hash] = txIndex
 		return val
 	}
 
@@ -2706,10 +2670,8 @@ func (s *ParallelStateDB) GetState(addr common.Address, hash common.Hash) common
 	}
 	if s.parallel.kvReadsInSlot[addr] == nil {
 		s.parallel.kvReadsInSlot[addr] = newStorage(false)
-		s.parallel.kvReadsInSlotFromTxIndex[addr] = make(map[common.Hash]int)
 	}
 	s.parallel.kvReadsInSlot[addr].StoreValue(hash, val) // update cache
-	s.parallel.kvReadsInSlotFromTxIndex[addr][hash] = -1
 	return val
 }
 
@@ -2726,13 +2688,11 @@ func (s *ParallelStateDB) GetCommittedState(addr common.Address, hash common.Has
 		}
 	}
 	// 2.2 Try to get from unconfirmed DB if exist
-	if val, txIndex, ok := s.getKVFromUnconfirmedDB(addr, hash); ok {
+	if val, ok := s.getKVFromUnconfirmedDB(addr, hash); ok {
 		if s.parallel.kvReadsInSlot[addr] == nil {
 			s.parallel.kvReadsInSlot[addr] = newStorage(false)
-			s.parallel.kvReadsInSlotFromTxIndex[addr] = make(map[common.Hash]int)
 		}
 		s.parallel.kvReadsInSlot[addr].StoreValue(hash, val) // update cache
-		s.parallel.kvReadsInSlotFromTxIndex[addr][hash] = txIndex
 		return val
 	}
 
@@ -2744,10 +2704,8 @@ func (s *ParallelStateDB) GetCommittedState(addr common.Address, hash common.Has
 	}
 	if s.parallel.kvReadsInSlot[addr] == nil {
 		s.parallel.kvReadsInSlot[addr] = newStorage(false)
-		s.parallel.kvReadsInSlotFromTxIndex[addr] = make(map[common.Hash]int)
 	}
 	s.parallel.kvReadsInSlot[addr].StoreValue(hash, val) // update cache
-	s.parallel.kvReadsInSlotFromTxIndex[addr][hash] = -1
 	return val
 }
 
@@ -2757,7 +2715,7 @@ func (s *ParallelStateDB) HasSuicided(addr common.Address) bool {
 		return obj.suicided
 	}
 	// 2.Try to get from uncomfirmed
-	if exist, _, ok := s.getAddrStateFromUnconfirmedDB(addr); ok { // fixme?
+	if exist, ok := s.getAddrStateFromUnconfirmedDB(addr); ok {
 		return !exist
 	}
 
@@ -2987,10 +2945,9 @@ func (s *ParallelStateDB) Suicide(addr common.Address) bool {
 	stateObject = s.parallel.dirtiedStateObjectsInSlot[addr]
 	if stateObject == nil {
 		// 2.Try to get from uncomfirmed, if deleted return false, since the address does not exist
-		if obj, txIndex, ok := s.getStateObjectFromUnconfirmedDB(addr); ok {
+		if obj, ok := s.getStateObjectFromUnconfirmedDB(addr); ok {
 			stateObject = obj
 			s.parallel.addrStateReadsInSlot[addr] = !stateObject.deleted // true: exist, false: deleted
-			s.parallel.addrStateReadsInSlotFromTxIndex[addr] = txIndex
 			if stateObject.deleted {
 				log.Error("Suicide addr alreay deleted in confirmed DB", "txIndex", s.txIndex, "addr", addr)
 				return false
@@ -3003,12 +2960,10 @@ func (s *ParallelStateDB) Suicide(addr common.Address) bool {
 		stateObject = s.getStateObjectNoSlot(addr)
 		if stateObject == nil {
 			s.parallel.addrStateReadsInSlot[addr] = false // true: exist, false: deleted
-			s.parallel.addrStateReadsInSlotFromTxIndex[addr] = -1
 			log.Error("Suicide addr not exist", "txIndex", s.txIndex, "addr", addr)
 			return false
 		}
 		s.parallel.addrStateReadsInSlot[addr] = true // true: exist, false: deleted
-		s.parallel.addrStateReadsInSlotFromTxIndex[addr] = -1
 	}
 
 	s.journal.append(suicideChange{
@@ -3100,10 +3055,10 @@ func (s *ParallelStateDB) SubRefund(gas uint64) { // fixme: not needed
 //   | BaseTxIndex | Unconfirmed Txs... | Current TxIndex |
 //   -------------------------------------------------------
 // Access from the unconfirmed DB with range&priority:  txIndex -1(previous tx) -> baseTxIndex + 1
-func (s *ParallelStateDB) getBalanceFromUnconfirmedDB(addr common.Address) (*big.Int, int) {
+func (s *ParallelStateDB) getBalanceFromUnconfirmedDB(addr common.Address) *big.Int {
 	if addr == s.parallel.systemAddress {
 		// never get systemaddress from unconfirmed DB
-		return nil, 0
+		return nil
 	}
 
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
@@ -3126,18 +3081,18 @@ func (s *ParallelStateDB) getBalanceFromUnconfirmedDB(addr common.Address) (*big
 				if obj.deleted {
 					balance = common.Big0
 				}
-				return balance, db.txIndex
+				return balance
 			}
 		}
 	}
-	return nil, 0
+	return nil
 }
 
 // Similar to getBalanceFromUnconfirmedDB
-func (s *ParallelStateDB) getNonceFromUnconfirmedDB(addr common.Address) (uint64, int, bool) {
+func (s *ParallelStateDB) getNonceFromUnconfirmedDB(addr common.Address) (uint64, bool) {
 	if addr == s.parallel.systemAddress {
 		// never get systemaddress from unconfirmed DB
-		return 0, 0, false
+		return 0, false
 	}
 
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
@@ -3168,18 +3123,18 @@ func (s *ParallelStateDB) getNonceFromUnconfirmedDB(addr common.Address) (uint64
 			if obj.deleted {
 				nonce = 0
 			}
-			return nonce, db.TxIndex(), true
+			return nonce, true
 		}
 	}
-	return 0, 0, false
+	return 0, false
 }
 
 // Similar to getBalanceFromUnconfirmedDB
 // It is not only for code, but also codeHash and codeSize, we return the *StateObject for convienence.
-func (s *ParallelStateDB) getCodeFromUnconfirmedDB(addr common.Address) ([]byte, int, bool) {
+func (s *ParallelStateDB) getCodeFromUnconfirmedDB(addr common.Address) ([]byte, bool) {
 	if addr == s.parallel.systemAddress {
 		// never get systemaddress from unconfirmed DB
-		return nil, 0, false
+		return nil, false
 	}
 
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
@@ -3209,18 +3164,18 @@ func (s *ParallelStateDB) getCodeFromUnconfirmedDB(addr common.Address) ([]byte,
 			if obj.deleted {
 				code = nil
 			}
-			return code, db.txIndex, true
+			return code, true
 		}
 	}
-	return nil, 0, false
+	return nil, false
 }
 
 // Similar to getCodeFromUnconfirmedDB
 // but differ when address is deleted or not exist
-func (s *ParallelStateDB) getCodeHashFromUnconfirmedDB(addr common.Address) (common.Hash, int, bool) {
+func (s *ParallelStateDB) getCodeHashFromUnconfirmedDB(addr common.Address) (common.Hash, bool) {
 	if addr == s.parallel.systemAddress {
 		// never get systemaddress from unconfirmed DB
-		return common.Hash{}, 0, false
+		return common.Hash{}, false
 	}
 
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
@@ -3250,20 +3205,20 @@ func (s *ParallelStateDB) getCodeHashFromUnconfirmedDB(addr common.Address) (com
 			if !obj.deleted {
 				codeHash = common.BytesToHash(obj.CodeHash())
 			}
-			return codeHash, db.txIndex, true
+			return codeHash, true
 		}
 	}
-	return common.Hash{}, 0, false
+	return common.Hash{}, false
 }
 
 // Similar to getCodeFromUnconfirmedDB
 // It is for address state check of: Exist(), Empty() and HasSuicided()
 // Since the unconfirmed DB should have done Finalise() with `deleteEmptyObjects = true`
 // If the dirty address is empty or suicided, it will be marked as deleted, so we only need to return `deleted` or not.
-func (s *ParallelStateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (bool, int, bool) {
+func (s *ParallelStateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (bool, bool) {
 	if addr == s.parallel.systemAddress {
 		// never get systemaddress from unconfirmed DB
-		return false, 0, false
+		return false, false
 	}
 
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
@@ -3280,14 +3235,14 @@ func (s *ParallelStateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (bo
 					continue
 				}
 
-				return exist, db.txIndex, true
+				return exist, true
 			}
 		}
 	}
-	return false, 0, false
+	return false, false
 }
 
-func (s *ParallelStateDB) getKVFromUnconfirmedDB(addr common.Address, key common.Hash) (common.Hash, int, bool) {
+func (s *ParallelStateDB) getKVFromUnconfirmedDB(addr common.Address, key common.Hash) (common.Hash, bool) {
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
@@ -3295,37 +3250,37 @@ func (s *ParallelStateDB) getKVFromUnconfirmedDB(addr common.Address, key common
 			defer db.wbnbMakeUpLock.RUnlock()
 			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok { // if deleted on merge, can get from main StateDB, ok but fixme: concurrent safe
 				if obj.deleted {
-					return common.Hash{}, db.txIndex, true
+					return common.Hash{}, true
 				}
 				if _, ok := db.parallel.kvChangesInSlot[addr]; ok {
 					if val, exist := obj.dirtyStorage.GetValue(key); exist {
-						return val, db.txIndex, true
+						return val, true
 					}
 					if val, exist := obj.pendingStorage.GetValue(key); exist { // fixme: can be removed
 						log.Error("Get KV from Unconfirmed StateDB, in pending",
 							"my txIndex", s.txIndex, "DB's txIndex", i, "addr", addr,
 							"key", key, "val", val)
-						return val, db.txIndex, true
+						return val, true
 					}
 				}
 			}
 		}
 	}
-	return common.Hash{}, 0, false
+	return common.Hash{}, false
 }
 
-func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (*StateObject, int, bool) {
+func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (*StateObject, bool) {
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
 			db.wbnbMakeUpLock.RLock()
 			defer db.wbnbMakeUpLock.RUnlock()
 			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok { // if deleted on merge, can get from main StateDB, ok but fixme: concurrent safe
-				return obj, db.txIndex, true
+				return obj, true
 			}
 		}
 	}
-	return nil, 0, false
+	return nil, false
 }
 
 func (s *ParallelStateDB) UpdateUnConfirmDBs(unconfirmedDBs map[int]*ParallelStateDB) {
@@ -3339,7 +3294,7 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 	// for nonce
 	for addr, nonceSlot := range slotDB.parallel.nonceReadsInSlot {
 		if isStage2 { // update slotDB's unconfirmed DB list and try
-			if nonceUnconfirm, _, ok := slotDB.getNonceFromUnconfirmedDB(addr); ok {
+			if nonceUnconfirm, ok := slotDB.getNonceFromUnconfirmedDB(addr); ok {
 				if nonceSlot != nonceUnconfirm {
 					log.Debug("IsSlotDBReadsValid nonce read is invalid in unconfirmed", "addr", addr,
 						"nonceSlot", nonceSlot, "nonceUnconfirm", nonceUnconfirm, "SlotIndex", slotDB.parallel.SlotIndex,
@@ -3359,7 +3314,7 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 	// balance
 	for addr, balanceSlot := range slotDB.parallel.balanceReadsInSlot {
 		if isStage2 { // update slotDB's unconfirmed DB list and try
-			if balanceUnconfirm, _ := slotDB.getBalanceFromUnconfirmedDB(addr); balanceUnconfirm != nil {
+			if balanceUnconfirm := slotDB.getBalanceFromUnconfirmedDB(addr); balanceUnconfirm != nil {
 				if balanceSlot.Cmp(balanceUnconfirm) == 0 {
 					continue
 				}
@@ -3415,7 +3370,7 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 		conflict := false
 		slotStorage.Range(func(keySlot, valSlot interface{}) bool {
 			if isStage2 { // update slotDB's unconfirmed DB list and try
-				if valUnconfirm, _, ok := slotDB.getKVFromUnconfirmedDB(addr, valSlot.(common.Hash)); ok {
+				if valUnconfirm, ok := slotDB.getKVFromUnconfirmedDB(addr, valSlot.(common.Hash)); ok {
 					if !bytes.Equal(valSlot.(common.Hash).Bytes(), valUnconfirm.Bytes()) {
 						log.Debug("IsSlotDBReadsValid nonce read is invalid in unconfirmed", "addr", addr,
 							"valSlot", valSlot.(common.Hash), "valUnconfirm", valUnconfirm,
