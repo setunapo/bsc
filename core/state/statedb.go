@@ -3335,16 +3335,7 @@ func (s *ParallelStateDB) UpdateUnConfirmDBs(unconfirmedDBs map[int]*ParallelSta
 // in stage2, we do unconfirmed conflict detect
 func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int) bool {
 	slotDB := s
-	if !slotDB.parallel.isSlotDB {
-		log.Error("IsSlotDBReadsValid slotDB should be slot DB", "SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
-		return false
-	}
-
 	mainDB := slotDB.parallel.baseStateDB
-	if mainDB.parallel.isSlotDB {
-		log.Error("IsSlotDBReadsValid s should be main DB", "SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
-		return false
-	}
 	// for nonce
 	for addr, nonceSlot := range slotDB.parallel.nonceReadsInSlot {
 		if isStage2 { // update slotDB's unconfirmed DB list and try

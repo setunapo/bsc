@@ -103,6 +103,7 @@ type ParallelStateProcessor struct {
 	txReqExecuteRecord    map[int]int // for each the execute count of each Tx
 	txReqExecuteCount     int
 	inConfirmStage2       bool
+	nextStage2TxIndex     int
 }
 
 func NewParallelStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consensus.Engine, parallelNum int, queueSize int) *ParallelStateProcessor {
@@ -540,6 +541,7 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	p.pendingConfirmResults = make(map[int][]*ParallelTxResult, 200)
 	p.txReqExecuteRecord = make(map[int]int, 200)
 	p.txReqExecuteCount = 0
+	p.nextStage2TxIndex = 0
 }
 
 /*
@@ -866,8 +868,8 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 		if targetTxIndex <= p.mergedTxIndex+1 {
 			// this is the one that can been merged,
 			// others are for likely conflict check, since it is not their tuen.
-			log.Warn("toConfirmTxIndex in stage 2, invalid txIndex",
-				"targetTxIndex", targetTxIndex, "p.mergedTxIndex", p.mergedTxIndex)
+			// log.Warn("toConfirmTxIndex in stage 2, invalid txIndex",
+			//	"targetTxIndex", targetTxIndex, "p.mergedTxIndex", p.mergedTxIndex)
 			return false
 		}
 	} else if targetTxIndex <= p.mergedTxIndex {
@@ -1013,7 +1015,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 			p.pendingConfirmChan <- result
 		}
 		// switched to the other slot.
-		if interrupted || p.inConfirmStage2 {
+		if interrupted {
 			continue
 		}
 
@@ -1106,7 +1108,8 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 
 		// stage 2,if all tx have been executed at least once, and its result has been recevied.
 		// in Stage 2, we will run check when main DB is advanced, i.e., new Tx result has been merged.
-		if p.inConfirmStage2 {
+		if p.inConfirmStage2 && p.mergedTxIndex >= p.nextStage2TxIndex {
+			p.nextStage2TxIndex += p.mergedTxIndex + 20
 			p.confirmStage2Chan <- p.mergedTxIndex
 		}
 	}
