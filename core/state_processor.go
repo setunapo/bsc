@@ -849,7 +849,7 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 		log.Warn("In slot execution error", "error", err,
 			"slotIndex", slotIndex, "txIndex", txReq.txIndex)
 	}
-	p.unconfirmedResults.Store(txReq.txIndex, txResult)
+	p.unconfirmedResults.Store(txReq.txIndex, &txResult)
 	return &txResult
 }
 
@@ -1034,7 +1034,6 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 
 func (p *ParallelStateProcessor) runConfirmLoop() {
 	for {
-		// ParallelTxResult is not confirmed yet
 		var unconfirmedResult *ParallelTxResult
 		select {
 		case <-p.stopConfirmChan:
