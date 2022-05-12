@@ -1198,8 +1198,8 @@ func (s *StateDB) CopyForSlot() *ParallelStateDB {
 	parallel := ParallelState{
 		// use base(dispatcher) slot db's stateObjects.
 		// It is a SyncMap, only readable to slot, not writable
-		stateObjects:        s.parallel.stateObjects,
-		unconfirmedDBInShot: make(map[int]*ParallelStateDB, 100),
+		stateObjects: s.parallel.stateObjects,
+		// unconfirmedDBInShot: make(map[int]*ParallelStateDB, 100),
 
 		codeReadsInSlot:              make(map[common.Address][]byte, 10), // addressStructPool.Get().(map[common.Address]struct{}),
 		codeHashReadsInSlot:          make(map[common.Address]common.Hash),
@@ -2210,7 +2210,7 @@ type ParallelStateDB struct {
 // NewSlotDB creates a new State DB based on the provided StateDB.
 // With parallel, each execution slot would have its own StateDB.
 func NewSlotDB(db *StateDB, systemAddr common.Address, txIndex int, baseTxIndex int, keepSystem bool,
-	unconfirmedDBs *sync.Map /*map[int]*ParallelStateDB*/) *ParallelStateDB {
+	unconfirmedDBs map[int]*ParallelStateDB) *ParallelStateDB {
 	slotDB := db.CopyForSlot()
 	slotDB.txIndex = txIndex
 	slotDB.originalRoot = db.originalRoot
@@ -2221,12 +2221,7 @@ func NewSlotDB(db *StateDB, systemAddr common.Address, txIndex int, baseTxIndex 
 	slotDB.parallel.keepSystemAddressBalance = keepSystem
 	slotDB.storagePool = NewStoragePool()
 	slotDB.EnableWriteOnSharedStorage()
-	for index := baseTxIndex + 1; index < slotDB.txIndex; index++ { // txIndex
-		unconfirmedDB, ok := unconfirmedDBs.Load(index)
-		if ok {
-			slotDB.parallel.unconfirmedDBInShot[index] = unconfirmedDB.(*ParallelStateDB)
-		}
-	}
+	slotDB.parallel.unconfirmedDBInShot = unconfirmedDBs
 
 	// All transactions will pay gas fee to the systemAddr at the end, this address is
 	// deemed to conflict, we handle it specially, clear it now and set it back to the main
@@ -3333,19 +3328,12 @@ func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (
 	return nil, 0, false
 }
 
-func (s *ParallelStateDB) UpdateUnConfirmDBs(baseTxIndex int,
-	unconfirmedDBs *sync.Map /*map[int]*ParallelStateDB*/) {
-	s.parallel.unconfirmedDBInShot = make(map[int]*ParallelStateDB, 100)
-	for index := baseTxIndex + 1; index < s.txIndex; index++ {
-		unconfirmedDB, ok := unconfirmedDBs.Load(index)
-		if ok {
-			s.parallel.unconfirmedDBInShot[index] = unconfirmedDB.(*ParallelStateDB)
-		}
-	}
+func (s *ParallelStateDB) UpdateUnConfirmDBs(unconfirmedDBs map[int]*ParallelStateDB) {
+	s.parallel.unconfirmedDBInShot = unconfirmedDBs
 }
 
 // in stage2, we do unconfirmed conflict detect
-func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int, unconfirmedDBs *sync.Map) bool {
+func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int) bool {
 	slotDB := s
 	if !slotDB.parallel.isSlotDB {
 		log.Error("IsSlotDBReadsValid slotDB should be slot DB", "SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
@@ -3356,9 +3344,6 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int,
 	if mainDB.parallel.isSlotDB {
 		log.Error("IsSlotDBReadsValid s should be main DB", "SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
 		return false
-	}
-	if isStage2 { // update slotDB's unconfirmed DB list and try
-		slotDB.UpdateUnConfirmDBs(mergedTxIndex, unconfirmedDBs)
 	}
 	// for nonce
 	for addr, nonceSlot := range slotDB.parallel.nonceReadsInSlot {
