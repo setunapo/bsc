@@ -505,6 +505,39 @@ func (p *ParallelStateProcessor) init() {
 	}()
 }
 
+// clear slot state for each block.
+func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
+	if txNum == 0 {
+		return
+	}
+	p.mergedTxIndex = -1
+	p.debugConflictRedoNum = 0
+	p.inConfirmStage2 = false
+	// p.txReqAccountSorted = make(map[common.Address][]*ParallelTxRequest) // fixme: to be reused?
+
+	statedb.PrepareForParallel()
+	p.allTxReqs = make([]*ParallelTxRequest, 0)
+	p.slotDBsToRelease = make([]*state.ParallelStateDB, 0, txNum)
+
+	/*
+		stateDBsToRelease := p.slotDBsToRelease
+			go func() {
+				for _, slotDB := range stateDBsToRelease {
+					slotDB.SlotDBPutSyncPool()
+				}
+			}()
+	*/
+	for _, slot := range p.slotState {
+		slot.pendingTxReqList = make([]*ParallelTxRequest, 0)
+		slot.activatedType = 0
+	}
+	p.unconfirmedStateDBs = new(sync.Map) // make(map[int]*state.ParallelStateDB)
+	p.pendingConfirmResults = make(map[int][]*ParallelTxResult, 200)
+	p.txReqExecuteRecord = make(map[int]int, 200)
+	p.txReqPrefetchRecord = make(map[int]struct{}, 200)
+	p.txReqExecuteCount = 0
+}
+
 /*
 // for parallel execute, we put contracts of same address in a slot,
 // since these txs probably would have conflicts
@@ -713,59 +746,42 @@ func (p *ParallelStateProcessor) doStaticDispatch(mainStatedb *state.StateDB, tx
 	}
 */
 
-// wait until the next Tx is executed and its result is merged to the main stateDB
-func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp *GasPool) *ParallelTxResult {
-	var result *ParallelTxResult
-	for {
-		result = <-p.txResultChan
-		// slot may request new slotDB, if a TxReq do not have valid parallel state db
-		if result.updateSlotDB {
-			// the target slot is waiting for new slotDB
-			slotState := p.slotState[result.slotIndex]
-			result.txReq.baseTxIndex = p.mergedTxIndex
-			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, result.txReq.txIndex,
-				p.mergedTxIndex, result.keepSystem, p.unconfirmedStateDBs)
-			slotDB.SetSlotIndex(result.slotIndex)
-			p.slotDBsToRelease = append(p.slotDBsToRelease, slotDB)
-			slotState.slotDBChan <- slotDB
-			continue
+// do conflict detect
+func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, isStage2 bool) bool {
+	slotDB := txResult.slotDB
+	if txResult.err != nil {
+		return true
+	} else if slotDB.SystemAddressRedo() {
+		if !isStage2 {
+			// for system addr redo, it has to wait until it's turn to keep the system address balance
+			txResult.txReq.systemAddrRedo = true
 		}
-		if result.prefetchAddr {
-			log.Debug("waitUntilNextTxDone prefetchAddr", "p.mergedTxIndex", p.mergedTxIndex,
-				"result.txReq.txIndex", result.txReq.txIndex)
-			statedb.AddrPrefetch(result.slotDB)
-			continue
+		return true
+	} else if slotDB.NeedsRedo() {
+		// if this is any reason that indicates this transaction needs to redo, skip the conflict check
+		return true
+	} else {
+		// to check if what the slot db read is correct.
+		// refDetail := slotDB.UnconfirmedRefList()
+		if !slotDB.IsParallelReadsValid(isStage2, p.mergedTxIndex, p.unconfirmedStateDBs) {
+			return true
 		}
-		// ok, the tx result is valid and can be merged
-		break
 	}
-	if err := gp.SubGas(result.receipt.GasUsed); err != nil {
-		log.Error("gas limit reached", "block", result.txReq.block.Number(),
-			"txIndex", result.txReq.txIndex, "GasUsed", result.receipt.GasUsed, "gp.Gas", gp.Gas())
+	return false
+}
+
+func (p *ParallelStateProcessor) switchSlot(slot *SlotState, slotIndex int) {
+	if atomic.CompareAndSwapInt32(&slot.activatedType, 0, 1) {
+		// switch from normal to shadow slot
+		if len(slot.shadowWakeUpChan) == 0 {
+			slot.shadowWakeUpChan <- nil // only notify when target once
+		}
+	} else if atomic.CompareAndSwapInt32(&slot.activatedType, 1, 0) {
+		// switch from shadow to normal slot
+		if len(slot.primaryWakeUpChan) == 0 {
+			slot.primaryWakeUpChan <- nil // only notify when target once
+		}
 	}
-
-	resultTxIndex := result.txReq.txIndex
-	// no need to delete in static dispatch
-	// if dispatchPolicy == dispatchPolicyDynamic {
-	// resultSlotIndex := result.slotIndex
-	// resultSlotState := p.slotState[resultSlotIndex]
-	// resultSlotState.pendingTxReqList = resultSlotState.pendingTxReqList[1:]
-	// }
-	statedb.MergeSlotDB(result.slotDB, result.receipt, resultTxIndex)
-
-	if resultTxIndex != p.mergedTxIndex+1 {
-		log.Error("ProcessParallel tx result out of order", "resultTxIndex", resultTxIndex,
-			"p.mergedTxIndex", p.mergedTxIndex)
-	}
-	p.mergedTxIndex = resultTxIndex
-	// log.Debug("waitUntilNextTxDone result is merged", "result.slotIndex", result.slotIndex,
-	//	"TxIndex", result.txReq.txIndex, "p.mergedTxIndex", p.mergedTxIndex)
-
-	// notify the following Tx, it is merged,
-	// todo(optimize): if next tx is in same slot, it do not need to wait; save this channel cost.
-	result.txReq.curTxChan <- p.mergedTxIndex
-	// 	close(result.txReq.curTxChan)
-	return result
 }
 
 func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxRequest) *ParallelTxResult {
@@ -830,186 +846,6 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 		gpSlot:       gpSlot,
 		evm:          evm,
 		result:       result,
-	}
-}
-
-func (p *ParallelStateProcessor) runConfirmLoop() {
-	for {
-		// ParallelTxResult is not confirmed yet
-		var unconfirmedResult *ParallelTxResult
-		select {
-		case <-p.stopConfirmChan:
-			for len(p.pendingConfirmChan) > 0 {
-				<-p.pendingConfirmChan
-			}
-			p.stopSlotChan <- -1
-			continue
-		case unconfirmedResult = <-p.pendingConfirmChan:
-		}
-		txIndex := unconfirmedResult.txReq.txIndex
-		if txIndex <= p.mergedTxIndex {
-			log.Warn("runConfirmLoop drop merged txReq", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
-			continue
-		}
-
-		if unconfirmedResult.err == nil {
-			if _, ok := p.txReqExecuteRecord[txIndex]; !ok {
-				p.txReqExecuteRecord[txIndex] = 0
-				p.txReqExecuteCount++
-			}
-			p.txReqExecuteRecord[txIndex]++
-		}
-		p.txReqExecuteRecord[txIndex]++
-
-		log.Debug("runConfirmLoop receive", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
-		p.pendingConfirmResultsLock.Lock()
-		p.pendingConfirmResults[txIndex] = append(p.pendingConfirmResults[txIndex], unconfirmedResult)
-		p.pendingConfirmResultsLock.Unlock()
-		newTxMerged := false
-		for {
-			targetTxIndex := p.mergedTxIndex + 1
-			if delivered := p.toConfirmTxIndex(targetTxIndex, false); !delivered {
-				break
-			}
-			newTxMerged = true
-		}
-		//  schedule prefetch once, and only when  unconfirmedResult is valid and is not merged
-		if unconfirmedResult.err == nil && txIndex > p.mergedTxIndex {
-			if _, ok := p.txReqPrefetchRecord[txIndex]; !ok {
-				p.txReqPrefetchRecord[txIndex] = struct{}{}
-				// do prefetch in advance.
-				unconfirmedResult.prefetchAddr = true
-				p.txResultChan <- unconfirmedResult
-			}
-		}
-
-		txSize := len(p.allTxReqs)
-		// usually, the the last Tx could be the bottleneck it could be very slow,
-		// so it is better for us to enter stage 2 a bit earlier
-		targetStage2Count := txSize
-		if txSize > 50 {
-			targetStage2Count = txSize - stage2ReservedNum
-		}
-		if !p.inConfirmStage2 && p.txReqExecuteCount == targetStage2Count {
-			p.inConfirmStage2 = true
-			for i := 0; i < txSize; i++ {
-				p.txReqExecuteRecord[txIndex] = 0 // clear it when enter stage2, for redo limit
-			}
-		}
-		// if no Tx is merged, we will skip the stage 2 check
-		if !newTxMerged {
-			continue
-		}
-
-		// stage 2,if all tx have been executed at least once, and its result has been recevied.
-		// in Stage 2, we will run check when merge is advanced.
-		if p.inConfirmStage2 {
-			// more aggressive tx result confirm, even for these Txs not in turn
-			// now we will be more aggressive:
-			//   do conflcit check , as long as tx result is generated,
-			//   if lucky, it is the Tx's turn, we will do conflict check with WBNB makeup
-			//   otherwise, do conflict check without WBNB makeup, but we will ignor WBNB's balance conflict.
-			// throw these likely conflicted tx back to re-execute
-			/*
-				startTxIndex := p.mergedTxIndex + 2 // stage 2's will start from the next target merge index
-				endTxIndex := startTxIndex + stage2CheckNumber
-				if endTxIndex > (txSize - 1) {
-					endTxIndex = txSize - 1
-				}
-				conflictNumMark := p.debugConflictRedoNum
-				for txIndex := startTxIndex; txIndex < endTxIndex; txIndex++ {
-					p.toConfirmTxIndex(txIndex, true)
-					newConflictNum := p.debugConflictRedoNum - conflictNumMark
-					// if many redo is scheduled, stop now
-					if newConflictNum >= stage2RedoNumber {
-						break
-					}
-				}
-			*/
-			p.confirmStage2Chan <- p.mergedTxIndex
-		}
-	}
-}
-
-func (p *ParallelStateProcessor) runConfirmStage2Loop() {
-	for {
-		// var mergedTxIndex int
-		select {
-		case <-p.stopConfirmStage2Chan:
-			for len(p.confirmStage2Chan) > 0 {
-				<-p.confirmStage2Chan
-			}
-			p.stopSlotChan <- -1
-			continue
-		case <-p.confirmStage2Chan:
-			for len(p.confirmStage2Chan) > 0 {
-				<-p.confirmStage2Chan // drain the chan to get the latest merged txIndex
-			}
-		}
-
-		// stage 2,if all tx have been executed at least once, and its result has been recevied.
-		// in Stage 2, we will run check when merge is advanced.
-		// more aggressive tx result confirm, even for these Txs not in turn
-		// now we will be more aggressive:
-		//   do conflcit check , as long as tx result is generated,
-		//   if lucky, it is the Tx's turn, we will do conflict check with WBNB makeup
-		//   otherwise, do conflict check without WBNB makeup, but we will ignor WBNB's balance conflict.
-		// throw these likely conflicted tx back to re-execute
-		startTxIndex := p.mergedTxIndex + 2 // stage 2's will start from the next target merge index
-		endTxIndex := startTxIndex + stage2CheckNumber
-		txSize := len(p.allTxReqs)
-		if endTxIndex > (txSize - 1) {
-			endTxIndex = txSize - 1
-		}
-		log.Debug("runConfirmStage2Loop", "startTxIndex", startTxIndex, "endTxIndex", endTxIndex)
-		conflictNumMark := p.debugConflictRedoNum
-		for txIndex := startTxIndex; txIndex < endTxIndex; txIndex++ {
-			p.toConfirmTxIndex(txIndex, true)
-			newConflictNum := p.debugConflictRedoNum - conflictNumMark
-			// if many redo is scheduled, stop now
-			if newConflictNum >= stage2RedoNumber {
-				break
-			}
-		}
-	}
-
-}
-
-// do conflict detect
-func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, isStage2 bool) bool {
-	slotDB := txResult.slotDB
-	if txResult.err != nil {
-		return true
-	} else if slotDB.SystemAddressRedo() {
-		if !isStage2 {
-			// for system addr redo, it has to wait until it's turn to keep the system address balance
-			txResult.txReq.systemAddrRedo = true
-		}
-		return true
-	} else if slotDB.NeedsRedo() {
-		// if this is any reason that indicates this transaction needs to redo, skip the conflict check
-		return true
-	} else {
-		// to check if what the slot db read is correct.
-		// refDetail := slotDB.UnconfirmedRefList()
-		if !slotDB.IsParallelReadsValid(isStage2, p.mergedTxIndex, p.unconfirmedStateDBs) {
-			return true
-		}
-	}
-	return false
-}
-
-func (p *ParallelStateProcessor) switchSlot(slot *SlotState, slotIndex int) {
-	if atomic.CompareAndSwapInt32(&slot.activatedType, 0, 1) {
-		// switch from normal to shadow slot
-		if len(slot.shadowWakeUpChan) == 0 {
-			slot.shadowWakeUpChan <- nil // only notify when target once
-		}
-	} else if atomic.CompareAndSwapInt32(&slot.activatedType, 1, 0) {
-		// switch from shadow to normal slot
-		if len(slot.primaryWakeUpChan) == 0 {
-			slot.primaryWakeUpChan <- nil // only notify when target once
-		}
 	}
 }
 
@@ -1192,37 +1028,201 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 	}
 }
 
-// clear slot state for each block.
-func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
-	if txNum == 0 {
-		return
-	}
-	p.mergedTxIndex = -1
-	p.debugConflictRedoNum = 0
-	p.inConfirmStage2 = false
-	// p.txReqAccountSorted = make(map[common.Address][]*ParallelTxRequest) // fixme: to be reused?
+func (p *ParallelStateProcessor) runConfirmLoop() {
+	for {
+		// ParallelTxResult is not confirmed yet
+		var unconfirmedResult *ParallelTxResult
+		select {
+		case <-p.stopConfirmChan:
+			for len(p.pendingConfirmChan) > 0 {
+				<-p.pendingConfirmChan
+			}
+			p.stopSlotChan <- -1
+			continue
+		case unconfirmedResult = <-p.pendingConfirmChan:
+		}
+		txIndex := unconfirmedResult.txReq.txIndex
+		if txIndex <= p.mergedTxIndex {
+			log.Warn("runConfirmLoop drop merged txReq", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
+			continue
+		}
 
-	statedb.PrepareForParallel()
-	p.allTxReqs = make([]*ParallelTxRequest, 0)
-	p.slotDBsToRelease = make([]*state.ParallelStateDB, 0, txNum)
+		if unconfirmedResult.err == nil {
+			if _, ok := p.txReqExecuteRecord[txIndex]; !ok {
+				p.txReqExecuteRecord[txIndex] = 0
+				p.txReqExecuteCount++
+			}
+			p.txReqExecuteRecord[txIndex]++
+		}
+		p.txReqExecuteRecord[txIndex]++
 
-	/*
-		stateDBsToRelease := p.slotDBsToRelease
-			go func() {
-				for _, slotDB := range stateDBsToRelease {
-					slotDB.SlotDBPutSyncPool()
+		log.Debug("runConfirmLoop receive", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
+		p.pendingConfirmResultsLock.Lock()
+		p.pendingConfirmResults[txIndex] = append(p.pendingConfirmResults[txIndex], unconfirmedResult)
+		p.pendingConfirmResultsLock.Unlock()
+		newTxMerged := false
+		for {
+			targetTxIndex := p.mergedTxIndex + 1
+			if delivered := p.toConfirmTxIndex(targetTxIndex, false); !delivered {
+				break
+			}
+			newTxMerged = true
+		}
+		//  schedule prefetch once, and only when  unconfirmedResult is valid and is not merged
+		if unconfirmedResult.err == nil && txIndex > p.mergedTxIndex {
+			if _, ok := p.txReqPrefetchRecord[txIndex]; !ok {
+				p.txReqPrefetchRecord[txIndex] = struct{}{}
+				// do prefetch in advance.
+				unconfirmedResult.prefetchAddr = true
+				p.txResultChan <- unconfirmedResult
+			}
+		}
+
+		txSize := len(p.allTxReqs)
+		// usually, the the last Tx could be the bottleneck it could be very slow,
+		// so it is better for us to enter stage 2 a bit earlier
+		targetStage2Count := txSize
+		if txSize > 50 {
+			targetStage2Count = txSize - stage2ReservedNum
+		}
+		if !p.inConfirmStage2 && p.txReqExecuteCount == targetStage2Count {
+			p.inConfirmStage2 = true
+			for i := 0; i < txSize; i++ {
+				p.txReqExecuteRecord[txIndex] = 0 // clear it when enter stage2, for redo limit
+			}
+		}
+		// if no Tx is merged, we will skip the stage 2 check
+		if !newTxMerged {
+			continue
+		}
+
+		// stage 2,if all tx have been executed at least once, and its result has been recevied.
+		// in Stage 2, we will run check when merge is advanced.
+		if p.inConfirmStage2 {
+			// more aggressive tx result confirm, even for these Txs not in turn
+			// now we will be more aggressive:
+			//   do conflcit check , as long as tx result is generated,
+			//   if lucky, it is the Tx's turn, we will do conflict check with WBNB makeup
+			//   otherwise, do conflict check without WBNB makeup, but we will ignor WBNB's balance conflict.
+			// throw these likely conflicted tx back to re-execute
+			/*
+				startTxIndex := p.mergedTxIndex + 2 // stage 2's will start from the next target merge index
+				endTxIndex := startTxIndex + stage2CheckNumber
+				if endTxIndex > (txSize - 1) {
+					endTxIndex = txSize - 1
 				}
-			}()
-	*/
-	for _, slot := range p.slotState {
-		slot.pendingTxReqList = make([]*ParallelTxRequest, 0)
-		slot.activatedType = 0
+				conflictNumMark := p.debugConflictRedoNum
+				for txIndex := startTxIndex; txIndex < endTxIndex; txIndex++ {
+					p.toConfirmTxIndex(txIndex, true)
+					newConflictNum := p.debugConflictRedoNum - conflictNumMark
+					// if many redo is scheduled, stop now
+					if newConflictNum >= stage2RedoNumber {
+						break
+					}
+				}
+			*/
+			p.confirmStage2Chan <- p.mergedTxIndex
+		}
 	}
-	p.unconfirmedStateDBs = new(sync.Map) // make(map[int]*state.ParallelStateDB)
-	p.pendingConfirmResults = make(map[int][]*ParallelTxResult, 200)
-	p.txReqExecuteRecord = make(map[int]int, 200)
-	p.txReqPrefetchRecord = make(map[int]struct{}, 200)
-	p.txReqExecuteCount = 0
+}
+
+func (p *ParallelStateProcessor) runConfirmStage2Loop() {
+	for {
+		// var mergedTxIndex int
+		select {
+		case <-p.stopConfirmStage2Chan:
+			for len(p.confirmStage2Chan) > 0 {
+				<-p.confirmStage2Chan
+			}
+			p.stopSlotChan <- -1
+			continue
+		case <-p.confirmStage2Chan:
+			for len(p.confirmStage2Chan) > 0 {
+				<-p.confirmStage2Chan // drain the chan to get the latest merged txIndex
+			}
+		}
+
+		// stage 2,if all tx have been executed at least once, and its result has been recevied.
+		// in Stage 2, we will run check when merge is advanced.
+		// more aggressive tx result confirm, even for these Txs not in turn
+		// now we will be more aggressive:
+		//   do conflcit check , as long as tx result is generated,
+		//   if lucky, it is the Tx's turn, we will do conflict check with WBNB makeup
+		//   otherwise, do conflict check without WBNB makeup, but we will ignor WBNB's balance conflict.
+		// throw these likely conflicted tx back to re-execute
+		startTxIndex := p.mergedTxIndex + 2 // stage 2's will start from the next target merge index
+		endTxIndex := startTxIndex + stage2CheckNumber
+		txSize := len(p.allTxReqs)
+		if endTxIndex > (txSize - 1) {
+			endTxIndex = txSize - 1
+		}
+		log.Debug("runConfirmStage2Loop", "startTxIndex", startTxIndex, "endTxIndex", endTxIndex)
+		conflictNumMark := p.debugConflictRedoNum
+		for txIndex := startTxIndex; txIndex < endTxIndex; txIndex++ {
+			p.toConfirmTxIndex(txIndex, true)
+			newConflictNum := p.debugConflictRedoNum - conflictNumMark
+			// if many redo is scheduled, stop now
+			if newConflictNum >= stage2RedoNumber {
+				break
+			}
+		}
+	}
+
+}
+
+// wait until the next Tx is executed and its result is merged to the main stateDB
+func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp *GasPool) *ParallelTxResult {
+	var result *ParallelTxResult
+	for {
+		result = <-p.txResultChan
+		// slot may request new slotDB, if a TxReq do not have valid parallel state db
+		if result.updateSlotDB {
+			// the target slot is waiting for new slotDB
+			slotState := p.slotState[result.slotIndex]
+			result.txReq.baseTxIndex = p.mergedTxIndex
+			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, result.txReq.txIndex,
+				p.mergedTxIndex, result.keepSystem, p.unconfirmedStateDBs)
+			slotDB.SetSlotIndex(result.slotIndex)
+			p.slotDBsToRelease = append(p.slotDBsToRelease, slotDB)
+			slotState.slotDBChan <- slotDB
+			continue
+		}
+		if result.prefetchAddr {
+			log.Debug("waitUntilNextTxDone prefetchAddr", "p.mergedTxIndex", p.mergedTxIndex,
+				"result.txReq.txIndex", result.txReq.txIndex)
+			statedb.AddrPrefetch(result.slotDB)
+			continue
+		}
+		// ok, the tx result is valid and can be merged
+		break
+	}
+	if err := gp.SubGas(result.receipt.GasUsed); err != nil {
+		log.Error("gas limit reached", "block", result.txReq.block.Number(),
+			"txIndex", result.txReq.txIndex, "GasUsed", result.receipt.GasUsed, "gp.Gas", gp.Gas())
+	}
+
+	resultTxIndex := result.txReq.txIndex
+	// no need to delete in static dispatch
+	// if dispatchPolicy == dispatchPolicyDynamic {
+	// resultSlotIndex := result.slotIndex
+	// resultSlotState := p.slotState[resultSlotIndex]
+	// resultSlotState.pendingTxReqList = resultSlotState.pendingTxReqList[1:]
+	// }
+	statedb.MergeSlotDB(result.slotDB, result.receipt, resultTxIndex)
+
+	if resultTxIndex != p.mergedTxIndex+1 {
+		log.Error("ProcessParallel tx result out of order", "resultTxIndex", resultTxIndex,
+			"p.mergedTxIndex", p.mergedTxIndex)
+	}
+	p.mergedTxIndex = resultTxIndex
+	// log.Debug("waitUntilNextTxDone result is merged", "result.slotIndex", result.slotIndex,
+	//	"TxIndex", result.txReq.txIndex, "p.mergedTxIndex", p.mergedTxIndex)
+
+	// notify the following Tx, it is merged,
+	// todo(optimize): if next tx is in same slot, it do not need to wait; save this channel cost.
+	result.txReq.curTxChan <- p.mergedTxIndex
+	// 	close(result.txReq.curTxChan)
+	return result
 }
 
 // Implement BEP-130: Parallel Transaction Execution.
