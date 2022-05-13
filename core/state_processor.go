@@ -56,7 +56,7 @@ const (
 	dispatchPolicyStatic  = 1
 	dispatchPolicyDynamic = 2 // not supported
 	// maxRedoCounterInstage1 = 4  // try 2, 4, 10, or no limit? not needed
-	stage2CheckNumber = 50 // not fixed, use decrease?
+	stage2CheckNumber = 20 // not fixed, use decrease?
 	stage2RedoNumber  = 10
 	stage2AheadNum    = 3 // ?
 )
@@ -1084,23 +1084,13 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 
 		log.Debug("runConfirmLoop receive", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
 		p.pendingConfirmResults[txIndex] = append(p.pendingConfirmResults[txIndex], unconfirmedResult)
-		stage2Schduled := false
+		newTxMerged := false
 		for {
 			targetTxIndex := p.mergedTxIndex + 1
 			if delivered := p.toConfirmTxIndex(targetTxIndex, false); !delivered {
 				break
 			}
-			if stage2Schduled {
-				continue
-			}
-			// schedule stage 2 when new Tx has been merged, schedule once and ASAP
-			// stage 2,if all tx have been executed at least once, and its result has been recevied.
-			// in Stage 2, we will run check when main DB is advanced, i.e., new Tx result has been merged.
-			if p.inConfirmStage2 && p.mergedTxIndex >= p.nextStage2TxIndex {
-				p.nextStage2TxIndex += p.mergedTxIndex + 2000 // fixme:2000 => schedule once
-				p.confirmStage2Chan <- p.mergedTxIndex
-			}
-			stage2Schduled = true
+			newTxMerged = true
 		}
 		// schedule prefetch once, and only when unconfirmedResult is valid and it is not merged
 		if unconfirmedResult.err == nil && txIndex > p.mergedTxIndex {
@@ -1111,7 +1101,16 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 				p.txResultChan <- unconfirmedResult
 			}
 		}
-
+		if !newTxMerged {
+			continue
+		}
+		// schedule stage 2 when new Tx has been merged, schedule once and ASAP
+		// stage 2,if all tx have been executed at least once, and its result has been recevied.
+		// in Stage 2, we will run check when main DB is advanced, i.e., new Tx result has been merged.
+		if p.inConfirmStage2 && p.mergedTxIndex >= p.nextStage2TxIndex {
+			p.nextStage2TxIndex += p.mergedTxIndex + 30 // fixme: more accurate one
+			p.confirmStage2Chan <- p.mergedTxIndex
+		}
 	}
 }
 
@@ -1146,7 +1145,7 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 		}
 		log.Debug("runConfirmStage2Loop", "startTxIndex", startTxIndex, "endTxIndex", endTxIndex)
 		// conflictNumMark := p.debugConflictRedoNum
-		for txIndex := startTxIndex; txIndex < txSize; txIndex++ {
+		for txIndex := startTxIndex; txIndex < endTxIndex; txIndex++ {
 			p.toConfirmTxIndex(txIndex, true)
 			// newConflictNum := p.debugConflictRedoNum - conflictNumMark
 			// to avoid schedule too many redo each time.

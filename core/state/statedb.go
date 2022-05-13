@@ -34,7 +34,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
-	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -2015,7 +2014,6 @@ func (s *StateDB) PrepareForParallel() {
 }
 
 func (s *StateDB) AddrPrefetch(slotDb *ParallelStateDB) {
-	defer debug.Handler.StartRegionAuto("AddrPrefetch")()
 	addressesToPrefetch := make([][]byte, 0, len(slotDb.parallel.dirtiedStateObjectsInSlot))
 	for addr, obj := range slotDb.parallel.dirtiedStateObjectsInSlot {
 		if obj.deleted {
