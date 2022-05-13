@@ -1071,15 +1071,36 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			p.txReqExecuteRecord[txIndex]++
 		}
 
+		txSize := len(p.allTxReqs)
+		// usually, the the last Tx could be the bottleneck it could be very slow,
+		// so it is better for us to enter stage 2 a bit earlier
+		targetStage2Count := txSize
+		if txSize > 50 {
+			targetStage2Count = txSize - stage2AheadNum
+		}
+		if !p.inConfirmStage2 && p.txReqExecuteCount == targetStage2Count {
+			p.inConfirmStage2 = true
+		}
+
 		log.Debug("runConfirmLoop receive", "txIndex", txIndex, "p.mergedTxIndex", p.mergedTxIndex)
 		p.pendingConfirmResults[txIndex] = append(p.pendingConfirmResults[txIndex], unconfirmedResult)
-		newTxMerged := false
+		stage2Schduled := false
 		for {
 			targetTxIndex := p.mergedTxIndex + 1
 			if delivered := p.toConfirmTxIndex(targetTxIndex, false); !delivered {
 				break
 			}
-			newTxMerged = true
+			if stage2Schduled {
+				continue
+			}
+			// schedule stage 2 when new Tx has been merged, schedule once and ASAP
+			// stage 2,if all tx have been executed at least once, and its result has been recevied.
+			// in Stage 2, we will run check when main DB is advanced, i.e., new Tx result has been merged.
+			if p.inConfirmStage2 && p.mergedTxIndex >= p.nextStage2TxIndex {
+				p.nextStage2TxIndex += p.mergedTxIndex + 2000 // fixme:2000 => schedule once
+				p.confirmStage2Chan <- p.mergedTxIndex
+			}
+			stage2Schduled = true
 		}
 		// schedule prefetch once, and only when unconfirmedResult is valid and it is not merged
 		if unconfirmedResult.err == nil && txIndex > p.mergedTxIndex {
@@ -1091,27 +1112,6 @@ func (p *ParallelStateProcessor) runConfirmLoop() {
 			}
 		}
 
-		txSize := len(p.allTxReqs)
-		// usually, the the last Tx could be the bottleneck it could be very slow,
-		// so it is better for us to enter stage 2 a bit earlier
-		targetStage2Count := txSize
-		if txSize > 50 {
-			targetStage2Count = txSize - stage2AheadNum
-		}
-		if !p.inConfirmStage2 && p.txReqExecuteCount == targetStage2Count {
-			p.inConfirmStage2 = true
-		}
-		// if no Tx is merged, we will skip the stage 2 check
-		if !newTxMerged {
-			continue
-		}
-
-		// stage 2,if all tx have been executed at least once, and its result has been recevied.
-		// in Stage 2, we will run check when main DB is advanced, i.e., new Tx result has been merged.
-		if p.inConfirmStage2 && p.mergedTxIndex >= p.nextStage2TxIndex {
-			p.nextStage2TxIndex += p.mergedTxIndex + 20
-			p.confirmStage2Chan <- p.mergedTxIndex
-		}
 	}
 }
 
@@ -1130,7 +1130,6 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 				<-p.confirmStage2Chan // drain the chan to get the latest merged txIndex
 			}
 		}
-
 		// stage 2,if all tx have been executed at least once, and its result has been recevied.
 		// in Stage 2, we will run check when merge is advanced.
 		// more aggressive tx result confirm, even for these Txs not in turn
@@ -1146,14 +1145,18 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 			endTxIndex = txSize - 1
 		}
 		log.Debug("runConfirmStage2Loop", "startTxIndex", startTxIndex, "endTxIndex", endTxIndex)
-		conflictNumMark := p.debugConflictRedoNum
-		for txIndex := startTxIndex; txIndex < endTxIndex; txIndex++ {
+		// conflictNumMark := p.debugConflictRedoNum
+		for txIndex := startTxIndex; txIndex < txSize; txIndex++ {
 			p.toConfirmTxIndex(txIndex, true)
-			newConflictNum := p.debugConflictRedoNum - conflictNumMark
+			// newConflictNum := p.debugConflictRedoNum - conflictNumMark
 			// to avoid schedule too many redo each time.
-			if newConflictNum >= stage2RedoNumber {
-				break
-			}
+			// if newConflictNum >= stage2RedoNumber {
+			// break
+			//}
+		}
+		// make sure all slots are wake up
+		for i := 0; i < p.parallelNum; i++ {
+			p.switchSlot(i)
 		}
 	}
 
