@@ -2085,6 +2085,9 @@ func (s *StateDB) MergeSlotDB(slotDb *ParallelStateDB, slotReceipt *types.Receip
 			// dirtyObj.db = s
 			// dirtyObj.finalise(true) // true: prefetch on dispatcher
 			mainObj = dirtyObj.deepCopy(s)
+			if addr == WBNBAddress && slotDb.wbnbMakeUpBalance != nil {
+				mainObj.setBalance(slotDb.wbnbMakeUpBalance)
+			}
 			mainObj.finalise(true)
 			s.storeStateObj(addr, mainObj)
 			// fixme: should not delete, would cause unconfirmed DB incorrect?
@@ -2142,6 +2145,9 @@ func (s *StateDB) MergeSlotDB(slotDb *ParallelStateDB, slotReceipt *types.Receip
 					// dirtyObj.Nonce() should not be less than newMainObj
 					newMainObj.setNonce(dirtyObj.Nonce())
 				}
+			}
+			if addr == WBNBAddress && slotDb.wbnbMakeUpBalance != nil {
+				newMainObj.setBalance(slotDb.wbnbMakeUpBalance)
 			}
 			newMainObj.finalise(true) // true: prefetch on dispatcher
 			// update the object
@@ -2205,9 +2211,10 @@ type ParallelStateDB struct {
 	wbnbMakeUp bool // default true, we can not do WBNB make up only when supported API call is received.
 	// wbnbBalanceAccessed         int          // how many times the WBNB's balance is acccessed, i.e. `GetBalance`, `AddBalance`, `SubBalance`, `SetBalance`
 	// wbnbBalanceAccessedExpected int          // how many times the WBNB contract is called.
-	wbnbMakeUpLock sync.RWMutex // we may make up WBNB's balanace of the unconfirmed DB, while other slot read it.
+	// wbnbMakeUpLock sync.RWMutex // we may make up WBNB's balanace of the unconfirmed DB, while other slot read it.
 	// wbnbContractCalled  int          // how many times the WBNB contract is called.
 	balanceUpdateDepth int
+	wbnbMakeUpBalance  *big.Int
 }
 
 // NewSlotDB creates a new State DB based on the provided StateDB.
@@ -3081,8 +3088,6 @@ func (s *ParallelStateDB) getBalanceFromUnconfirmedDB(addr common.Address) *big.
 
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			db.wbnbMakeUpLock.RLock()
-			defer db.wbnbMakeUpLock.RUnlock()
 			// 1.Refer the state of address, exist or not in dirtiedStateObjectsInSlot
 			if obj, exist := db.parallel.dirtiedStateObjectsInSlot[addr]; exist {
 				balanceHit := false
@@ -3126,8 +3131,6 @@ func (s *ParallelStateDB) getNonceFromUnconfirmedDB(addr common.Address) (uint64
 				continue
 			}
 			// nonce hit, return the nonce
-			db.wbnbMakeUpLock.RLock()
-			defer db.wbnbMakeUpLock.RUnlock()
 			obj := db.parallel.dirtiedStateObjectsInSlot[addr]
 			if obj == nil {
 				// could not exist, if it is changed but reverted
@@ -3168,8 +3171,6 @@ func (s *ParallelStateDB) getCodeFromUnconfirmedDB(addr common.Address) ([]byte,
 				// try next unconfirmedDb
 				continue
 			}
-			db.wbnbMakeUpLock.RLock()
-			defer db.wbnbMakeUpLock.RUnlock()
 			obj := db.parallel.dirtiedStateObjectsInSlot[addr]
 			if obj == nil {
 				// could not exist, if it is changed but reverted
@@ -3209,8 +3210,6 @@ func (s *ParallelStateDB) getCodeHashFromUnconfirmedDB(addr common.Address) (com
 				// try next unconfirmedDb
 				continue
 			}
-			db.wbnbMakeUpLock.RLock()
-			defer db.wbnbMakeUpLock.RUnlock()
 			obj := db.parallel.dirtiedStateObjectsInSlot[addr]
 			if obj == nil {
 				// could not exist, if it is changed but reverted
@@ -3243,8 +3242,6 @@ func (s *ParallelStateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (bo
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
 			if exist, ok := db.parallel.addrStateChangesInSlot[addr]; ok {
-				db.wbnbMakeUpLock.RLock()
-				defer db.wbnbMakeUpLock.RUnlock()
 				if _, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
 					// could not exist, if it is changed but reverted
 					// fixme: revert should remove the change record
@@ -3264,8 +3261,6 @@ func (s *ParallelStateDB) getKVFromUnconfirmedDB(addr common.Address, key common
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			db.wbnbMakeUpLock.RLock()
-			defer db.wbnbMakeUpLock.RUnlock()
 			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok { // if deleted on merge, can get from main StateDB, ok but fixme: concurrent safe
 				if obj.deleted {
 					return common.Hash{}, true
@@ -3291,8 +3286,6 @@ func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
 	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			db.wbnbMakeUpLock.RLock()
-			defer db.wbnbMakeUpLock.RUnlock()
 			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok { // if deleted on merge, can get from main StateDB, ok but fixme: concurrent safe
 				return obj, true
 			}
@@ -3354,10 +3347,15 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 							"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex)
 						continue // stage2 will skip WBNB check, no balance makeup
 					}
+					if _, ok := s.parallel.balanceChangesInSlot[addr]; !ok {
+						// balance unchanged, no need to make up
+						log.Debug("IsSlotDBReadsValid WBNB balance no makeup since it is not changed ",
+							"SlotIndex", slotDB.parallel.SlotIndex, "txIndex", slotDB.txIndex,
+							"updated WBNB balance", slotDB.GetBalance(addr))
+						continue
+					}
 					balanceDelta := new(big.Int).Sub(balanceMain, balanceSlot)
-					slotDB.wbnbMakeUpLock.Lock()
-					slotDB.AddBalance(addr, balanceDelta) // fixme: concurrent not safe, unconfirmed read
-					slotDB.wbnbMakeUpLock.Unlock()
+					slotDB.wbnbMakeUpBalance = new(big.Int).Add(slotDB.GetBalance(addr), balanceDelta)
 					/*
 						if _, exist := slotDB.stateObjectsPending[addr]; !exist {
 							slotDB.stateObjectsPending[addr] = struct{}{}
