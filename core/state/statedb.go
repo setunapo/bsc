@@ -2061,16 +2061,13 @@ func (s *StateDB) MergeSlotDB(slotDb *ParallelStateDB, slotReceipt *types.Receip
 	} else {
 		s.AddBalance(systemAddress, slotDb.GetBalance(systemAddress))
 	}
-
+	// system address is EOA account, it should have no storage change
+	delete(slotDb.stateObjectsDirty, systemAddress)
 	// only merge dirty objects
 	addressesToPrefetch := make([][]byte, 0, len(slotDb.stateObjectsDirty))
 	for addr := range slotDb.stateObjectsDirty {
 		if _, exist := s.stateObjectsDirty[addr]; !exist {
 			s.stateObjectsDirty[addr] = struct{}{}
-		}
-		// system address is EOA account, it should have no storage change
-		if addr == systemAddress {
-			continue
 		}
 
 		// stateObjects: KV, balance, nonce...
@@ -2200,6 +2197,7 @@ func (s *StateDB) MergeSlotDB(slotDb *ParallelStateDB, slotReceipt *types.Receip
 		//	s.snapStorage[k] = temp
 		// }
 	}
+	s.txIndex = txIndex
 }
 
 func (s *StateDB) ParallelMakeUp(addr common.Address, input []byte) {
@@ -3086,26 +3084,25 @@ func (s *ParallelStateDB) getBalanceFromUnconfirmedDB(addr common.Address) *big.
 		return nil
 	}
 
-	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
+	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
 			// 1.Refer the state of address, exist or not in dirtiedStateObjectsInSlot
-			if obj, exist := db.parallel.dirtiedStateObjectsInSlot[addr]; exist {
-				balanceHit := false
-				if _, exist := db.parallel.addrStateChangesInSlot[addr]; exist {
-					balanceHit = true
-				}
-				if _, exist := db.parallel.balanceChangesInSlot[addr]; exist { // only changed balance is reliable
-					balanceHit = true
-				}
-				if !balanceHit {
-					continue
-				}
-				balance := obj.Balance()
-				if obj.deleted {
-					balance = common.Big0
-				}
-				return balance
+			balanceHit := false
+			if _, exist := db.parallel.addrStateChangesInSlot[addr]; exist {
+				balanceHit = true
 			}
+			if _, exist := db.parallel.balanceChangesInSlot[addr]; exist { // only changed balance is reliable
+				balanceHit = true
+			}
+			if !balanceHit {
+				continue
+			}
+			obj := db.parallel.dirtiedStateObjectsInSlot[addr]
+			balance := obj.Balance()
+			if obj.deleted {
+				balance = common.Big0
+			}
+			return balance
 		}
 	}
 	return nil
@@ -3118,7 +3115,7 @@ func (s *ParallelStateDB) getNonceFromUnconfirmedDB(addr common.Address) (uint64
 		return 0, false
 	}
 
-	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
+	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
 			nonceHit := false
 			if _, ok := db.parallel.addrStateChangesInSlot[addr]; ok {
@@ -3158,7 +3155,7 @@ func (s *ParallelStateDB) getCodeFromUnconfirmedDB(addr common.Address) ([]byte,
 		return nil, false
 	}
 
-	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
+	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
 			codeHit := false
 			if _, exist := db.parallel.addrStateChangesInSlot[addr]; exist {
@@ -3197,7 +3194,7 @@ func (s *ParallelStateDB) getCodeHashFromUnconfirmedDB(addr common.Address) (com
 		return common.Hash{}, false
 	}
 
-	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
+	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
 			hashHit := false
 			if _, exist := db.parallel.addrStateChangesInSlot[addr]; exist {
@@ -3239,7 +3236,7 @@ func (s *ParallelStateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (bo
 	}
 
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
-	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
+	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
 			if exist, ok := db.parallel.addrStateChangesInSlot[addr]; ok {
 				if _, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
@@ -3259,22 +3256,12 @@ func (s *ParallelStateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (bo
 
 func (s *ParallelStateDB) getKVFromUnconfirmedDB(addr common.Address, key common.Hash) (common.Hash, bool) {
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
-	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
+	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok { // if deleted on merge, can get from main StateDB, ok but fixme: concurrent safe
-				if obj.deleted {
-					return common.Hash{}, true
-				}
-				if _, ok := db.parallel.kvChangesInSlot[addr]; ok {
-					if val, exist := obj.dirtyStorage.GetValue(key); exist {
-						return val, true
-					}
-					if val, exist := obj.pendingStorage.GetValue(key); exist { // fixme: can be removed
-						log.Error("Get KV from Unconfirmed StateDB, in pending",
-							"my txIndex", s.txIndex, "DB's txIndex", i, "addr", addr,
-							"key", key, "val", val)
-						return val, true
-					}
+			if _, ok := db.parallel.kvChangesInSlot[addr]; ok {
+				obj := db.parallel.dirtiedStateObjectsInSlot[addr]
+				if val, exist := obj.dirtyStorage.GetValue(key); exist {
+					return val, true
 				}
 			}
 		}
@@ -3284,9 +3271,9 @@ func (s *ParallelStateDB) getKVFromUnconfirmedDB(addr common.Address, key common
 
 func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (*StateObject, bool) {
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
-	for i := s.txIndex - 1; i > s.parallel.baseTxIndex; i-- {
+	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
 		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok { // if deleted on merge, can get from main StateDB, ok but fixme: concurrent safe
+			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok {
 				return obj, true
 			}
 		}
