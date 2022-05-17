@@ -94,7 +94,8 @@ type ParallelStateProcessor struct {
 	mergedTxIndex         int          // the latest finalized tx index, fixme: use Atomic
 	slotDBsToRelease      []*state.ParallelStateDB
 	debugConflictRedoNum  int
-	unconfirmedResults    *sync.Map     // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
+	unconfirmedResults    *sync.Map // this is for stage2 confirm, since pendingConfirmResults can not be access in stage2 loop
+	unconfirmedDBs        *sync.Map
 	stopSlotChan          chan int      // fixme: use struct{}{}, to make sure all slot are idle
 	stopConfirmChan       chan struct{} // fixme: use struct{}{}, to make sure all slot are idle
 	confirmStage2Chan     chan int
@@ -538,6 +539,7 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 		slot.activatedType = 0
 	}
 	p.unconfirmedResults = new(sync.Map) // make(map[int]*state.ParallelStateDB)
+	p.unconfirmedDBs = new(sync.Map)     // make(map[int]*state.ParallelStateDB)
 	p.pendingConfirmResults = make(map[int][]*ParallelTxResult, 200)
 	p.txReqExecuteRecord = make(map[int]int, 200)
 	p.txReqExecuteCount = 0
@@ -768,22 +770,6 @@ func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, isStage
 		return true
 	} else {
 		// to check if what the slot db read is correct.
-		// refDetail := slotDB.UnconfirmedRefList()
-
-		// update the unconfirmedDBs, so the conflict result will be more reliable
-		if isStage2 {
-			unconfirmedDBs := make(map[int]*state.ParallelStateDB, 100)
-			for index := p.mergedTxIndex + 1; index < slotDB.TxIndex(); index++ {
-				unconfirmedResult, ok := p.unconfirmedResults.Load(index)
-				if ok {
-					// if err !=nil, then the result is useless, since it has not been executed at all
-					if unconfirmedResult.(*ParallelTxResult).err == nil {
-						unconfirmedDBs[index] = unconfirmedResult.(*ParallelTxResult).slotDB
-					}
-				}
-			}
-			slotDB.UpdateUnConfirmDBs(unconfirmedDBs)
-		}
 		if !slotDB.IsParallelReadsValid(isStage2, p.mergedTxIndex) {
 			return true
 		}
@@ -849,6 +835,7 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 			slotDB.RevertSlotDB(txReq.msg.From())
 		}
 		slotDB.Finalise(true) // Finalise could write s.parallel.addrStateChangesInSlot[addr], keep Read and Write in same routine to avoid crash
+		p.unconfirmedDBs.Store(txReq.txIndex, slotDB)
 	} else {
 		// the transaction failed at check(nonce or blanace), actually it has not been executed yet.
 		atomic.CompareAndSwapInt32(&txReq.runnable, 0, 1)
@@ -1168,19 +1155,8 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 			slotState := p.slotState[result.slotIndex]
 			result.txReq.baseTxIndex = p.mergedTxIndex
 
-			// prepare the unconfirmed DB list the transaction may refer
-			unconfirmedDBs := make(map[int]*state.ParallelStateDB, 100)
-			for index := p.mergedTxIndex + 1; index < result.txReq.txIndex; index++ {
-				unconfirmedResult, ok := p.unconfirmedResults.Load(index)
-				if ok {
-					// if err !=nil, then the result is useless, since it has not been executed at all
-					if unconfirmedResult.(*ParallelTxResult).err == nil {
-						unconfirmedDBs[index] = unconfirmedResult.(*ParallelTxResult).slotDB
-					}
-				}
-			}
 			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, result.txReq.txIndex,
-				p.mergedTxIndex, result.keepSystem, unconfirmedDBs)
+				p.mergedTxIndex, result.keepSystem, p.unconfirmedDBs)
 			slotDB.SetSlotIndex(result.slotIndex)
 			p.slotDBsToRelease = append(p.slotDBsToRelease, slotDB)
 			slotState.slotDBChan <- slotDB

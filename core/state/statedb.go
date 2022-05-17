@@ -140,7 +140,7 @@ type ParallelState struct {
 	baseStateDB               *StateDB // for parallel mode, there will be a base StateDB in dispatcher routine.
 	baseTxIndex               int      // slotDB is created base on this tx index.
 	dirtiedStateObjectsInSlot map[common.Address]*StateObject
-	unconfirmedDBInShot       map[int]*ParallelStateDB // do unconfirmed reference in same slot.
+	unconfirmedDBs            *sync.Map /*map[int]*ParallelStateDB*/ // do unconfirmed reference in same slot.
 
 	// we will record the read detail for conflict check and
 	// the changed addr or key for object merge, the changed detail can be acheived from the dirty object
@@ -1190,9 +1190,7 @@ func (s *StateDB) CopyForSlot() *ParallelStateDB {
 	parallel := ParallelState{
 		// use base(dispatcher) slot db's stateObjects.
 		// It is a SyncMap, only readable to slot, not writable
-		stateObjects: s.parallel.stateObjects,
-		// unconfirmedDBInShot: make(map[int]*ParallelStateDB, 100),
-
+		stateObjects:                 s.parallel.stateObjects,
 		codeReadsInSlot:              make(map[common.Address][]byte, 10), // addressStructPool.Get().(map[common.Address]struct{}),
 		codeHashReadsInSlot:          make(map[common.Address]common.Hash),
 		codeChangesInSlot:            make(map[common.Address]struct{}),     // addressStructPool.Get().(map[common.Address]struct{}),
@@ -2218,7 +2216,7 @@ type ParallelStateDB struct {
 // NewSlotDB creates a new State DB based on the provided StateDB.
 // With parallel, each execution slot would have its own StateDB.
 func NewSlotDB(db *StateDB, systemAddr common.Address, txIndex int, baseTxIndex int, keepSystem bool,
-	unconfirmedDBs map[int]*ParallelStateDB) *ParallelStateDB {
+	unconfirmedDBs *sync.Map /*map[int]*ParallelStateDB*/) *ParallelStateDB {
 	slotDB := db.CopyForSlot()
 	slotDB.txIndex = txIndex
 	slotDB.originalRoot = db.originalRoot
@@ -2229,7 +2227,7 @@ func NewSlotDB(db *StateDB, systemAddr common.Address, txIndex int, baseTxIndex 
 	slotDB.parallel.keepSystemAddressBalance = keepSystem
 	slotDB.storagePool = NewStoragePool()
 	slotDB.EnableWriteOnSharedStorage()
-	slotDB.parallel.unconfirmedDBInShot = unconfirmedDBs
+	slotDB.parallel.unconfirmedDBs = unconfirmedDBs
 
 	// All transactions will pay gas fee to the systemAddr at the end, this address is
 	// deemed to conflict, we handle it specially, clear it now and set it back to the main
@@ -3085,25 +3083,29 @@ func (s *ParallelStateDB) getBalanceFromUnconfirmedDB(addr common.Address) *big.
 	}
 
 	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
-		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			// 1.Refer the state of address, exist or not in dirtiedStateObjectsInSlot
-			balanceHit := false
-			if _, exist := db.parallel.addrStateChangesInSlot[addr]; exist {
-				balanceHit = true
-			}
-			if _, exist := db.parallel.balanceChangesInSlot[addr]; exist { // only changed balance is reliable
-				balanceHit = true
-			}
-			if !balanceHit {
-				continue
-			}
-			obj := db.parallel.dirtiedStateObjectsInSlot[addr]
-			balance := obj.Balance()
-			if obj.deleted {
-				balance = common.Big0
-			}
-			return balance
+		db_, ok := s.parallel.unconfirmedDBs.Load(i)
+		if !ok {
+			continue
 		}
+		db := db_.(*ParallelStateDB)
+		// 1.Refer the state of address, exist or not in dirtiedStateObjectsInSlot
+		balanceHit := false
+		if _, exist := db.parallel.addrStateChangesInSlot[addr]; exist {
+			balanceHit = true
+		}
+		if _, exist := db.parallel.balanceChangesInSlot[addr]; exist { // only changed balance is reliable
+			balanceHit = true
+		}
+		if !balanceHit {
+			continue
+		}
+		obj := db.parallel.dirtiedStateObjectsInSlot[addr]
+		balance := obj.Balance()
+		if obj.deleted {
+			balance = common.Big0
+		}
+		return balance
+
 	}
 	return nil
 }
@@ -3116,33 +3118,37 @@ func (s *ParallelStateDB) getNonceFromUnconfirmedDB(addr common.Address) (uint64
 	}
 
 	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
-		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			nonceHit := false
-			if _, ok := db.parallel.addrStateChangesInSlot[addr]; ok {
-				nonceHit = true
-			} else if _, ok := db.parallel.nonceChangesInSlot[addr]; ok {
-				nonceHit = true
-			}
-			if !nonceHit {
-				// nonce refer not hit, try next unconfirmedDb
-				continue
-			}
-			// nonce hit, return the nonce
-			obj := db.parallel.dirtiedStateObjectsInSlot[addr]
-			if obj == nil {
-				// could not exist, if it is changed but reverted
-				// fixme: revert should remove the change record
-				log.Debug("Get nonce from UnconfirmedDB, changed but object not exist, ",
-					"txIndex", s.txIndex, "referred txIndex", i, "addr", addr)
-				continue
-			}
-			nonce := obj.Nonce()
-			// deleted object with nonce == 0
-			if obj.deleted {
-				nonce = 0
-			}
-			return nonce, true
+		db_, ok := s.parallel.unconfirmedDBs.Load(i)
+		if !ok {
+			continue
 		}
+		db := db_.(*ParallelStateDB)
+
+		nonceHit := false
+		if _, ok := db.parallel.addrStateChangesInSlot[addr]; ok {
+			nonceHit = true
+		} else if _, ok := db.parallel.nonceChangesInSlot[addr]; ok {
+			nonceHit = true
+		}
+		if !nonceHit {
+			// nonce refer not hit, try next unconfirmedDb
+			continue
+		}
+		// nonce hit, return the nonce
+		obj := db.parallel.dirtiedStateObjectsInSlot[addr]
+		if obj == nil {
+			// could not exist, if it is changed but reverted
+			// fixme: revert should remove the change record
+			log.Debug("Get nonce from UnconfirmedDB, changed but object not exist, ",
+				"txIndex", s.txIndex, "referred txIndex", i, "addr", addr)
+			continue
+		}
+		nonce := obj.Nonce()
+		// deleted object with nonce == 0
+		if obj.deleted {
+			nonce = 0
+		}
+		return nonce, true
 	}
 	return 0, false
 }
@@ -3156,32 +3162,37 @@ func (s *ParallelStateDB) getCodeFromUnconfirmedDB(addr common.Address) ([]byte,
 	}
 
 	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
-		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			codeHit := false
-			if _, exist := db.parallel.addrStateChangesInSlot[addr]; exist {
-				codeHit = true
-			}
-			if _, exist := db.parallel.codeChangesInSlot[addr]; exist {
-				codeHit = true
-			}
-			if !codeHit {
-				// try next unconfirmedDb
-				continue
-			}
-			obj := db.parallel.dirtiedStateObjectsInSlot[addr]
-			if obj == nil {
-				// could not exist, if it is changed but reverted
-				// fixme: revert should remove the change record
-				log.Debug("Get code from UnconfirmedDB, changed but object not exist, ",
-					"txIndex", s.txIndex, "referred txIndex", i, "addr", addr)
-				continue
-			}
-			code := obj.Code(s.db)
-			if obj.deleted {
-				code = nil
-			}
-			return code, true
+		db_, ok := s.parallel.unconfirmedDBs.Load(i)
+		if !ok {
+			continue
 		}
+		db := db_.(*ParallelStateDB)
+
+		codeHit := false
+		if _, exist := db.parallel.addrStateChangesInSlot[addr]; exist {
+			codeHit = true
+		}
+		if _, exist := db.parallel.codeChangesInSlot[addr]; exist {
+			codeHit = true
+		}
+		if !codeHit {
+			// try next unconfirmedDb
+			continue
+		}
+		obj := db.parallel.dirtiedStateObjectsInSlot[addr]
+		if obj == nil {
+			// could not exist, if it is changed but reverted
+			// fixme: revert should remove the change record
+			log.Debug("Get code from UnconfirmedDB, changed but object not exist, ",
+				"txIndex", s.txIndex, "referred txIndex", i, "addr", addr)
+			continue
+		}
+		code := obj.Code(s.db)
+		if obj.deleted {
+			code = nil
+		}
+		return code, true
+
 	}
 	return nil, false
 }
@@ -3195,32 +3206,35 @@ func (s *ParallelStateDB) getCodeHashFromUnconfirmedDB(addr common.Address) (com
 	}
 
 	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
-		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			hashHit := false
-			if _, exist := db.parallel.addrStateChangesInSlot[addr]; exist {
-				hashHit = true
-			}
-			if _, exist := db.parallel.codeChangesInSlot[addr]; exist {
-				hashHit = true
-			}
-			if !hashHit {
-				// try next unconfirmedDb
-				continue
-			}
-			obj := db.parallel.dirtiedStateObjectsInSlot[addr]
-			if obj == nil {
-				// could not exist, if it is changed but reverted
-				// fixme: revert should remove the change record
-				log.Debug("Get codeHash from UnconfirmedDB, changed but object not exist, ",
-					"txIndex", s.txIndex, "referred txIndex", i, "addr", addr)
-				continue
-			}
-			codeHash := common.Hash{}
-			if !obj.deleted {
-				codeHash = common.BytesToHash(obj.CodeHash())
-			}
-			return codeHash, true
+		db_, ok := s.parallel.unconfirmedDBs.Load(i)
+		if !ok {
+			continue
 		}
+		db := db_.(*ParallelStateDB)
+		hashHit := false
+		if _, exist := db.parallel.addrStateChangesInSlot[addr]; exist {
+			hashHit = true
+		}
+		if _, exist := db.parallel.codeChangesInSlot[addr]; exist {
+			hashHit = true
+		}
+		if !hashHit {
+			// try next unconfirmedDb
+			continue
+		}
+		obj := db.parallel.dirtiedStateObjectsInSlot[addr]
+		if obj == nil {
+			// could not exist, if it is changed but reverted
+			// fixme: revert should remove the change record
+			log.Debug("Get codeHash from UnconfirmedDB, changed but object not exist, ",
+				"txIndex", s.txIndex, "referred txIndex", i, "addr", addr)
+			continue
+		}
+		codeHash := common.Hash{}
+		if !obj.deleted {
+			codeHash = common.BytesToHash(obj.CodeHash())
+		}
+		return codeHash, true
 	}
 	return common.Hash{}, false
 }
@@ -3237,18 +3251,21 @@ func (s *ParallelStateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (bo
 
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
 	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
-		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			if exist, ok := db.parallel.addrStateChangesInSlot[addr]; ok {
-				if _, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
-					// could not exist, if it is changed but reverted
-					// fixme: revert should remove the change record
-					log.Debug("Get addr State from UnconfirmedDB, changed but object not exist, ",
-						"txIndex", s.txIndex, "referred txIndex", i, "addr", addr)
-					continue
-				}
-
-				return exist, true
+		db_, ok := s.parallel.unconfirmedDBs.Load(i)
+		if !ok {
+			continue
+		}
+		db := db_.(*ParallelStateDB)
+		if exist, ok := db.parallel.addrStateChangesInSlot[addr]; ok {
+			if _, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
+				// could not exist, if it is changed but reverted
+				// fixme: revert should remove the change record
+				log.Debug("Get addr State from UnconfirmedDB, changed but object not exist, ",
+					"txIndex", s.txIndex, "referred txIndex", i, "addr", addr)
+				continue
 			}
+
+			return exist, true
 		}
 	}
 	return false, false
@@ -3257,12 +3274,15 @@ func (s *ParallelStateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (bo
 func (s *ParallelStateDB) getKVFromUnconfirmedDB(addr common.Address, key common.Hash) (common.Hash, bool) {
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
 	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
-		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			if _, ok := db.parallel.kvChangesInSlot[addr]; ok {
-				obj := db.parallel.dirtiedStateObjectsInSlot[addr]
-				if val, exist := obj.dirtyStorage.GetValue(key); exist {
-					return val, true
-				}
+		db_, ok := s.parallel.unconfirmedDBs.Load(i)
+		if !ok {
+			continue
+		}
+		db := db_.(*ParallelStateDB)
+		if _, ok := db.parallel.kvChangesInSlot[addr]; ok {
+			obj := db.parallel.dirtiedStateObjectsInSlot[addr]
+			if val, exist := obj.dirtyStorage.GetValue(key); exist {
+				return val, true
 			}
 		}
 	}
@@ -3272,17 +3292,16 @@ func (s *ParallelStateDB) getKVFromUnconfirmedDB(addr common.Address, key common
 func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (*StateObject, bool) {
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
 	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
-		if db, ok := s.parallel.unconfirmedDBInShot[i]; ok {
-			if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok {
-				return obj, true
-			}
+		db_, ok := s.parallel.unconfirmedDBs.Load(i)
+		if !ok {
+			continue
+		}
+		db := db_.(*ParallelStateDB)
+		if obj, ok := db.parallel.dirtiedStateObjectsInSlot[addr]; ok {
+			return obj, true
 		}
 	}
 	return nil, false
-}
-
-func (s *ParallelStateDB) UpdateUnConfirmDBs(unconfirmedDBs map[int]*ParallelStateDB) {
-	s.parallel.unconfirmedDBInShot = unconfirmedDBs
 }
 
 // in stage2, we do unconfirmed conflict detect
