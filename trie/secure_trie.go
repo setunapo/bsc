@@ -108,6 +108,7 @@ func (t *SecureTrie) Update(key, value []byte) {
 //
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryUpdate(key, value []byte) error {
+	defer debug.Handler.StartRegionAuto("SecureTrie.TryUpdate")()
 	hk := t.hashKey(key)
 	err := t.trie.TryUpdate(hk, value)
 	if err != nil {
@@ -127,6 +128,7 @@ func (t *SecureTrie) Delete(key []byte) {
 // TryDelete removes any existing value for key from the trie.
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryDelete(key []byte) error {
+	defer debug.Handler.StartRegionAuto("SecureTrie.TryDelete")()
 	hk := t.hashKey(key)
 	delete(t.getSecKeyCache(), string(hk))
 	return t.trie.TryDelete(hk)
@@ -165,6 +167,7 @@ func (t *SecureTrie) Commit(onleaf LeafCallback) (root common.Hash, err error) {
 // Hash returns the root hash of SecureTrie. It does not write to the
 // database and can be used even if the trie doesn't have one.
 func (t *SecureTrie) Hash() common.Hash {
+	defer debug.Handler.StartRegionAuto("SecureTrie Hash")()
 	return t.trie.Hash()
 }
 

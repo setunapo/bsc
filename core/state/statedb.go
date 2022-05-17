@@ -24,6 +24,7 @@ import (
 	"math/big"
 	"runtime"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -715,6 +716,7 @@ func (s *StateDB) Suicide(addr common.Address) bool {
 
 // updateStateObject writes the given object to the trie.
 func (s *StateDB) updateStateObject(obj *StateObject) {
+	defer debug.Handler.StartRegionAuto("updateStateObject")()
 	// Track the amount of time wasted on updating the account from the trie
 	if metrics.EnabledExpensive {
 		defer func(start time.Time) { s.AccountUpdates += time.Since(start) }(time.Now())
@@ -1327,6 +1329,7 @@ func (s *StateDB) WaitPipeVerification() error {
 // the journal as well as the refunds. Finalise, however, will not push any updates
 // into the tries just yet. Only IntermediateRoot or Commit will do that.
 func (s *StateDB) Finalise(deleteEmptyObjects bool) { // fixme: concurrent safe...
+	defer debug.Handler.StartRegionAuto("StateDB.Finalise")()
 	addressesToPrefetch := make([][]byte, 0, len(s.journal.dirties))
 	for addr := range s.journal.dirties {
 		var obj *StateObject
@@ -1507,10 +1510,12 @@ func (s *StateDB) AccountsIntermediateRoot() {
 	// the account prefetcher. Instead, let's process all the storage updates
 	// first, giving the account prefeches just a few more milliseconds of time
 	// to pull useful data from disk.
+	defer debug.Handler.StartRegionAuto("AccountsIntermediateRoot num:" + strconv.Itoa(len(s.stateObjectsPending)))()
 	for addr := range s.stateObjectsPending {
 		if obj, _ := s.getStateObjectFromStateObjects(addr); !obj.deleted {
 			wg.Add(1)
 			tasks <- func() {
+				defer debug.Handler.StartRegionAuto("AccountsIntermediateRoot a task")()
 				obj.updateRoot(s.db)
 				// If state snapshotting is active, cache the data til commit. Note, this
 				// update mechanism is not symmetric to the deletion, because whereas it is
@@ -1571,6 +1576,8 @@ func (s *StateDB) StateIntermediateRoot() common.Hash {
 	}
 
 	usedAddrs := make([][]byte, 0, len(s.stateObjectsPending))
+
+	region2 := debug.Handler.StartTrace("Update&Delete Trie")
 	for addr := range s.stateObjectsPending {
 		if obj, _ := s.getStateObjectFromStateObjects(addr); obj.deleted {
 			s.deleteStateObject(obj)
@@ -1579,6 +1586,8 @@ func (s *StateDB) StateIntermediateRoot() common.Hash {
 		}
 		usedAddrs = append(usedAddrs, common.CopyBytes(addr[:])) // Copy needed for closure
 	}
+	debug.Handler.EndTrace(region2)
+
 	if prefetcher != nil {
 		prefetcher.used(s.originalRoot, usedAddrs)
 	}
@@ -3533,12 +3542,16 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool) bool {
 	}
 	readLen := len(units)
 	if readLen < 8 || isStage2 {
+		region1 := debug.Handler.StartTrace("kv check sequential")
 		for _, unit := range units {
 			if hasKvConflict(slotDB, unit.addr, unit.key, unit.val, isStage2) {
+				debug.Handler.EndTrace(region1)
 				return false
 			}
 		}
+		debug.Handler.EndTrace(region1)
 	} else {
+		region2 := debug.Handler.StartTrace("kv check parallel")
 		msgHandledNum := 0
 		msgSendNum := 0
 		for _, unit := range units {
@@ -3560,6 +3573,7 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool) bool {
 								msgHandledNum++
 							}
 						}
+						debug.Handler.EndTrace(region2)
 						return false
 					}
 				case parallelKvCheckReqCh <- ParallelKvCheckMessage{slotDB, isStage2, unit}:
@@ -3590,9 +3604,11 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool) bool {
 						msgHandledNum++
 					}
 				}
+				debug.Handler.EndTrace(region2)
 				return false
 			}
 		}
+		debug.Handler.EndTrace(region2)
 	}
 	if isStage2 { // stage2 skip check code, or state, since they are likely unchanged.
 		return true
