@@ -700,6 +700,7 @@ func (s *StateObject) deepCopy(db *StateDB) *StateObject {
 }
 
 func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys StateKeys) {
+	defer debug.Handler.StartRegionAuto("MergeSlotObject")()
 	for key := range keys {
 		// In parallel mode, always GetState by StateDB, not by StateObject directly,
 		// since it the KV could exist in unconfirmed DB.
