@@ -525,14 +525,12 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	p.allTxReqs = make([]*ParallelTxRequest, 0)
 	p.slotDBsToRelease = make([]*state.ParallelStateDB, 0, txNum)
 
-	/*
-		stateDBsToRelease := p.slotDBsToRelease
-			go func() {
-				for _, slotDB := range stateDBsToRelease {
-					slotDB.SlotDBPutSyncPool()
-				}
-			}()
-	*/
+	stateDBsToRelease := p.slotDBsToRelease
+	go func() {
+		for _, slotDB := range stateDBsToRelease {
+			slotDB.PutSyncPool()
+		}
+	}()
 	for _, slot := range p.slotState {
 		slot.pendingTxReqList = make([]*ParallelTxRequest, 0)
 		slot.activatedType = 0
