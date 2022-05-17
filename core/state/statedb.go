@@ -1209,14 +1209,14 @@ func (s *StateDB) CopyForSlot() *ParallelStateDB {
 	state := &ParallelStateDB{
 		StateDB: StateDB{
 			db:                  s.db,
-			trie:                s.db.CopyTrie(s.trie),
+			trie:                nil,                                                   // Parallel StateDB can not access trie, since it is concurrent safe.
 			stateObjects:        make(map[common.Address]*StateObject),                 // replaced by parallel.stateObjects in parallel mode
 			stateObjectsPending: make(map[common.Address]struct{}),                     // addressStructPool.Get().(map[common.Address]struct{}),
 			stateObjectsDirty:   make(map[common.Address]struct{}),                     //addressStructPool.Get().(map[common.Address]struct{}),
-			refund:              s.refund,                                              // should be 0
+			refund:              0,                                                     // should be 0
 			logs:                make(map[common.Hash][]*types.Log, defaultNumOfSlots), //  logsPool.Get().(map[common.Hash][]*types.Log),
 			logSize:             0,
-			preimages:           make(map[common.Hash][]byte, len(s.preimages)),
+			preimages:           make(map[common.Hash][]byte),
 			journal:             newJournal(), // journalPool.Get().(*journal),
 			hasher:              crypto.NewKeccakState(),
 			isParallel:          true,
@@ -1227,9 +1227,10 @@ func (s *StateDB) CopyForSlot() *ParallelStateDB {
 		// wbnbBalanceAccessedExpected: 0,
 		balanceUpdateDepth: 0,
 	}
-	for hash, preimage := range s.preimages {
-		state.preimages[hash] = preimage
-	}
+	// no need to copy preimages, comment out and remove later
+	// for hash, preimage := range s.preimages {
+	//	state.preimages[hash] = preimage
+	// }
 
 	if s.snaps != nil {
 		// In order for the miner to be able to use and make additions
@@ -1245,19 +1246,21 @@ func (s *StateDB) CopyForSlot() *ParallelStateDB {
 			state.snapDestructs[k] = v
 		}
 		s.snapParallelLock.RUnlock()
-		//
-		state.snapAccounts = make(map[common.Address][]byte) // snapAccountPool.Get().(map[common.Address][]byte)
-		for k, v := range s.snapAccounts {
-			state.snapAccounts[k] = v
-		}
-		state.snapStorage = make(map[common.Address]map[string][]byte) // snapStoragePool.Get().(map[common.Address]map[string][]byte)
-		for k, v := range s.snapStorage {
-			temp := make(map[string][]byte) // snapStorageValuePool.Get().(map[string][]byte)
-			for kk, vv := range v {
-				temp[kk] = vv
-			}
-			state.snapStorage[k] = temp
-		}
+		// snapAccounts is useless in SlotDB, comment out and remove later
+		// state.snapAccounts = make(map[common.Address][]byte) // snapAccountPool.Get().(map[common.Address][]byte)
+		// for k, v := range s.snapAccounts {
+		//	state.snapAccounts[k] = v
+		// }
+
+		// snapStorage is useless in SlotDB either, it is updated on updateTrie, which is validation phase to update the snapshot of a finalized block.
+		// state.snapStorage = make(map[common.Address]map[string][]byte) // snapStoragePool.Get().(map[common.Address]map[string][]byte)
+		// for k, v := range s.snapStorage {
+		//	temp := make(map[string][]byte) // snapStorageValuePool.Get().(map[string][]byte)
+		//	for kk, vv := range v {
+		//		temp[kk] = vv
+		//	}
+		//	state.snapStorage[k] = temp
+		// }
 		// trie prefetch should be done by dispacther on StateObject Merge,
 		// disable it in parallel slot
 		// state.prefetcher = s.prefetcher

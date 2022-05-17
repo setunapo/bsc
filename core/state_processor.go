@@ -432,23 +432,24 @@ type SlotState struct {
 }
 
 type ParallelTxResult struct {
-	executedIndex int   // the TxReq can be executed several time, increase index for each execution
-	prefetchAddr  bool  // for redo and pending tx quest, slot needs new slotDB,
-	updateSlotDB  bool  // for redo and pending tx quest, slot needs new slotDB,
-	keepSystem    bool  // for redo, should keep system address's balance
-	slotIndex     int   // slot index
-	err           error // to describe error message?
-	txReq         *ParallelTxRequest
-	receipt       *types.Receipt
-	slotDB        *state.ParallelStateDB // if updated, it is not equal to txReq.slotDB
-	gpSlot        *GasPool
-	evm           *vm.EVM
-	result        *ExecutionResult
+	executedIndex int  // the TxReq can be executed several time, increase index for each execution
+	prefetchAddr  bool // for redo and pending tx quest, slot needs new slotDB,
+	updateSlotDB  bool // for redo and pending tx quest, slot needs new slotDB,
+	// keepSystem    bool  // for redo, should keep system address's balance
+	slotIndex int   // slot index
+	err       error // to describe error message?
+	txReq     *ParallelTxRequest
+	receipt   *types.Receipt
+	slotDB    *state.ParallelStateDB // if updated, it is not equal to txReq.slotDB
+	gpSlot    *GasPool
+	evm       *vm.EVM
+	result    *ExecutionResult
 }
 
 type ParallelTxRequest struct {
-	txIndex         int
-	baseTxIndex     int
+	txIndex int
+	// baseTxIndex     int
+	baseStateDB     *state.StateDB
 	staticSlotIndex int // static dispatched id
 	tx              *types.Transaction
 	// slotDB         *state.ParallelStateDB
@@ -794,17 +795,22 @@ func (p *ParallelStateProcessor) switchSlot(slotIndex int) {
 
 func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxRequest) *ParallelTxResult {
 	txReq.executedNum++ // fixme: atomic?
-	curSlot := p.slotState[slotIndex]
 	// 1.Try to update the SlotDB first
-	resultUpdateDB := &ParallelTxResult{
-		updateSlotDB: true,
-		slotIndex:    slotIndex,
-		err:          nil,
-		txReq:        txReq,
-		keepSystem:   txReq.systemAddrRedo,
-	}
-	p.txResultChan <- resultUpdateDB
-	slotDB := <-curSlot.slotDBChan
+	/*
+		curSlot := p.slotState[slotIndex]
+		resultUpdateDB := &ParallelTxResult{
+			updateSlotDB: true,
+			slotIndex:    slotIndex,
+			err:          nil,
+			txReq:        txReq,
+			keepSystem:   txReq.systemAddrRedo,
+		}
+		p.txResultChan <- resultUpdateDB
+		slotDB := <-curSlot.slotDBChan
+	*/
+	slotDB := state.NewSlotDB(txReq.baseStateDB, consensus.SystemAddress, txReq.txIndex,
+		p.mergedTxIndex, txReq.systemAddrRedo, p.unconfirmedDBs)
+
 	if slotDB == nil { // block is processed, fixme: no need to steal
 		return nil
 	}
@@ -1150,18 +1156,22 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 	for {
 		result = <-p.txResultChan
 		// slot may request new slotDB, if a TxReq do not have valid parallel state db
-		if result.updateSlotDB {
-			// the target slot is waiting for new slotDB
-			slotState := p.slotState[result.slotIndex]
-			result.txReq.baseTxIndex = p.mergedTxIndex
+		/*
+			if result.updateSlotDB {
+				region1 := debug.Handler.StartTrace("updateSlotDB")
+				// the target slot is waiting for new slotDB
+				slotState := p.slotState[result.slotIndex]
+				result.txReq.baseTxIndex = p.mergedTxIndex
 
-			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, result.txReq.txIndex,
-				p.mergedTxIndex, result.keepSystem, p.unconfirmedDBs)
-			slotDB.SetSlotIndex(result.slotIndex)
-			p.slotDBsToRelease = append(p.slotDBsToRelease, slotDB)
-			slotState.slotDBChan <- slotDB
-			continue
-		}
+				slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, result.txReq.txIndex,
+					p.mergedTxIndex, result.keepSystem, p.unconfirmedDBs)
+				slotDB.SetSlotIndex(result.slotIndex)
+				p.slotDBsToRelease = append(p.slotDBsToRelease, slotDB)
+				slotState.slotDBChan <- slotDB
+				debug.Handler.EndTrace(region1)
+				continue
+			}
+		*/
 		if result.prefetchAddr {
 			log.Debug("waitUntilNextTxDone prefetchAddr", "p.mergedTxIndex", p.mergedTxIndex,
 				"result.txReq.txIndex", result.txReq.txIndex)
@@ -1282,6 +1292,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		// parallel start, wrap an exec message, which will be dispatched to a slot
 		txReq := &ParallelTxRequest{
 			txIndex:         i,
+			baseStateDB:     statedb,
 			staticSlotIndex: -1,
 			tx:              tx,
 			gasLimit:        block.GasLimit(), // gp.Gas().
