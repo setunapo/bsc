@@ -795,6 +795,7 @@ func (p *ParallelStateProcessor) switchSlot(slotIndex int) {
 }
 
 func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxRequest) *ParallelTxResult {
+	defer debug.Handler.StartRegionAuto("executeInSlot")()
 	txReq.executedNum++ // fixme: atomic?
 	// 1.Try to update the SlotDB first
 	/*
@@ -1156,6 +1157,7 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 }
 
 func (p *ParallelStateProcessor) handleTxResults() *ParallelTxResult {
+	defer debug.Handler.StartRegionAuto("handleTxResults")()
 	log.Debug("handleTxResults", "p.mergedTxIndex", p.mergedTxIndex)
 	confirmedResult := p.toConfirmTxIndex(p.mergedTxIndex+1, false)
 	if confirmedResult == nil {
@@ -1173,6 +1175,7 @@ func (p *ParallelStateProcessor) handleTxResults() *ParallelTxResult {
 
 // wait until the next Tx is executed and its result is merged to the main stateDB
 func (p *ParallelStateProcessor) confirmTxResults(statedb *state.StateDB, gp *GasPool) *ParallelTxResult {
+	defer debug.Handler.StartRegionAuto("confirmTxResults")()
 	result := p.handleTxResults()
 	if result == nil {
 		return nil
@@ -1308,9 +1311,11 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		}
 
 		unconfirmedResult := <-p.txResultChan
+		region1 := debug.Handler.StartTrace("recv unconfirmedResult")
 		unconfirmedTxIndex := unconfirmedResult.txReq.txIndex
 		if unconfirmedTxIndex <= p.mergedTxIndex {
 			log.Warn("drop merged txReq", "unconfirmedTxIndex", unconfirmedTxIndex, "p.mergedTxIndex", p.mergedTxIndex)
+			debug.Handler.EndTrace(region1)
 			continue
 		}
 		p.pendingConfirmResults[unconfirmedTxIndex] = append(p.pendingConfirmResults[unconfirmedTxIndex], unconfirmedResult)
@@ -1344,6 +1349,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			commonTxs = append(commonTxs, result.txReq.tx)
 			receipts = append(receipts, result.receipt)
 		}
+		debug.Handler.EndTrace(region1)
 	}
 	// to do clean up when the block is processed
 	p.doCleanUp()
