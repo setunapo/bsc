@@ -300,6 +300,7 @@ func (s *StateObject) touch() {
 
 func (s *StateObject) getTrie(db Database) Trie {
 	if s.trie == nil {
+		defer debug.Handler.StartRegionAuto("getTrie")()
 		// Try fetching from prefetcher first
 		// We don't prefetch empty tries
 		if s.data.Root != emptyRoot && s.db.prefetcher != nil {
@@ -360,7 +361,7 @@ func (s *StateObject) setOriginStorage(key common.Hash, value common.Hash) {
 
 // GetCommittedState retrieves a value from the committed account storage trie.
 func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Hash {
-	defer debug.Handler.StartRegionAuto("GetCommittedState")()
+	// defer debug.Handler.StartRegionAuto("GetCommittedState")()
 	// If the fake storage is set, only lookup the state here(in the debugging mode)
 	if s.fakeStorage != nil {
 		fakeValue, _ := s.fakeStorage.GetValue(key)
@@ -374,6 +375,7 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 	if value, cached := s.getOriginStorage(key); cached {
 		return value
 	}
+	// defer debug.Handler.StartRegionAuto("GetFromSnapshot")()
 	// If no live objects are available, attempt to use snapshots
 	var (
 		enc   []byte
@@ -407,9 +409,9 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 			return common.Hash{}
 		}
 		s.db.snapParallelLock.RUnlock()
-		region1 := debug.Handler.StartTrace("Snapshot Storage")
+		// region1 := debug.Handler.StartTrace("Snapshot Storage")
 		enc, err = s.db.snap.Storage(s.addrHash, crypto.Keccak256Hash(key.Bytes()))
-		debug.Handler.EndTrace(region1)
+		// debug.Handler.EndTrace(region1)
 	}
 	// If snapshot unavailable or reading from it failed, load from the database
 	if s.db.snap == nil || err != nil {
@@ -532,6 +534,7 @@ func (s *StateObject) finalise(prefetch bool) {
 // updateTrie writes cached storage modifications into the object's storage trie.
 // It will return nil if the trie has not been loaded and no changes have been made
 func (s *StateObject) updateTrie(db Database) Trie {
+	defer debug.Handler.StartRegionAuto("updateTrie")()
 	// Make sure all dirty slots are finalized into the pending storage area
 	s.finalise(false) // Don't prefetch any more, pull directly if need be
 	if s.pendingStorage.Length() == 0 {
@@ -599,6 +602,7 @@ func (s *StateObject) updateTrie(db Database) Trie {
 
 // UpdateRoot sets the trie root to the current root hash of
 func (s *StateObject) updateRoot(db Database) {
+	defer debug.Handler.StartRegionAuto("updateRoot")()
 	// If nothing changed, don't bother with hashing anything
 	if s.updateTrie(db) == nil {
 		return
@@ -708,6 +712,7 @@ func (s *StateObject) deepCopy(db *StateDB) *StateObject {
 }
 
 func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys StateKeys) {
+	// defer debug.Handler.StartRegionAuto("MergeSlotObject")()
 	for key := range keys {
 		// In parallel mode, always GetState by StateDB, not by StateObject directly,
 		// since it the KV could exist in unconfirmed DB.

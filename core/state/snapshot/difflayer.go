@@ -422,7 +422,7 @@ func (dl *diffLayer) accountRLP(hash common.Hash, depth int) ([]byte, error) {
 //
 // Note the returned slot is not a copy, please don't modify it.
 func (dl *diffLayer) Storage(accountHash, storageHash common.Hash) ([]byte, error) {
-	defer debug.Handler.StartRegionAuto("diffLayer.Storage")()
+	// defer debug.Handler.StartRegionAuto("diffLayer.Storage")()
 	// debug.Handler.LogWhenTracing("diffLayer.Storage accountHash:" + accountHash.String() +
 	//	" storageHash:" + storageHash.String())
 
@@ -495,6 +495,7 @@ func (dl *diffLayer) storage(accountHash, storageHash common.Hash, depth int) ([
 // Update creates a new layer on top of the existing snapshot diff tree with
 // the specified data items.
 func (dl *diffLayer) Update(blockRoot common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte, verified chan struct{}) *diffLayer {
+	defer debug.Handler.StartRegionAuto("diffLayer.Update")()
 	return newDiffLayer(dl, blockRoot, destructs, accounts, storage, verified)
 }
 

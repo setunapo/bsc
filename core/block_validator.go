@@ -148,7 +148,7 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	}
 	if statedb.IsPipeCommit() {
 		validateFuns = append(validateFuns, func() error {
-			defer debug.Handler.StartRegionAuto("skipHeavyVerify")()
+			defer debug.Handler.StartRegionAuto("pipecommit")()
 			if err := statedb.WaitPipeVerification(); err != nil {
 				return err
 			}

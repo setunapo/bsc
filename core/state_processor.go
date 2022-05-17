@@ -601,6 +601,7 @@ func (p *ParallelStateProcessor) switchSlot(slotIndex int) {
 }
 
 func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxRequest) *ParallelTxResult {
+	// defer debug.Handler.StartRegionAuto("executeInSlot")()
 	atomic.AddInt32(&txReq.executedNum, 1)
 	slotDB := state.NewSlotDB(txReq.baseStateDB, consensus.SystemAddress, txReq.txIndex,
 		p.mergedTxIndex, txReq.systemAddrRedo, p.unconfirmedDBs)
@@ -653,7 +654,7 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 			return nil
 		}
 	}
-	defer debug.Handler.StartRegionAuto("toConfirmTxIndex")()
+	// defer debug.Handler.StartRegionAuto("toConfirmTxIndex")()
 
 	for {
 		// handle a targetTxIndex in a loop
@@ -857,6 +858,7 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 }
 
 func (p *ParallelStateProcessor) handleTxResults() *ParallelTxResult {
+	// defer debug.Handler.StartRegionAuto("handleTxResults")()
 	confirmedResult := p.toConfirmTxIndex(p.mergedTxIndex+1, false)
 	if confirmedResult == nil {
 		return nil
@@ -873,6 +875,7 @@ func (p *ParallelStateProcessor) handleTxResults() *ParallelTxResult {
 
 // wait until the next Tx is executed and its result is merged to the main stateDB
 func (p *ParallelStateProcessor) confirmTxResults(statedb *state.StateDB, gp *GasPool) *ParallelTxResult {
+	// defer debug.Handler.StartRegionAuto("confirmTxResults")()
 	result := p.handleTxResults()
 	if result == nil {
 		return nil
@@ -928,7 +931,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	txNum := len(block.Transactions())
 
 	debug.Handler.EnableTraceCapture(block.Header().Number.Uint64(), "parallel")
-	debug.Handler.EnableTraceBigBlock(block.Header().Number.Uint64(), txNum, "parallel")
+	// debug.Handler.EnableTraceBigBlock(block.Header().Number.Uint64(), txNum, "parallel")
 	traceMsg := "ProcessParallel " + block.Header().Number.String()
 	defer debug.Handler.StartRegionAuto(traceMsg)()
 
@@ -1002,9 +1005,11 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		}
 
 		unconfirmedResult := <-p.txResultChan
+		// region1 := debug.Handler.StartTrace("recv unconfirmedResult")
 		unconfirmedTxIndex := unconfirmedResult.txReq.txIndex
 		if unconfirmedTxIndex <= p.mergedTxIndex {
 			// log.Warn("drop merged txReq", "unconfirmedTxIndex", unconfirmedTxIndex, "p.mergedTxIndex", p.mergedTxIndex)
+			// debug.Handler.EndTrace(region1)
 			continue
 		}
 		p.pendingConfirmResults[unconfirmedTxIndex] = append(p.pendingConfirmResults[unconfirmedTxIndex], unconfirmedResult)
@@ -1039,6 +1044,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			commonTxs = append(commonTxs, result.txReq.tx)
 			receipts = append(receipts, result.receipt)
 		}
+		// debug.Handler.EndTrace(region1)
 	}
 	// to do clean up when the block is processed
 	p.doCleanUp()
@@ -1115,7 +1121,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		log.Info("Process", "block", header.Number, "txNum", txNum)
 	}
 	debug.Handler.EnableTraceCapture(block.Header().Number.Uint64(), "sequential")
-	debug.Handler.EnableTraceBigBlock(block.Header().Number.Uint64(), txNum, "sequential")
+	// debug.Handler.EnableTraceBigBlock(block.Header().Number.Uint64(), txNum, "sequential")
 	traceMsg := "Process " + block.Header().Number.String()
 	defer debug.Handler.StartRegionAuto(traceMsg)()
 

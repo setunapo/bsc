@@ -2194,7 +2194,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals bool) (int, er
 		var receipts types.Receipts
 		var logs []*types.Log
 		var usedGas uint64
-		if bc.parallelExecution {
+		if bc.parallelExecution || bc.processorSeq == nil {
 			statedb, receipts, logs, usedGas, err = bc.processor.Process(block, statedb, bc.vmConfig)
 		} else {
 			statedb, receipts, logs, usedGas, err = bc.processorSeq.Process(block, statedb, bc.vmConfig)
