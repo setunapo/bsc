@@ -1094,7 +1094,7 @@ var addressToBytesPool = sync.Pool{
 }
 
 var addressToBoolPool = sync.Pool{
-	New: func() interface{} { return make(map[common.Address][]byte, defaultNumOfSlots) },
+	New: func() interface{} { return make(map[common.Address]bool, defaultNumOfSlots) },
 }
 
 var addressToUintPool = sync.Pool{
