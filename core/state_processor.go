@@ -953,7 +953,6 @@ func (p *ParallelStateProcessor) toConfirmTxIndexResult(txResult *ParallelTxResu
 
 func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 	curSlot := p.slotState[slotIndex]
-	startTxIndex := 0
 	var wakeupChan chan *ParallelTxRequest
 	var stopChan chan struct{}
 
@@ -971,10 +970,10 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 			continue
 		case <-wakeupChan:
 		}
-		startTxIndex = p.mergedTxIndex + 1
+
 		interrupted := false
 		for _, txReq := range curSlot.pendingTxReqList {
-			if txReq.txIndex < startTxIndex {
+			if txReq.txIndex <= p.mergedTxIndex {
 				continue
 			}
 			if curSlot.activatedType != slotType { // fixme: atomic compare?
@@ -999,9 +998,8 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 		// txReq in this Slot have all been executed, try steal one from other slot.
 		// as long as the TxReq is runable, we steal it, mark it as stolen
 		// steal one by one
-		startTxIndex = p.mergedTxIndex + 1
 		for _, stealTxReq := range p.allTxReqs {
-			if stealTxReq.txIndex < startTxIndex {
+			if stealTxReq.txIndex <= p.mergedTxIndex {
 				continue
 			}
 			if curSlot.activatedType != slotType {
@@ -1193,22 +1191,8 @@ func (p *ParallelStateProcessor) doCleanUp() {
 	for _, slot := range p.slotState {
 		slot.primaryStopChan <- struct{}{}
 		slot.shadowStopChan <- struct{}{}
-		stopCount := 0
-		for {
-			select {
-			case updateDB := <-p.txResultChan: // in case a slot is requesting a new DB...
-				if updateDB.updateSlotDB {
-					slotState := p.slotState[updateDB.slotIndex]
-					slotState.slotDBChan <- nil
-					continue
-				}
-			case <-p.stopSlotChan:
-				stopCount++
-			}
-			if stopCount == 2 {
-				break
-			}
-		}
+		<-p.stopSlotChan
+		<-p.stopSlotChan
 	}
 	// 2.discard delayed txResults if any
 	for {
@@ -1299,6 +1283,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			// put it ahead of chan receive to avoid waiting for empty block
 			break
 		}
+
 		unconfirmedResult := <-p.txResultChan
 		unconfirmedTxIndex := unconfirmedResult.txReq.txIndex
 		if unconfirmedTxIndex <= p.mergedTxIndex {
