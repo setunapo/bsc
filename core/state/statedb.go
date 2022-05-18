@@ -1435,7 +1435,7 @@ func (s *StateDB) AccountsIntermediateRoot() {
 	finishCh := make(chan struct{})
 	defer close(finishCh)
 	wg := sync.WaitGroup{}
-	for i := 0; i < runtime.NumCPU(); i++ {
+	for i := 0; i < runtime.NumCPU(); i++ { // more the cpu num since there are async IO operation
 		go func() {
 			for {
 				select {
