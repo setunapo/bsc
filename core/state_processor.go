@@ -1295,6 +1295,10 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	}
 	// wait until all Txs have processed.
 	for {
+		if len(commonTxs)+len(systemTxs) == txNum {
+			// put it ahead of chan receive to avoid waiting for empty block
+			break
+		}
 		unconfirmedResult := <-p.txResultChan
 		unconfirmedTxIndex := unconfirmedResult.txReq.txIndex
 		if unconfirmedTxIndex <= p.mergedTxIndex {
@@ -1326,9 +1330,6 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			}
 			commonTxs = append(commonTxs, result.txReq.tx)
 			receipts = append(receipts, result.receipt)
-		}
-		if len(commonTxs)+len(systemTxs) == txNum {
-			break
 		}
 	}
 	// to do clean up when the block is processed
