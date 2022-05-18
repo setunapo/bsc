@@ -1516,6 +1516,39 @@ func (s *StateDB) StateIntermediateRoot() common.Hash {
 		s.trie = tr
 	}
 	usedAddrs := make([][]byte, 0, len(s.stateObjectsPending))
+
+	tasks := make(chan func())
+	finishCh := make(chan struct{})
+	defer close(finishCh)
+	wg := sync.WaitGroup{}
+	for i := 0; i < runtime.NumCPU()*2; i++ { // more the cpu num since there are async IO operation
+		go func() {
+			for {
+				select {
+				case task := <-tasks:
+					task()
+				case <-finishCh:
+					return
+				}
+			}
+		}()
+	}
+	for addr := range s.stateObjectsPending {
+		// usedAddrs = append(usedAddrs, common.CopyBytes(addr[:])) // Copy needed for closure
+		// obj, _ := s.getStateObjectFromStateObjects(addr)
+		wg.Add(1)
+		tasks <- func() {
+			//if obj.deleted {
+			//	s.deleteStateObject(obj)
+			//} else {
+			//	s.updateStateObject(obj)
+			//}
+			s.trie.TryGet(common.CopyBytes(addr[:]))
+			wg.Done()
+		}
+	}
+	wg.Wait()
+
 	for addr := range s.stateObjectsPending {
 		if obj, _ := s.getStateObjectFromStateObjects(addr); obj.deleted {
 			s.deleteStateObject(obj)
@@ -2054,6 +2087,7 @@ func (s *StateDB) PrepareForParallel() {
 func (s *StateDB) AddrPrefetch(slotDb *ParallelStateDB) {
 	addressesToPrefetch := make([][]byte, 0, len(slotDb.parallel.dirtiedStateObjectsInSlot))
 	for addr, obj := range slotDb.parallel.dirtiedStateObjectsInSlot {
+		addressesToPrefetch = append(addressesToPrefetch, common.CopyBytes(addr[:])) // Copy needed for closure
 		if obj.deleted {
 			continue
 		}
@@ -2070,7 +2104,6 @@ func (s *StateDB) AddrPrefetch(slotDb *ParallelStateDB) {
 		if s.prefetcher != nil && len(slotsToPrefetch) > 0 && obj.data.Root != emptyRoot {
 			s.prefetcher.prefetch(obj.data.Root, slotsToPrefetch, obj.addrHash)
 		}
-		addressesToPrefetch = append(addressesToPrefetch, common.CopyBytes(addr[:])) // Copy needed for closure
 	}
 
 	if s.prefetcher != nil && len(addressesToPrefetch) > 0 {
@@ -2192,6 +2225,7 @@ func (s *StateDB) MergeSlotDB(slotDb *ParallelStateDB, slotReceipt *types.Receip
 	}
 
 	if s.prefetcher != nil && len(addressesToPrefetch) > 0 {
+		// log.Info("MergeSlotDB", "len(addressesToPrefetch)", len(addressesToPrefetch))
 		s.prefetcher.prefetch(s.originalRoot, addressesToPrefetch, emptyAddr) // prefetch for trie node of account
 	}
 
