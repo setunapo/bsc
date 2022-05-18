@@ -25,6 +25,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -499,6 +500,7 @@ func (t *Trie) resolveHash(n hashNode, prefix []byte) (node, error) {
 // Hash returns the root hash of the trie. It does not write to the
 // database and can be used even if the trie doesn't have one.
 func (t *Trie) Hash() common.Hash {
+	defer debug.Handler.StartRegionAuto("Trie.Hash")()
 	hash, cached, _ := t.hashRoot()
 	t.root = cached
 	return common.BytesToHash(hash.(hashNode))
@@ -554,6 +556,7 @@ func (t *Trie) Commit(onleaf LeafCallback) (root common.Hash, err error) {
 
 // hashRoot calculates the root hash of the given trie
 func (t *Trie) hashRoot() (node, node, error) {
+	defer debug.Handler.StartRegionAuto("Trie hashRoot")()
 	if t.root == nil {
 		return hashNode(emptyRoot.Bytes()), nil, nil
 	}

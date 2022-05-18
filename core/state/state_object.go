@@ -301,6 +301,7 @@ func (s *StateObject) touch() {
 
 func (s *StateObject) getTrie(db Database) Trie {
 	if s.trie == nil {
+		defer debug.Handler.StartRegionAuto("getTrie")()
 		// Try fetching from prefetcher first
 		// We don't prefetch empty tries
 		if s.data.Root != emptyRoot && s.db.prefetcher != nil {
@@ -375,6 +376,7 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 	if value, cached := s.getOriginStorage(key); cached {
 		return value
 	}
+	defer debug.Handler.StartRegionAuto("GetFromSnapshot")()
 	// If no live objects are available, attempt to use snapshots
 	var (
 		enc   []byte
@@ -523,6 +525,7 @@ func (s *StateObject) finalise(prefetch bool) {
 // updateTrie writes cached storage modifications into the object's storage trie.
 // It will return nil if the trie has not been loaded and no changes have been made
 func (s *StateObject) updateTrie(db Database) Trie {
+	defer debug.Handler.StartRegionAuto("updateTrie")()
 	// Make sure all dirty slots are finalized into the pending storage area
 	s.finalise(false) // Don't prefetch any more, pull directly if need be
 	if s.pendingStorage.Length() == 0 {
@@ -590,6 +593,7 @@ func (s *StateObject) updateTrie(db Database) Trie {
 
 // UpdateRoot sets the trie root to the current root hash of
 func (s *StateObject) updateRoot(db Database) {
+	defer debug.Handler.StartRegionAuto("updateRoot")()
 	// If nothing changed, don't bother with hashing anything
 	if s.updateTrie(db) == nil {
 		return
