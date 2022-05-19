@@ -697,7 +697,8 @@ func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys 
 		// In parallel mode, always GetState by StateDB, not by StateObject directly,
 		// since it the KV could exist in unconfirmed DB.
 		// But here, it should be ok, since the KV should be changed and valid in the SlotDB,
-		s.SetState(db, key, dirtyObjs.GetState(db, key))
+		// s.SetState(db, key, dirtyObjs.GetState(db, key))
+		s.setState(key, dirtyObjs.GetState(db, key))
 	}
 }
 

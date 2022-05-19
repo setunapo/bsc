@@ -2199,7 +2199,7 @@ func (s *StateDB) MergeSlotDB(slotDb *ParallelStateDB, slotReceipt *types.Receip
 				// crash for: concurrent map iteration and map write
 
 				if _, balanced := slotDb.parallel.balanceChangesInSlot[addr]; balanced {
-					newMainObj.SetBalance(dirtyObj.Balance())
+					newMainObj.setBalance(dirtyObj.Balance())
 				}
 				if _, coded := slotDb.parallel.codeChangesInSlot[addr]; coded {
 					newMainObj.code = dirtyObj.code
@@ -3466,7 +3466,7 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 		conflict := false
 		slotStorage.Range(func(keySlot, valSlot interface{}) bool {
 			if isStage2 { // update slotDB's unconfirmed DB list and try
-				if valUnconfirm, ok := slotDB.getKVFromUnconfirmedDB(addr, valSlot.(common.Hash)); ok {
+				if valUnconfirm, ok := slotDB.getKVFromUnconfirmedDB(addr, keySlot.(common.Hash)); ok {
 					if !bytes.Equal(valSlot.(common.Hash).Bytes(), valUnconfirm.Bytes()) {
 						log.Debug("IsSlotDBReadsValid nonce read is invalid in unconfirmed", "addr", addr,
 							"valSlot", valSlot.(common.Hash), "valUnconfirm", valUnconfirm,

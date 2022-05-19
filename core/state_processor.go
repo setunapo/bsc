@@ -104,6 +104,7 @@ type ParallelStateProcessor struct {
 	txReqExecuteRecord    map[int]int // for each the execute count of each Tx
 	txReqExecuteCount     int
 	inConfirmStage2       bool
+	targetStage2Count     int // when executed txNUM reach it, enter stage2 RT confirm
 	nextStage2TxIndex     int
 }
 
@@ -1133,19 +1134,8 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 }
 
 func (p *ParallelStateProcessor) handleTxResults() *ParallelTxResult {
-	txSize := len(p.allTxReqs)
-	// usually, the the last Tx could be the bottleneck it could be very slow,
-	// so it is better for us to enter stage 2 a bit earlier
-	targetStage2Count := txSize
-	if txSize > 50 {
-		targetStage2Count = txSize - stage2AheadNum
-	}
-	if !p.inConfirmStage2 && p.txReqExecuteCount == targetStage2Count {
-		p.inConfirmStage2 = true
-	}
 	log.Debug("handleTxResults", "p.mergedTxIndex", p.mergedTxIndex)
-	targetTxIndex := p.mergedTxIndex + 1
-	confirmedResult := p.toConfirmTxIndex(targetTxIndex, false)
+	confirmedResult := p.toConfirmTxIndex(p.mergedTxIndex+1, false)
 	if confirmedResult == nil {
 		return nil
 	}
@@ -1269,6 +1259,13 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		}
 		p.allTxReqs = append(p.allTxReqs, txReq)
 	}
+	// set up stage2 enter criteria
+	p.targetStage2Count = len(p.allTxReqs)
+	if p.targetStage2Count > 50 {
+		// usually, the the last Tx could be the bottleneck it could be very slow,
+		// so it is better for us to enter stage 2 a bit earlier
+		p.targetStage2Count = p.targetStage2Count - stage2AheadNum
+	}
 
 	p.doStaticDispatch(statedb, p.allTxReqs) // todo: put txReqs in unit?
 	// after static dispatch, we notify the slot to work.
@@ -1296,6 +1293,11 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 				p.txReqExecuteRecord[unconfirmedTxIndex] = 0
 				p.txReqExecuteCount++
 				statedb.AddrPrefetch(unconfirmedResult.slotDB) // todo: prefetch when it is not merged
+				// enter stage2, RT confirm
+				if !p.inConfirmStage2 && p.txReqExecuteCount == p.targetStage2Count {
+					p.inConfirmStage2 = true
+				}
+
 			}
 			p.txReqExecuteRecord[unconfirmedTxIndex]++
 		}
