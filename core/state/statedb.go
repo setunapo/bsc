@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -1432,7 +1433,7 @@ func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 }
 
 func (s *StateDB) AccountsIntermediateRoot() {
-	tasks := make(chan func())
+	tasks := make(chan func()) // use buffer chan?
 	finishCh := make(chan struct{})
 	defer close(finishCh)
 	wg := sync.WaitGroup{}
@@ -3378,8 +3379,69 @@ func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (
 	return nil, false
 }
 
+type KvCheckUnit struct {
+	addr common.Address
+	key  common.Hash
+	val  common.Hash
+}
+type KvCheckMessage struct {
+	slotDB   *ParallelStateDB
+	isStage2 bool
+	kvUnit   KvCheckUnit
+}
+
+var kvCheckLoopStarted bool = false
+
+func hasKvConflict(slotDB *ParallelStateDB, addr common.Address, key common.Hash, val common.Hash, isStage2 bool) bool {
+	defer debug.Handler.StartRegionAuto("hasKvConflict")()
+	mainDB := slotDB.parallel.baseStateDB
+
+	if isStage2 { // update slotDB's unconfirmed DB list and try
+		if valUnconfirm, ok := slotDB.getKVFromUnconfirmedDB(addr, key); ok {
+			if !bytes.Equal(val.Bytes(), valUnconfirm.Bytes()) {
+				log.Debug("IsSlotDBReadsValid KV read is invalid in unconfirmed", "addr", addr,
+					"valSlot", val, "valUnconfirm", valUnconfirm,
+					"SlotIndex", slotDB.parallel.SlotIndex,
+					"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
+				return true
+			}
+		}
+	}
+	valMain := mainDB.GetState(addr, key)
+	if !bytes.Equal(val.Bytes(), valMain.Bytes()) {
+		log.Debug("hasKvConflict is invalid", "addr", addr,
+			"key", key, "valSlot", val,
+			"valMain", valMain, "SlotIndex", slotDB.parallel.SlotIndex,
+			"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
+		return true // return false, Range will be terminated.
+	}
+	return false
+}
+
+var checkReqCh chan KvCheckMessage
+var checkResCh chan bool
+
+func StartKvCheckLoop() {
+	// start routines to do conflict check
+	checkReqCh = make(chan KvCheckMessage, 200)
+	checkResCh = make(chan bool, 10)
+	for i := 0; i < runtime.NumCPU(); i++ {
+		go func() {
+			for {
+				kvEle1 := <-checkReqCh
+				checkResCh <- hasKvConflict(kvEle1.slotDB, kvEle1.kvUnit.addr,
+					kvEle1.kvUnit.key, kvEle1.kvUnit.val, kvEle1.isStage2)
+			}
+		}()
+	}
+}
+
 // in stage2, we do unconfirmed conflict detect
 func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int) bool {
+	if !kvCheckLoopStarted {
+		kvCheckLoopStarted = true
+		StartKvCheckLoop()
+	}
 	slotDB := s
 	mainDB := slotDB.parallel.baseStateDB
 	// for nonce
@@ -3460,36 +3522,75 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 			}
 		}
 	}
-
 	// check KV
-	for addr, slotStorage := range slotDB.parallel.kvReadsInSlot {
-		conflict := false
-		slotStorage.Range(func(keySlot, valSlot interface{}) bool {
-			if isStage2 { // update slotDB's unconfirmed DB list and try
-				if valUnconfirm, ok := slotDB.getKVFromUnconfirmedDB(addr, keySlot.(common.Hash)); ok {
-					if !bytes.Equal(valSlot.(common.Hash).Bytes(), valUnconfirm.Bytes()) {
-						log.Debug("IsSlotDBReadsValid nonce read is invalid in unconfirmed", "addr", addr,
-							"valSlot", valSlot.(common.Hash), "valUnconfirm", valUnconfirm,
-							"SlotIndex", slotDB.parallel.SlotIndex,
-							"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
-						conflict = true
-						return false // return false, Range will be terminated.
+	var units []KvCheckUnit // todo: pre-allocate to make it faster
+	for addr, read := range slotDB.parallel.kvReadsInSlot {
+		read.Range(func(keySlot, valSlot interface{}) bool {
+			units = append(units, KvCheckUnit{addr, keySlot.(common.Hash), valSlot.(common.Hash)})
+			return true
+		})
+	}
+	readLen := len(units)
+	if readLen < 8 || isStage2 {
+		for _, unit := range units {
+			if hasKvConflict(slotDB, unit.addr, unit.key, unit.val, isStage2) {
+				return false
+			}
+		}
+	} else {
+		msgHandledNum := 0
+		msgSendNum := 0
+		for _, unit := range units {
+			for { // make sure the unit is consumed
+				consumed := false
+				select {
+				case conflict := <-checkResCh: // consume result if checkReqCh is blocked
+					msgHandledNum++
+					if conflict {
+						// make sure all request are handled or discarded
+						for {
+							if msgHandledNum == msgSendNum {
+								break
+							}
+							select {
+							case <-checkReqCh:
+								msgHandledNum++
+							case <-checkResCh:
+								msgHandledNum++
+							}
+						}
+						return false
 					}
+				case checkReqCh <- KvCheckMessage{slotDB, isStage2, unit}:
+					msgSendNum++
+					consumed = true
+				}
+				if consumed {
+					break
 				}
 			}
-			valMain := mainDB.GetState(addr, keySlot.(common.Hash))
-			if !bytes.Equal(valSlot.(common.Hash).Bytes(), valMain.Bytes()) {
-				log.Debug("IsSlotDBReadsValid KV read is invalid", "addr", addr,
-					"key", keySlot.(common.Hash), "valSlot", valSlot.(common.Hash),
-					"valMain", valMain, "SlotIndex", slotDB.parallel.SlotIndex,
-					"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
-				conflict = true
-				return false // return false, Range will be terminated.
+		}
+		for {
+			if msgHandledNum == readLen {
+				break
 			}
-			return true // return true, Range will try next KV
-		})
-		if conflict {
-			return false
+			conflict := <-checkResCh
+			msgHandledNum++
+			if conflict {
+				// make sure all request are handled or discarded
+				for {
+					if msgHandledNum == msgSendNum {
+						break
+					}
+					select {
+					case <-checkReqCh:
+						msgHandledNum++
+					case <-checkResCh:
+						msgHandledNum++
+					}
+				}
+				return false
+			}
 		}
 	}
 	if isStage2 { // stage2 skip check code, or state, since they are likely unchanged.
