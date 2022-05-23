@@ -3087,7 +3087,7 @@ func CalculateDiffHash(d *types.DiffLayer) (common.Hash, error) {
 	return hash, nil
 }
 
-func EnableParallelProcessor(parallelNum int, queueSize int) BlockChainOption {
+func EnableParallelProcessor(parallelNum int) BlockChainOption {
 	return func(chain *BlockChain) (*BlockChain, error) {
 		if chain.snaps == nil {
 			// disable parallel processor if snapshot is not enabled to avoid concurrent issue for SecureTrie
@@ -3095,7 +3095,7 @@ func EnableParallelProcessor(parallelNum int, queueSize int) BlockChainOption {
 			return chain, nil
 		}
 		chain.parallelExecution = true
-		chain.processor = NewParallelStateProcessor(chain.Config(), chain, chain.engine, parallelNum, queueSize)
+		chain.processor = NewParallelStateProcessor(chain.Config(), chain, chain.engine, parallelNum)
 		return chain, nil
 	}
 }
