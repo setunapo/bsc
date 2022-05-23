@@ -379,6 +379,18 @@ func (dl *diffLayer) accountRLP(hash common.Hash, depth int) ([]byte, error) {
 	return dl.parent.AccountRLP(hash)
 }
 
+// StaleOrGenerating returns whether the snapshot is stale or generating
+func (dl *diffLayer) StaleOrGenerating() bool {
+	dl.lock.RLock()
+	defer dl.lock.RUnlock()
+
+	if dl.Stale() {
+		return true
+	}
+
+	return dl.parent.Stale()
+}
+
 // Storage directly retrieves the storage data associated with a particular hash,
 // within a particular account. If the slot is unknown to this diff, it's parent
 // is consulted.
