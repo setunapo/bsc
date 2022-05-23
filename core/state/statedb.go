@@ -58,17 +58,7 @@ var (
 
 	emptyAddr = crypto.Keccak256Hash(common.Address{}.Bytes())
 
-	// https://bscscan.com/address/0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c
 	WBNBAddress = common.HexToAddress("0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c")
-	// EVM use big-endian mode, so as the MethodID
-	WBNBAddress_deposit      = []byte{0xd0, 0xe3, 0x0d, 0xb0} // "0xd0e30db0": Keccak-256("deposit()")
-	WBNBAddress_withdraw     = []byte{0x2e, 0x1a, 0x7d, 0x4d} // "0x2e1a7d4d": Keccak-256("withdraw(uint256)")
-	WBNBAddress_totalSupply  = []byte{0x18, 0x16, 0x0d, 0xdd} // "0x18160ddd": Keccak-256("totalSupply()")
-	WBNBAddress_approve      = []byte{0x09, 0x5e, 0xa7, 0xb3} // "0x095ea7b3": Keccak-256("approve(address,uint256)")
-	WBNBAddress_transfer     = []byte{0xa9, 0x05, 0x9c, 0xbb} // "0xa9059cbb": Keccak-256("transfer(address,uint256)")
-	WBNBAddress_transferFrom = []byte{0x23, 0xb8, 0x72, 0xdd} // "0x23b872dd": Keccak-256("transferFrom(address,address,uint256)")
-	// unknown WBNB interface 1: {0xDD, 0x62,0xED, 0x3E} in block: 14,248,627
-	// unknown WBNB interface 2: {0x70, 0xa0,0x82, 0x31} in block: 14,249,300
 )
 
 type proofList [][]byte
@@ -846,10 +836,9 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *StateObject {
 }
 
 // GetOrNewStateObject retrieves a state object or create a new state object if nil.
-// dirtyInSlot -> Unconfirmed DB -> main DB -> snapshot, no? create one
 func (s *StateDB) GetOrNewStateObject(addr common.Address) *StateObject {
 	stateObject := s.getStateObject(addr)
-	if stateObject == nil || stateObject.deleted || stateObject.suicided {
+	if stateObject == nil {
 		stateObject = s.createObject(addr)
 	}
 	return stateObject
@@ -2156,7 +2145,6 @@ func (s *StateDB) AddrPrefetch(slotDb *ParallelStateDB) {
 // MergeSlotDB is for Parallel execution mode, when the transaction has been
 // finalized(dirty -> pending) on execution slot, the execution results should be
 // merged back to the main StateDB.
-// And it will return and keep the slot's change list for later conflict detect.
 func (s *StateDB) MergeSlotDB(slotDb *ParallelStateDB, slotReceipt *types.Receipt, txIndex int) {
 	// receipt.Logs use unified log index within a block
 	// align slotDB's log index to the block stateDB's logSize
@@ -2265,7 +2253,6 @@ func (s *StateDB) MergeSlotDB(slotDb *ParallelStateDB, slotReceipt *types.Receip
 	}
 
 	if s.prefetcher != nil && len(addressesToPrefetch) > 0 {
-		// log.Info("MergeSlotDB", "len(addressesToPrefetch)", len(addressesToPrefetch))
 		s.prefetcher.prefetch(s.originalRoot, addressesToPrefetch, emptyAddr) // prefetch for trie node of account
 	}
 
@@ -2316,11 +2303,65 @@ func (s *StateDB) ParallelMakeUp(addr common.Address, input []byte) {
 	// do nothing, this API is for parallel mode
 }
 
+type ParallelKvCheckUnit struct {
+	addr common.Address
+	key  common.Hash
+	val  common.Hash
+}
+type ParallelKvCheckMessage struct {
+	slotDB   *ParallelStateDB
+	isStage2 bool
+	kvUnit   ParallelKvCheckUnit
+}
+
+var parallelKvCheckReqCh chan ParallelKvCheckMessage
+var parallelKvCheckResCh chan bool
+
 type ParallelStateDB struct {
 	StateDB
-	wbnbMakeUp         bool // default true, we can not do WBNB make up only when supported API call is received.
+	wbnbMakeUp         bool // default true, we can not do WBNB make up if its absolute balance is used.
 	balanceUpdateDepth int
 	wbnbMakeUpBalance  *big.Int
+}
+
+func hasKvConflict(slotDB *ParallelStateDB, addr common.Address, key common.Hash, val common.Hash, isStage2 bool) bool {
+	mainDB := slotDB.parallel.baseStateDB
+
+	if isStage2 { // update slotDB's unconfirmed DB list and try
+		if valUnconfirm, ok := slotDB.getKVFromUnconfirmedDB(addr, key); ok {
+			if !bytes.Equal(val.Bytes(), valUnconfirm.Bytes()) {
+				log.Debug("IsSlotDBReadsValid KV read is invalid in unconfirmed", "addr", addr,
+					"valSlot", val, "valUnconfirm", valUnconfirm,
+					"SlotIndex", slotDB.parallel.SlotIndex,
+					"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
+				return true
+			}
+		}
+	}
+	valMain := mainDB.GetState(addr, key)
+	if !bytes.Equal(val.Bytes(), valMain.Bytes()) {
+		log.Debug("hasKvConflict is invalid", "addr", addr,
+			"key", key, "valSlot", val,
+			"valMain", valMain, "SlotIndex", slotDB.parallel.SlotIndex,
+			"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
+		return true // return false, Range will be terminated.
+	}
+	return false
+}
+
+// start several routines to do conflict check
+func StartKvCheckLoop() {
+	parallelKvCheckReqCh = make(chan ParallelKvCheckMessage, 200)
+	parallelKvCheckResCh = make(chan bool, 10)
+	for i := 0; i < runtime.NumCPU(); i++ {
+		go func() {
+			for {
+				kvEle1 := <-parallelKvCheckReqCh
+				parallelKvCheckResCh <- hasKvConflict(kvEle1.slotDB, kvEle1.kvUnit.addr,
+					kvEle1.kvUnit.key, kvEle1.kvUnit.val, kvEle1.isStage2)
+			}
+		}()
+	}
 }
 
 // NewSlotDB creates a new State DB based on the provided StateDB.
@@ -2359,7 +2400,6 @@ func NewSlotDB(db *StateDB, systemAddr common.Address, txIndex int, baseTxIndex 
 func (s *ParallelStateDB) RevertSlotDB(from common.Address) {
 	s.parallel.kvChangesInSlot = make(map[common.Address]StateKeys)
 
-	// balance := s.parallel.balanceChangesInSlot[from]
 	s.parallel.nonceChangesInSlot = make(map[common.Address]struct{})
 	s.parallel.balanceChangesInSlot = make(map[common.Address]struct{}, 1)
 	s.parallel.addrStateChangesInSlot = make(map[common.Address]bool) // 0: created, 1: deleted
@@ -2456,7 +2496,6 @@ func (s *ParallelStateDB) createObject(addr common.Address) (newobj *StateObject
 		s.journal.append(resetObjectChange{prev: prev, prevdestruct: prevdestruct})
 	}
 
-	// s.parallel.dirtiedStateObjectsInSlot[addr] = newobj  // would change the bahavior of AddBalance...
 	s.parallel.addrStateChangesInSlot[addr] = true // the object sis created
 	s.parallel.nonceChangesInSlot[addr] = struct{}{}
 	s.parallel.balanceChangesInSlot[addr] = struct{}{}
@@ -2495,15 +2534,16 @@ func (s *ParallelStateDB) getDeletedStateObject(addr common.Address) *StateObjec
 // dirtyInSlot -> Unconfirmed DB -> main DB -> snapshot, no? create one
 func (s *ParallelStateDB) GetOrNewStateObject(addr common.Address) *StateObject {
 	var stateObject *StateObject = nil
-	exist := true
 	if stateObject, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
 		return stateObject
 	}
-	stateObject, _ = s.getStateObjectFromUnconfirmedDB(addr)
 
+	stateObject, _ = s.getStateObjectFromUnconfirmedDB(addr)
 	if stateObject == nil {
 		stateObject = s.getStateObjectNoSlot(addr) // try to get from base db
 	}
+
+	exist := true
 	if stateObject == nil || stateObject.deleted || stateObject.suicided {
 		stateObject = s.createObject(addr)
 		exist = false
@@ -3402,60 +3442,6 @@ func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (
 	return nil, false
 }
 
-type KvCheckUnit struct {
-	addr common.Address
-	key  common.Hash
-	val  common.Hash
-}
-type KvCheckMessage struct {
-	slotDB   *ParallelStateDB
-	isStage2 bool
-	kvUnit   KvCheckUnit
-}
-
-func hasKvConflict(slotDB *ParallelStateDB, addr common.Address, key common.Hash, val common.Hash, isStage2 bool) bool {
-	mainDB := slotDB.parallel.baseStateDB
-
-	if isStage2 { // update slotDB's unconfirmed DB list and try
-		if valUnconfirm, ok := slotDB.getKVFromUnconfirmedDB(addr, key); ok {
-			if !bytes.Equal(val.Bytes(), valUnconfirm.Bytes()) {
-				log.Debug("IsSlotDBReadsValid KV read is invalid in unconfirmed", "addr", addr,
-					"valSlot", val, "valUnconfirm", valUnconfirm,
-					"SlotIndex", slotDB.parallel.SlotIndex,
-					"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
-				return true
-			}
-		}
-	}
-	valMain := mainDB.GetState(addr, key)
-	if !bytes.Equal(val.Bytes(), valMain.Bytes()) {
-		log.Debug("hasKvConflict is invalid", "addr", addr,
-			"key", key, "valSlot", val,
-			"valMain", valMain, "SlotIndex", slotDB.parallel.SlotIndex,
-			"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
-		return true // return false, Range will be terminated.
-	}
-	return false
-}
-
-var checkReqCh chan KvCheckMessage
-var checkResCh chan bool
-
-func StartKvCheckLoop() {
-	// start routines to do conflict check
-	checkReqCh = make(chan KvCheckMessage, 200)
-	checkResCh = make(chan bool, 10)
-	for i := 0; i < runtime.NumCPU(); i++ {
-		go func() {
-			for {
-				kvEle1 := <-checkReqCh
-				checkResCh <- hasKvConflict(kvEle1.slotDB, kvEle1.kvUnit.addr,
-					kvEle1.kvUnit.key, kvEle1.kvUnit.val, kvEle1.isStage2)
-			}
-		}()
-	}
-}
-
 // in stage2, we do unconfirmed conflict detect
 func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int) bool {
 	once.Do(func() {
@@ -3542,10 +3528,10 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 		}
 	}
 	// check KV
-	var units []KvCheckUnit // todo: pre-allocate to make it faster
+	var units []ParallelKvCheckUnit // todo: pre-allocate to make it faster
 	for addr, read := range slotDB.parallel.kvReadsInSlot {
 		read.Range(func(keySlot, valSlot interface{}) bool {
-			units = append(units, KvCheckUnit{addr, keySlot.(common.Hash), valSlot.(common.Hash)})
+			units = append(units, ParallelKvCheckUnit{addr, keySlot.(common.Hash), valSlot.(common.Hash)})
 			return true
 		})
 	}
@@ -3563,7 +3549,7 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 			for { // make sure the unit is consumed
 				consumed := false
 				select {
-				case conflict := <-checkResCh: // consume result if checkReqCh is blocked
+				case conflict := <-parallelKvCheckResCh:
 					msgHandledNum++
 					if conflict {
 						// make sure all request are handled or discarded
@@ -3572,15 +3558,15 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 								break
 							}
 							select {
-							case <-checkReqCh:
+							case <-parallelKvCheckReqCh:
 								msgHandledNum++
-							case <-checkResCh:
+							case <-parallelKvCheckResCh:
 								msgHandledNum++
 							}
 						}
 						return false
 					}
-				case checkReqCh <- KvCheckMessage{slotDB, isStage2, unit}:
+				case parallelKvCheckReqCh <- ParallelKvCheckMessage{slotDB, isStage2, unit}:
 					msgSendNum++
 					consumed = true
 				}
@@ -3593,7 +3579,7 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 			if msgHandledNum == readLen {
 				break
 			}
-			conflict := <-checkResCh
+			conflict := <-parallelKvCheckResCh
 			msgHandledNum++
 			if conflict {
 				// make sure all request are handled or discarded
@@ -3602,9 +3588,9 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int)
 						break
 					}
 					select {
-					case <-checkReqCh:
+					case <-parallelKvCheckReqCh:
 						msgHandledNum++
-					case <-checkResCh:
+					case <-parallelKvCheckResCh:
 						msgHandledNum++
 					}
 				}
@@ -3717,23 +3703,33 @@ func (s *ParallelStateDB) ParallelMakeUp(addr common.Address, input []byte) {
 			s.wbnbMakeUp = false
 			return
 		}
+		// EVM use big-endian mode, so as the MethodID
+		wbnbDeposit := []byte{0xd0, 0xe3, 0x0d, 0xb0}      // "0xd0e30db0": Keccak-256("deposit()")
+		wbnbWithdraw := []byte{0x2e, 0x1a, 0x7d, 0x4d}     // "0x2e1a7d4d": Keccak-256("withdraw(uint256)")
+		wbnbApprove := []byte{0x09, 0x5e, 0xa7, 0xb3}      // "0x095ea7b3": Keccak-256("approve(address,uint256)")
+		wbnbTransfer := []byte{0xa9, 0x05, 0x9c, 0xbb}     // "0xa9059cbb": Keccak-256("transfer(address,uint256)")
+		wbnbTransferFrom := []byte{0x23, 0xb8, 0x72, 0xdd} // "0x23b872dd": Keccak-256("transferFrom(address,address,uint256)")
+		// wbnbTotalSupply := []byte{0x18, 0x16, 0x0d, 0xdd}  // "0x18160ddd": Keccak-256("totalSupply()")
+		// unknown WBNB interface 1: {0xDD, 0x62,0xED, 0x3E} in block: 14,248,627
+		// unknown WBNB interface 2: {0x70, 0xa0,0x82, 0x31} in block: 14,249,300
+
 		methodId := input[:4]
-		if bytes.Equal(methodId, WBNBAddress_deposit) {
+		if bytes.Equal(methodId, wbnbDeposit) {
 			return
 		}
-		if bytes.Equal(methodId, WBNBAddress_withdraw) {
+		if bytes.Equal(methodId, wbnbWithdraw) {
 			return
 		}
-		if bytes.Equal(methodId, WBNBAddress_approve) {
+		if bytes.Equal(methodId, wbnbApprove) {
 			return
 		}
-		if bytes.Equal(methodId, WBNBAddress_transfer) {
+		if bytes.Equal(methodId, wbnbTransfer) {
 			return
 		}
-		if bytes.Equal(methodId, WBNBAddress_transferFrom) {
+		if bytes.Equal(methodId, wbnbTransferFrom) {
 			return
 		}
-		// if bytes.Equal(methodId, WBNBAddress_totalSupply) {
+		// if bytes.Equal(methodId, wbnbTotalSupply) {
 		// log.Debug("ParallelMakeUp for WBNB, not for totalSupply", "input size", len(input), "input", input)
 		// s.wbnbMakeUp = false // can not makeup
 		// return
