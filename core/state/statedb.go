@@ -122,7 +122,7 @@ func (s *StateDB) deleteStateObj(addr common.Address) {
 // For parallel mode only
 type ParallelState struct {
 	isSlotDB  bool // denotes StateDB is used in slot, we will try to remove it
-	SlotIndex int  // fixme: to be removed
+	SlotIndex int  // for debug, to be removed
 	// stateObjects holds the state objects in the base slot db
 	// the reason for using stateObjects instead of stateObjects on the outside is
 	// we need a thread safe map to hold state objects since there are many slots will read
@@ -824,10 +824,6 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *StateObject {
 		return nil
 	}
 	// Insert into the live set
-	// if obj, ok := s.loadStateObj(addr); ok {
-	// fixme: concurrent not safe, merge could update it...
-	// return obj
-	//}
 	obj := newObject(s, s.isParallel, addr, *data)
 	s.storeStateObj(addr, obj)
 	return obj
@@ -2476,7 +2472,7 @@ func (s *ParallelStateDB) createObject(addr common.Address) (newobj *StateObject
 
 	if s.snap != nil && prev != nil {
 		s.snapParallelLock.Lock()
-		_, prevdestruct = s.snapDestructs[prev.address] // fixme, record the snapshot read for create Account
+		_, prevdestruct = s.snapDestructs[prev.address]
 		s.parallel.addrSnapDestructsReadsInSlot[addr] = prevdestruct
 		if !prevdestruct {
 			// To destroy the previous trie node first and update the trie tree
@@ -2516,11 +2512,6 @@ func (s *ParallelStateDB) getDeletedStateObject(addr common.Address) *StateObjec
 	if !ok {
 		return nil
 	}
-	// Insert into the live set
-	// if obj, ok := s.loadStateObj(addr); ok {
-	// fixme: concurrent not safe, merge could update it...
-	// return obj
-	// }
 	// this is why we have to use a seperate getDeletedStateObject for ParallelStateDB
 	// `s` has to be the ParallelStateDB
 	obj := newObject(s, s.isParallel, addr, *data)
@@ -2896,12 +2887,7 @@ func (s *ParallelStateDB) HasSuicided(addr common.Address) bool {
 // AddBalance adds amount to the account associated with addr.
 func (s *ParallelStateDB) AddBalance(addr common.Address, amount *big.Int) {
 	// add balance will perform a read operation first
-	// s.parallel.balanceReadsInSlot[addr] = struct{}{} // fixme: to make the the balance valid, since unconfirmed would refer it.
-	// if amount.Sign() == 0 {
 	// if amount == 0, no balance change, but there is still an empty check.
-	// take this empty check as addr state read(create, suicide, empty delete)
-	// s.parallel.addrStateReadsInSlot[addr] = struct{}{}
-	// }
 	s.balanceUpdateDepth++
 	defer func() {
 		s.balanceUpdateDepth--
@@ -2911,13 +2897,11 @@ func (s *ParallelStateDB) AddBalance(addr common.Address, amount *big.Int) {
 		if addr == s.parallel.systemAddress {
 			s.parallel.systemAddressOpsCount++
 		}
-		// if amount.Sign() != 0 { // todo: to reenable it
 		if _, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
 			newStateObject := stateObject.lightCopy(s) // light copy from main DB
 			// do balance fixup from the confirmed DB, it could be more reliable than main DB
-			balance := s.GetBalance(addr)
+			balance := s.GetBalance(addr) // it will record the balance read operation
 			newStateObject.setBalance(balance)
-			// s.parallel.balanceReadsInSlot[addr] = newStateObject.Balance() // could read from main DB or unconfirmed DB
 			newStateObject.AddBalance(amount)
 			s.parallel.dirtiedStateObjectsInSlot[addr] = newStateObject
 			s.parallel.balanceChangesInSlot[addr] = struct{}{}
@@ -2941,10 +2925,7 @@ func (s *ParallelStateDB) AddBalance(addr common.Address, amount *big.Int) {
 
 // SubBalance subtracts amount from the account associated with addr.
 func (s *ParallelStateDB) SubBalance(addr common.Address, amount *big.Int) {
-	// if amount.Sign() != 0 {
 	// unlike add, sub 0 balance will not touch empty object
-	// s.parallel.balanceReadsInSlot[addr] = struct{}{}
-	// }
 	s.balanceUpdateDepth++
 	defer func() {
 		s.balanceUpdateDepth--
@@ -2956,13 +2937,11 @@ func (s *ParallelStateDB) SubBalance(addr common.Address, amount *big.Int) {
 			s.parallel.systemAddressOpsCount++
 		}
 
-		// if amount.Sign() != 0 { // todo: to reenable it
 		if _, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
 			newStateObject := stateObject.lightCopy(s) // light copy from main DB
 			// do balance fixup from the confirmed DB, it could be more reliable than main DB
 			balance := s.GetBalance(addr)
 			newStateObject.setBalance(balance)
-			// s.parallel.balanceReadsInSlot[addr] = newStateObject.Balance()
 			newStateObject.SubBalance(amount)
 			s.parallel.balanceChangesInSlot[addr] = struct{}{}
 			s.parallel.dirtiedStateObjectsInSlot[addr] = newStateObject
@@ -3189,14 +3168,14 @@ func (s *ParallelStateDB) RevertToSnapshot(revid int) {
 
 // AddRefund adds gas to the refund counter
 // journal.append will use ParallelState for revert
-func (s *ParallelStateDB) AddRefund(gas uint64) { // fixme: not needed
+func (s *ParallelStateDB) AddRefund(gas uint64) { // todo: not needed, can be deleted
 	s.journal.append(refundChange{prev: s.refund})
 	s.refund += gas
 }
 
 // SubRefund removes gas from the refund counter.
 // This method will panic if the refund counter goes below zero
-func (s *ParallelStateDB) SubRefund(gas uint64) { // fixme: not needed
+func (s *ParallelStateDB) SubRefund(gas uint64) {
 	s.journal.append(refundChange{prev: s.refund})
 	if gas > s.refund {
 		// we don't need to panic here if we read the wrong state in parallelm mode
@@ -3442,7 +3421,7 @@ func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (
 }
 
 // in stage2, we do unconfirmed conflict detect
-func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int) bool {
+func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool) bool {
 	parallelKvOnce.Do(func() {
 		StartKvCheckLoop()
 	})
