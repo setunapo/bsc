@@ -48,14 +48,11 @@ const (
 	recentTime             = 1024 * 3
 	recentDiffLayerTimeout = 5
 	farDiffLayerTimeout    = 2
-	maxUnitSize            = 10
 
 	parallelPrimarySlot = 0
 	parallelShadowlot   = 1
-
-	stage2CheckNumber = 30 // not fixed, use decrease?
-	stage2RedoNumber  = 10
-	stage2AheadNum    = 3 // ?
+	stage2CheckNumber   = 30 // ConfirmStage2 will check this number of transaction, to avoid too busy stage2 check
+	stage2AheadNum      = 3  // enter ConfirmStage2 in advance to avoid waiting for Fat Tx
 )
 
 // StateProcessor is a basic Processor, which takes care of transitioning
@@ -79,23 +76,21 @@ func NewStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consen
 // add for parallel executions
 type ParallelStateProcessor struct {
 	StateProcessor
-	parallelNum int // leave a CPU to dispatcher
-	queueSize   int // parallel slot's maximum number of pending Txs
-	// pendingConfirmChan    chan *ParallelTxResult
-	pendingConfirmResults map[int][]*ParallelTxResult // tx could be executed several times, with several result to check
-	txResultChan          chan *ParallelTxResult      // to notify dispatcher that a tx is done
-	// txReqAccountSorted   map[common.Address][]*ParallelTxRequest // fixme: *ParallelTxRequest => ParallelTxRequest?
+	parallelNum           int          // leave a CPU to dispatcher
 	slotState             []*SlotState // idle, or pending messages
-	mergedTxIndex         int          // the latest finalized tx index, fixme: use Atomic
-	slotDBsToRelease      []*state.ParallelStateDB
-	debugConflictRedoNum  int
-	unconfirmedResults    *sync.Map // this is for stage2 confirm, since pendingConfirmResults can not be access in stage2 loop
+	allTxReqs             []*ParallelTxRequest
+	txResultChan          chan *ParallelTxResult      // to notify dispatcher that a tx is done
+	mergedTxIndex         int                         // the latest finalized tx index, fixme: use Atomic
+	pendingConfirmResults map[int][]*ParallelTxResult // tx could be executed several times, with several result to check
+	unconfirmedResults    *sync.Map                   // this is for stage2 confirm, since pendingConfirmResults can not be accessed in stage2 loop
 	unconfirmedDBs        *sync.Map
+	slotDBsToRelease      []*state.ParallelStateDB
 	stopSlotChan          chan int      // fixme: use struct{}{}, to make sure all slot are idle
 	stopConfirmChan       chan struct{} // fixme: use struct{}{}, to make sure all slot are idle
+	debugConflictRedoNum  int
+	// start for confirm stage2
 	confirmStage2Chan     chan int
 	stopConfirmStage2Chan chan struct{}
-	allTxReqs             []*ParallelTxRequest
 	txReqExecuteRecord    map[int]int // for each the execute count of each Tx
 	txReqExecuteCount     int
 	inConfirmStage2       bool
@@ -103,11 +98,10 @@ type ParallelStateProcessor struct {
 	nextStage2TxIndex     int
 }
 
-func NewParallelStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consensus.Engine, parallelNum int, queueSize int) *ParallelStateProcessor {
+func NewParallelStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consensus.Engine, parallelNum int) *ParallelStateProcessor {
 	processor := &ParallelStateProcessor{
 		StateProcessor: *NewStateProcessor(config, bc, engine),
 		parallelNum:    parallelNum,
-		queueSize:      queueSize,
 	}
 	processor.init()
 	return processor
@@ -430,46 +424,37 @@ type SlotState struct {
 type ParallelTxResult struct {
 	executedIndex int  // the TxReq can be executed several time, increase index for each execution
 	updateSlotDB  bool // for redo and pending tx quest, slot needs new slotDB,
-	// keepSystem    bool  // for redo, should keep system address's balance
-	slotIndex int   // slot index
-	err       error // to describe error message?
-	txReq     *ParallelTxRequest
-	receipt   *types.Receipt
-	slotDB    *state.ParallelStateDB // if updated, it is not equal to txReq.slotDB
-	gpSlot    *GasPool
-	evm       *vm.EVM
-	result    *ExecutionResult
+	slotIndex     int  // slot index
+	txReq         *ParallelTxRequest
+	receipt       *types.Receipt
+	slotDB        *state.ParallelStateDB // if updated, it is not equal to txReq.slotDB
+	gpSlot        *GasPool
+	evm           *vm.EVM
+	result        *ExecutionResult
+	err           error // to describe error message?
 }
 
 type ParallelTxRequest struct {
-	txIndex int
-	// baseTxIndex     int
+	txIndex         int
 	baseStateDB     *state.StateDB
 	staticSlotIndex int // static dispatched id
 	tx              *types.Transaction
-	// slotDB         *state.ParallelStateDB
-	gasLimit       uint64
-	msg            types.Message
-	block          *types.Block
-	vmConfig       vm.Config
-	bloomProcessor *AsyncReceiptBloomGenerator
-	usedGas        *uint64
-	curTxChan      chan int
-	systemAddrRedo bool
-	// runnable 0: runnable
-	// runnable 1: it has been executed, but results has not been confirmed
-	// runnable 2: all confirmed,
-	runnable    int32
-	executedNum int
+	gasLimit        uint64
+	msg             types.Message
+	block           *types.Block
+	vmConfig        vm.Config
+	bloomProcessor  *AsyncReceiptBloomGenerator
+	usedGas         *uint64
+	curTxChan       chan int
+	systemAddrRedo  bool
+	runnable        int32 // 0: not runnable, 1: runnable
+	executedNum     int
 }
 
 // to create and start the execution slot goroutines
 func (p *ParallelStateProcessor) init() {
 	log.Info("Parallel execution mode is enabled", "Parallel Num", p.parallelNum,
-		"CPUNum", runtime.NumCPU(),
-		"QueueSize", p.queueSize)
-	// In extreme case, parallelNum*2 are requiring updateStateDB,
-	// confirmLoop is deliverring the valid result or asking for AddrPrefetch.
+		"CPUNum", runtime.NumCPU())
 	p.txResultChan = make(chan *ParallelTxResult, 200)
 	p.stopSlotChan = make(chan int, 1)
 	p.stopConfirmChan = make(chan struct{}, 1)
@@ -498,10 +483,6 @@ func (p *ParallelStateProcessor) init() {
 
 	}
 
-	// p.pendingConfirmChan = make(chan *ParallelTxResult, 400)
-	//go func() {
-	//	p.runConfirmLoop() // this loop will be permanent live
-	//}()
 	p.confirmStage2Chan = make(chan int, 10)
 	go func() {
 		p.runConfirmStage2Loop() // this loop will be permanent live
@@ -516,7 +497,6 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	p.mergedTxIndex = -1
 	p.debugConflictRedoNum = 0
 	p.inConfirmStage2 = false
-	// p.txReqAccountSorted = make(map[common.Address][]*ParallelTxRequest) // fixme: to be reused?
 
 	statedb.PrepareForParallel()
 	p.allTxReqs = make([]*ParallelTxRequest, 0)
@@ -532,8 +512,8 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 		slot.pendingTxReqList = make([]*ParallelTxRequest, 0)
 		slot.activatedType = 0
 	}
-	p.unconfirmedResults = new(sync.Map) // make(map[int]*state.ParallelStateDB)
-	p.unconfirmedDBs = new(sync.Map)     // make(map[int]*state.ParallelStateDB)
+	p.unconfirmedResults = new(sync.Map)
+	p.unconfirmedDBs = new(sync.Map)
 	p.pendingConfirmResults = make(map[int][]*ParallelTxResult, 200)
 	p.txReqExecuteRecord = make(map[int]int, 200)
 	p.txReqExecuteCount = 0
@@ -866,11 +846,6 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 		// conflictNumMark := p.debugConflictRedoNum
 		for txIndex := startTxIndex; txIndex < endTxIndex; txIndex++ {
 			p.toConfirmTxIndex(txIndex, true)
-			// newConflictNum := p.debugConflictRedoNum - conflictNumMark
-			// to avoid schedule too many redo each time.
-			// if newConflictNum >= stage2RedoNumber {
-			// break
-			//}
 		}
 		// make sure all slots are wake up
 		for i := 0; i < p.parallelNum; i++ {
