@@ -24,7 +24,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/ethdb"
-	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/trie"
 	lru "github.com/hashicorp/golang-lru"
 )
@@ -188,7 +187,7 @@ func (db *cachingDB) purgeLoop() {
 
 // OpenTrie opens the main account trie at a specific root hash.
 func (db *cachingDB) OpenTrie(root common.Hash) (Trie, error) {
-	defer debug.Handler.StartRegionAuto("OpenTrie")()
+	// defer debug.Handler.StartRegionAuto("OpenTrie")()
 	if db.accountTrieCache != nil {
 		if tr, exist := db.accountTrieCache.Get(root); exist {
 			return tr.(Trie).(*trie.SecureTrie).Copy(), nil
@@ -203,7 +202,7 @@ func (db *cachingDB) OpenTrie(root common.Hash) (Trie, error) {
 
 // OpenStorageTrie opens the storage trie of an account.
 func (db *cachingDB) OpenStorageTrie(addrHash, root common.Hash) (Trie, error) {
-	defer debug.Handler.StartRegionAuto("OpenStorageTrie")()
+	// defer debug.Handler.StartRegionAuto("OpenStorageTrie")()
 	if db.storageTrieCache != nil {
 		if tries, exist := db.storageTrieCache.Get(addrHash); exist {
 			triesPairs := tries.([3]*triePair)

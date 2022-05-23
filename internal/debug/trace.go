@@ -78,14 +78,10 @@ func (h *HandlerT) RpcEnableTraceCapture() error {
 		log.Info("trace task is already running")
 		return nil
 	}
-	h.tracePhase++
 	// create file
 	h.mu.Unlock()
 	h.StartGoTrace("")
 	h.mu.Lock()
-	if h.tracePhase == 3 {
-		h.tracePhase = 0
-	}
 	f := h.traceW
 	if err := trace.Start(f); err != nil {
 		f.Close()
@@ -159,7 +155,11 @@ func (h *HandlerT) EnableTraceBigBlock(blockNum uint64, txNum int, subfix string
 		if h.traceBigNum == 0 {
 			h.traceBigBlock = false
 		}
+		h.tracePhase++
 		h.RpcEnableTraceCapture()
+		if h.tracePhase == 3 {
+			h.tracePhase = 0
+		}
 	}
 }
 func (h *HandlerT) Ctx() context.Context {

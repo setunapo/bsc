@@ -361,7 +361,7 @@ func (s *StateObject) setOriginStorage(key common.Hash, value common.Hash) {
 
 // GetCommittedState retrieves a value from the committed account storage trie.
 func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Hash {
-	defer debug.Handler.StartRegionAuto("GetCommittedState")()
+	// defer debug.Handler.StartRegionAuto("GetCommittedState")()
 	// If the fake storage is set, only lookup the state here(in the debugging mode)
 	if s.fakeStorage != nil {
 		fakeValue, _ := s.fakeStorage.GetValue(key)
@@ -375,7 +375,7 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 	if value, cached := s.getOriginStorage(key); cached {
 		return value
 	}
-	defer debug.Handler.StartRegionAuto("GetFromSnapshot")()
+	// defer debug.Handler.StartRegionAuto("GetFromSnapshot")()
 	// If no live objects are available, attempt to use snapshots
 	var (
 		enc   []byte
@@ -409,9 +409,9 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 			return common.Hash{}
 		}
 		s.db.snapParallelLock.RUnlock()
-		region1 := debug.Handler.StartTrace("Snapshot Storage")
+		// region1 := debug.Handler.StartTrace("Snapshot Storage")
 		enc, err = s.db.snap.Storage(s.addrHash, crypto.Keccak256Hash(key.Bytes()))
-		debug.Handler.EndTrace(region1)
+		// debug.Handler.EndTrace(region1)
 	}
 	// If snapshot unavailable or reading from it failed, load from the database
 	if s.db.snap == nil || err != nil {
@@ -712,7 +712,7 @@ func (s *StateObject) deepCopy(db *StateDB) *StateObject {
 }
 
 func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys StateKeys) {
-	defer debug.Handler.StartRegionAuto("MergeSlotObject")()
+	// defer debug.Handler.StartRegionAuto("MergeSlotObject")()
 	for key := range keys {
 		// In parallel mode, always GetState by StateDB, not by StateObject directly,
 		// since it the KV could exist in unconfirmed DB.

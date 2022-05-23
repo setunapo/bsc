@@ -549,7 +549,7 @@ func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
 
 // GetState retrieves a value from the given account's storage trie.
 func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
-	defer debug.Handler.StartRegionAuto("GetState")()
+	// defer debug.Handler.StartRegionAuto("GetState")()
 	stateObject := s.getStateObject(addr)
 	val := common.Hash{}
 	if stateObject != nil {
@@ -716,7 +716,7 @@ func (s *StateDB) Suicide(addr common.Address) bool {
 
 // updateStateObject writes the given object to the trie.
 func (s *StateDB) updateStateObject(obj *StateObject) {
-	defer debug.Handler.StartRegionAuto("updateStateObject")()
+	// defer debug.Handler.StartRegionAuto("updateStateObject")()
 	// Track the amount of time wasted on updating the account from the trie
 	if metrics.EnabledExpensive {
 		defer func(start time.Time) { s.AccountUpdates += time.Since(start) }(time.Now())
@@ -2812,7 +2812,7 @@ func (s *ParallelStateDB) GetCodeHash(addr common.Address) common.Hash {
 //   -> pending of main StateDB
 //   -> origin
 func (s *ParallelStateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
-	defer debug.Handler.StartRegionAuto("GetState")()
+	// defer debug.Handler.StartRegionAuto("GetState")()
 	// 1.Try to get from dirty
 	if exist, ok := s.parallel.addrStateChangesInSlot[addr]; ok {
 		if !exist {
@@ -3411,7 +3411,7 @@ func (s *ParallelStateDB) getAddrStateFromUnconfirmedDB(addr common.Address) (bo
 }
 
 func (s *ParallelStateDB) getKVFromUnconfirmedDB(addr common.Address, key common.Hash) (common.Hash, bool) {
-	defer debug.Handler.StartRegionAuto("getKVFromUnconfirmedDB")()
+	// defer debug.Handler.StartRegionAuto("getKVFromUnconfirmedDB")()
 	// check the unconfirmed DB with range:  baseTxIndex -> txIndex -1(previous tx)
 	for i := s.txIndex - 1; i > s.parallel.baseStateDB.txIndex; i-- {
 		db_, ok := s.parallel.unconfirmedDBs.Load(i)

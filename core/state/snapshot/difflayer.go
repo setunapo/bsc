@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/rlp"
 	bloomfilter "github.com/holiman/bloomfilter/v2"
 )
@@ -422,7 +421,7 @@ func (dl *diffLayer) accountRLP(hash common.Hash, depth int) ([]byte, error) {
 //
 // Note the returned slot is not a copy, please don't modify it.
 func (dl *diffLayer) Storage(accountHash, storageHash common.Hash) ([]byte, error) {
-	defer debug.Handler.StartRegionAuto("diffLayer.Storage")()
+	// defer debug.Handler.StartRegionAuto("diffLayer.Storage")()
 	// debug.Handler.LogWhenTracing("diffLayer.Storage accountHash:" + accountHash.String() +
 	//	" storageHash:" + storageHash.String())
 
