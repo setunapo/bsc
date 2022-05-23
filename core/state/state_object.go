@@ -186,7 +186,6 @@ type StateObject struct {
 func (s *StateObject) empty() bool {
 	// return s.data.Nonce == 0 && s.data.Balance.Sign() == 0 && bytes.Equal(s.data.CodeHash, emptyCodeHash)
 
-	// 0426, leave some notation, empty() works so far
 	// empty() has 3 use cases:
 	// 1.StateDB.Empty(), to empty check
 	//   A: It is ok, we have handled it in Empty(), to make sure nonce, balance, codeHash are solid
@@ -218,7 +217,6 @@ func (s *StateObject) empty() bool {
 	//   Slot 0 tx 0: no access to addr_1
 	//   Slot 1 tx 1: sub balance 100, it is empty and deleted
 	//   Slot 0 tx 2: GetNonce, lightCopy based on main DB(balance = 100) , not empty
-	// return s.db.GetNonce(s.address) == 0 && s.db.GetBalance(s.address).Sign() == 0 && bytes.Equal(s.db.GetCodeHash(s.address).Bytes(), emptyCodeHash)
 
 	if s.dbItf.GetBalance(s.address).Sign() != 0 { // check balance first, since it is most likely not zero
 		return false
@@ -708,7 +706,6 @@ func (s *StateObject) MergeSlotObject(db Database, dirtyObjs *StateObject, keys 
 		// In parallel mode, always GetState by StateDB, not by StateObject directly,
 		// since it the KV could exist in unconfirmed DB.
 		// But here, it should be ok, since the KV should be changed and valid in the SlotDB,
-		// s.SetState(db, key, dirtyObjs.GetState(db, key))
 		s.setState(key, dirtyObjs.GetState(db, key))
 	}
 }
