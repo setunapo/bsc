@@ -85,8 +85,8 @@ type ParallelStateProcessor struct {
 	unconfirmedResults    *sync.Map                   // this is for stage2 confirm, since pendingConfirmResults can not be accessed in stage2 loop
 	unconfirmedDBs        *sync.Map
 	slotDBsToRelease      []*state.ParallelStateDB
-	stopSlotChan          chan int      // fixme: use struct{}{}, to make sure all slot are idle
-	stopConfirmChan       chan struct{} // fixme: use struct{}{}, to make sure all slot are idle
+	stopSlotChan          chan struct{}
+	stopConfirmChan       chan struct{}
 	debugConflictRedoNum  int
 	// start for confirm stage2
 	confirmStage2Chan     chan int
@@ -412,26 +412,23 @@ func (p *LightStateProcessor) LightProcess(diffLayer *types.DiffLayer, block *ty
 
 type SlotState struct {
 	pendingTxReqList  []*ParallelTxRequest
-	primaryWakeUpChan chan *ParallelTxRequest
-	shadowWakeUpChan  chan *ParallelTxRequest
+	primaryWakeUpChan chan struct{}
+	shadowWakeUpChan  chan struct{}
 	primaryStopChan   chan struct{}
 	shadowStopChan    chan struct{}
-
-	slotDBChan    chan *state.ParallelStateDB // to update SlotDB
-	activatedType int32                       // 0: primary slot, 1: shadow slot
+	activatedType     int32 // 0: primary slot, 1: shadow slot
 }
 
 type ParallelTxResult struct {
-	executedIndex int  // the TxReq can be executed several time, increase index for each execution
-	updateSlotDB  bool // for redo and pending tx quest, slot needs new slotDB,
-	slotIndex     int  // slot index
+	executedIndex int // the TxReq can be executed several time, increase index for each execution
+	slotIndex     int // slot index
 	txReq         *ParallelTxRequest
 	receipt       *types.Receipt
 	slotDB        *state.ParallelStateDB // if updated, it is not equal to txReq.slotDB
 	gpSlot        *GasPool
 	evm           *vm.EVM
 	result        *ExecutionResult
-	err           error // to describe error message?
+	err           error
 }
 
 type ParallelTxRequest struct {
@@ -456,16 +453,15 @@ func (p *ParallelStateProcessor) init() {
 	log.Info("Parallel execution mode is enabled", "Parallel Num", p.parallelNum,
 		"CPUNum", runtime.NumCPU())
 	p.txResultChan = make(chan *ParallelTxResult, 200)
-	p.stopSlotChan = make(chan int, 1)
+	p.stopSlotChan = make(chan struct{}, 1)
 	p.stopConfirmChan = make(chan struct{}, 1)
 	p.stopConfirmStage2Chan = make(chan struct{}, 1)
 
 	p.slotState = make([]*SlotState, p.parallelNum)
 	for i := 0; i < p.parallelNum; i++ {
 		p.slotState[i] = &SlotState{
-			slotDBChan:        make(chan *state.ParallelStateDB, 1),
-			primaryWakeUpChan: make(chan *ParallelTxRequest, 1),
-			shadowWakeUpChan:  make(chan *ParallelTxRequest, 1),
+			primaryWakeUpChan: make(chan struct{}, 1),
+			shadowWakeUpChan:  make(chan struct{}, 1),
 			primaryStopChan:   make(chan struct{}, 1),
 			shadowStopChan:    make(chan struct{}, 1),
 		}
@@ -592,12 +588,12 @@ func (p *ParallelStateProcessor) switchSlot(slotIndex int) {
 	if atomic.CompareAndSwapInt32(&slot.activatedType, 0, 1) {
 		// switch from normal to shadow slot
 		if len(slot.shadowWakeUpChan) == 0 {
-			slot.shadowWakeUpChan <- nil // only notify when target once
+			slot.shadowWakeUpChan <- struct{}{} // only notify when target once
 		}
 	} else if atomic.CompareAndSwapInt32(&slot.activatedType, 1, 0) {
 		// switch from shadow to normal slot
 		if len(slot.primaryWakeUpChan) == 0 {
-			slot.primaryWakeUpChan <- nil // only notify when target once
+			slot.primaryWakeUpChan <- struct{}{} // only notify when target once
 		}
 	}
 }
@@ -617,7 +613,6 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 	evm, result, err := applyTransactionStageExecution(txReq.msg, gpSlot, slotDB, vmenv)
 	txResult := ParallelTxResult{
 		executedIndex: txReq.executedNum,
-		updateSlotDB:  false,
 		slotIndex:     slotIndex,
 		txReq:         txReq,
 		receipt:       nil, // receipt is generated in finalize stage
@@ -740,13 +735,12 @@ func (p *ParallelStateProcessor) toConfirmTxIndexResult(txResult *ParallelTxResu
 	txResult.receipt, txResult.err = applyTransactionStageFinalization(txResult.evm, txResult.result,
 		txReq.msg, p.config, txResult.slotDB, header,
 		txReq.tx, txReq.usedGas, txReq.bloomProcessor)
-	txResult.updateSlotDB = false
 	return true
 }
 
 func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 	curSlot := p.slotState[slotIndex]
-	var wakeupChan chan *ParallelTxRequest
+	var wakeupChan chan struct{}
 	var stopChan chan struct{}
 
 	if slotType == parallelPrimarySlot {
@@ -759,7 +753,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 	for {
 		select {
 		case <-stopChan:
-			p.stopSlotChan <- slotIndex
+			p.stopSlotChan <- struct{}{}
 			continue
 		case <-wakeupChan:
 		}
@@ -821,7 +815,7 @@ func (p *ParallelStateProcessor) runConfirmStage2Loop() {
 			for len(p.confirmStage2Chan) > 0 {
 				<-p.confirmStage2Chan
 			}
-			p.stopSlotChan <- -1
+			p.stopSlotChan <- struct{}{}
 			continue
 		case <-p.confirmStage2Chan:
 			for len(p.confirmStage2Chan) > 0 {
@@ -913,12 +907,8 @@ func (p *ParallelStateProcessor) doCleanUp() {
 		break
 	}
 	// 3.make sure the confirm routines are stopped
-	// p.stopConfirmChan <- struct{}{}
-	// <-p.stopSlotChan
-	log.Debug("ProcessParallel to stop confirm routine")
 	p.stopConfirmStage2Chan <- struct{}{}
 	<-p.stopSlotChan
-	log.Debug("ProcessParallel stopped confirm routine")
 }
 
 // Implement BEP-130: Parallel Transaction Execution.
@@ -931,10 +921,6 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	var receipts = make([]*types.Receipt, 0)
 	txNum := len(block.Transactions())
 	p.resetState(txNum, statedb)
-	if txNum > 0 {
-		log.Info("ProcessParallel", "block", header.Number, "txNum", txNum)
-	}
-
 	// Iterate over and process the individual transactions
 	posa, isPoSA := p.engine.(consensus.PoSA)
 	commonTxs := make([]*types.Transaction, 0, txNum)
@@ -994,7 +980,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	p.doStaticDispatch(statedb, p.allTxReqs) // todo: put txReqs in unit?
 	// after static dispatch, we notify the slot to work.
 	for _, slot := range p.slotState {
-		slot.primaryWakeUpChan <- nil
+		slot.primaryWakeUpChan <- struct{}{}
 	}
 	// wait until all Txs have processed.
 	for {

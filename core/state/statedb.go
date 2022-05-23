@@ -48,17 +48,15 @@ type revision struct {
 }
 
 var (
-	once sync.Once
 	// emptyRoot is the known root hash of an empty trie.
 	emptyRoot = common.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
-
 	// dummyRoot is the dummy account root before corrected in pipecommit sync mode,
 	// the value is 542e5fc2709de84248e9bce43a9c0c8943a608029001360f8ab55bf113b23d28
 	dummyRoot = crypto.Keccak256Hash([]byte("dummy_account_root"))
-
 	emptyAddr = crypto.Keccak256Hash(common.Address{}.Bytes())
 
-	WBNBAddress = common.HexToAddress("0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c")
+	WBNBAddress    = common.HexToAddress("0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c")
+	parallelKvOnce sync.Once
 )
 
 type proofList [][]byte
@@ -2658,6 +2656,7 @@ func (s *ParallelStateDB) GetBalance(addr common.Address) *big.Int {
 	return balance
 }
 
+// different from GetBalance(), it is opcode triggered
 func (s *ParallelStateDB) GetBalanceOpCode(addr common.Address) *big.Int {
 	if addr == WBNBAddress {
 		s.wbnbMakeUp = false
@@ -3444,7 +3443,7 @@ func (s *ParallelStateDB) getStateObjectFromUnconfirmedDB(addr common.Address) (
 
 // in stage2, we do unconfirmed conflict detect
 func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool, mergedTxIndex int) bool {
-	once.Do(func() {
+	parallelKvOnce.Do(func() {
 		StartKvCheckLoop()
 	})
 	slotDB := s
