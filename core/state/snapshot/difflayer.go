@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/rlp"
 	bloomfilter "github.com/holiman/bloomfilter/v2"
 )
@@ -494,6 +495,7 @@ func (dl *diffLayer) storage(accountHash, storageHash common.Hash, depth int) ([
 // Update creates a new layer on top of the existing snapshot diff tree with
 // the specified data items.
 func (dl *diffLayer) Update(blockRoot common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte, verified chan struct{}) *diffLayer {
+	defer debug.Handler.StartRegionAuto("diffLayer.Update")()
 	return newDiffLayer(dl, blockRoot, destructs, accounts, storage, verified)
 }
 

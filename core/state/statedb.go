@@ -1316,6 +1316,7 @@ func (s *StateDB) GetRefund() uint64 {
 
 // GetRefund returns the current value of the refund counter.
 func (s *StateDB) WaitPipeVerification() error {
+	defer debug.Handler.StartRegionAuto("WaitPipeVerification")()
 	// We need wait for the parent trie to commit
 	if s.snap != nil {
 		if valid := s.snap.WaitAndGetVerifyRes(); !valid {
@@ -1414,6 +1415,7 @@ func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 
 //CorrectAccountsRoot will fix account roots in pipecommit mode
 func (s *StateDB) CorrectAccountsRoot(blockRoot common.Hash) {
+	defer debug.Handler.StartRegionAuto("CorrectAccountsRoot")()
 	var snapshot snapshot.Snapshot
 	if blockRoot == (common.Hash{}) {
 		snapshot = s.snap
@@ -1438,6 +1440,7 @@ func (s *StateDB) CorrectAccountsRoot(blockRoot common.Hash) {
 
 //PopulateSnapAccountAndStorage tries to populate required accounts and storages for pipecommit
 func (s *StateDB) PopulateSnapAccountAndStorage() {
+	defer debug.Handler.StartRegionAuto("PopulateSnapAccountAndStorage")()
 	for addr := range s.stateObjectsPending {
 		if obj, _ := s.getStateObjectFromStateObjects(addr); !obj.deleted {
 			if s.snap != nil && !obj.deleted {
@@ -1781,6 +1784,7 @@ func (s *StateDB) Commit(failPostCommitFunc func(), postCommitFuncs ...func() er
 	}
 
 	commmitTrie := func() error {
+		defer debug.Handler.StartRegionAuto("StateDB.Commit: commmitTrie")()
 		commitErr := func() error {
 			if s.pipeCommit {
 				<-snapUpdated
