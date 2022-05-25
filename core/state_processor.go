@@ -50,7 +50,7 @@ const (
 	farDiffLayerTimeout    = 2
 
 	parallelPrimarySlot = 0
-	parallelShadowlot   = 1
+	parallelShadowSlot  = 1
 	stage2CheckNumber   = 30 // ConfirmStage2 will check this number of transaction, to avoid too busy stage2 check
 	stage2AheadNum      = 3  // enter ConfirmStage2 in advance to avoid waiting for Fat Tx
 )
@@ -474,7 +474,7 @@ func (p *ParallelStateProcessor) init() {
 		// It is back up of the primary slot to make sure transaction can be redo ASAP,
 		// since the primary slot could be busy at executing another transaction
 		go func(slotIndex int) {
-			p.runSlotLoop(slotIndex, 1) // this loop will be permanent live
+			p.runSlotLoop(slotIndex, parallelShadowSlot) // this loop will be permanent live
 		}(i)
 
 	}
@@ -521,7 +521,7 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 //  ** reduce IPC cost by dispatch in Unit
 //  ** make sure same From in same slot
 //  ** try to make it balanced, queue to the most hungry slot for new Address
-func (p *ParallelStateProcessor) doStaticDispatch(mainStatedb *state.StateDB, txReqs []*ParallelTxRequest) {
+func (p *ParallelStateProcessor) doStaticDispatch(txReqs []*ParallelTxRequest) {
 	fromSlotMap := make(map[common.Address]int, 100)
 	toSlotMap := make(map[common.Address]int, 100)
 	for _, txReq := range txReqs {
@@ -584,12 +584,12 @@ func (p *ParallelStateProcessor) hasConflict(txResult *ParallelTxResult, isStage
 
 func (p *ParallelStateProcessor) switchSlot(slotIndex int) {
 	slot := p.slotState[slotIndex]
-	if atomic.CompareAndSwapInt32(&slot.activatedType, parallelPrimarySlot, parallelShadowlot) {
+	if atomic.CompareAndSwapInt32(&slot.activatedType, parallelPrimarySlot, parallelShadowSlot) {
 		// switch from normal to shadow slot
 		if len(slot.shadowWakeUpChan) == 0 {
 			slot.shadowWakeUpChan <- struct{}{} // only notify when target once
 		}
-	} else if atomic.CompareAndSwapInt32(&slot.activatedType, parallelShadowlot, parallelPrimarySlot) {
+	} else if atomic.CompareAndSwapInt32(&slot.activatedType, parallelShadowSlot, parallelPrimarySlot) {
 		// switch from shadow to normal slot
 		if len(slot.primaryWakeUpChan) == 0 {
 			slot.primaryWakeUpChan <- struct{}{} // only notify when target once
@@ -645,8 +645,8 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bool) *ParallelTxResult {
 	if isStage2 {
 		if targetTxIndex <= p.mergedTxIndex+1 {
-			// this is the one that can been merged,
-			// others are for likely conflict check, since it is not their tuen.
+			// `p.mergedTxIndex+1` is the one to be merged,
+			// in stage2, we do likely conflict check, for these not their turn.
 			return nil
 		}
 	}
@@ -963,7 +963,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		p.targetStage2Count = p.targetStage2Count - stage2AheadNum
 	}
 
-	p.doStaticDispatch(statedb, p.allTxReqs) // todo: put txReqs in unit?
+	p.doStaticDispatch(p.allTxReqs) // todo: put txReqs in unit?
 	// after static dispatch, we notify the slot to work.
 	for _, slot := range p.slotState {
 		slot.primaryWakeUpChan <- struct{}{}
@@ -1007,6 +1007,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			if result.err != nil {
 				log.Error("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
 					"resultTxIndex", result.txReq.txIndex, "result.err", result.err)
+				p.doCleanUp()
 				bloomProcessor.Close()
 				return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txReq.txIndex, result.txReq.tx.Hash().Hex(), result.err)
 			}

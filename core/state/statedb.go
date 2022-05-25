@@ -1234,8 +1234,7 @@ func (s *StateDB) CopyForSlot() *ParallelStateDB {
 			isParallel:          true,
 			parallel:            parallel,
 		},
-		wbnbMakeUp:         true,
-		balanceUpdateDepth: 0,
+		wbnbMakeUp: true,
 	}
 	// no need to copy preimages, comment out and remove later
 	// for hash, preimage := range s.preimages {
@@ -2313,9 +2312,8 @@ var parallelKvCheckResCh chan bool
 
 type ParallelStateDB struct {
 	StateDB
-	wbnbMakeUp         bool // default true, we can not do WBNB make up if its absolute balance is used.
-	balanceUpdateDepth int
-	wbnbMakeUpBalance  *big.Int
+	wbnbMakeUp        bool // default true, we can not do WBNB make up if its absolute balance is used.
+	wbnbMakeUpBalance *big.Int
 }
 
 func hasKvConflict(slotDB *ParallelStateDB, addr common.Address, key common.Hash, val common.Hash, isStage2 bool) bool {
@@ -2888,10 +2886,6 @@ func (s *ParallelStateDB) HasSuicided(addr common.Address) bool {
 func (s *ParallelStateDB) AddBalance(addr common.Address, amount *big.Int) {
 	// add balance will perform a read operation first
 	// if amount == 0, no balance change, but there is still an empty check.
-	s.balanceUpdateDepth++
-	defer func() {
-		s.balanceUpdateDepth--
-	}()
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		if addr == s.parallel.systemAddress {
@@ -2926,11 +2920,6 @@ func (s *ParallelStateDB) AddBalance(addr common.Address, amount *big.Int) {
 // SubBalance subtracts amount from the account associated with addr.
 func (s *ParallelStateDB) SubBalance(addr common.Address, amount *big.Int) {
 	// unlike add, sub 0 balance will not touch empty object
-	s.balanceUpdateDepth++
-	defer func() {
-		s.balanceUpdateDepth--
-	}()
-
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		if addr == s.parallel.systemAddress {
@@ -2964,11 +2953,6 @@ func (s *ParallelStateDB) SubBalance(addr common.Address, amount *big.Int) {
 }
 
 func (s *ParallelStateDB) SetBalance(addr common.Address, amount *big.Int) {
-	s.balanceUpdateDepth++
-	defer func() {
-		s.balanceUpdateDepth--
-	}()
-
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		if addr == s.parallel.systemAddress {
