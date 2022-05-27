@@ -311,6 +311,14 @@ func newStateDB(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, 
 	return sdb, nil
 }
 
+func (s *StateDB) SnapshotAvailable() bool {
+	if s.snap == nil {
+		return false
+	}
+
+	return !s.snap.StaleOrGenerating()
+}
+
 func (s *StateDB) getBaseStateDB() *StateDB {
 	return s
 }

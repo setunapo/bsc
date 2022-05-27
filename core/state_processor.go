@@ -948,6 +948,11 @@ func (p *ParallelStateProcessor) doCleanUp() {
 
 // Implement BEP-130: Parallel Transaction Execution.
 func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (*state.StateDB, types.Receipts, []*types.Log, uint64, error) {
+	// if snapshot is nil or generating, fall back to sequential process
+	if !statedb.SnapshotAvailable() {
+		return p.StateProcessor.Process(block, statedb, cfg)
+	}
+
 	var (
 		usedGas = new(uint64)
 		header  = block.Header()

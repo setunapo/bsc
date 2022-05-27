@@ -128,6 +128,18 @@ func (dl *diskLayer) AccountRLP(hash common.Hash) ([]byte, error) {
 	return blob, nil
 }
 
+// StaleOrGenerating returns whether the snapshot is stale or generating
+func (dl *diskLayer) StaleOrGenerating() bool {
+	dl.lock.RLock()
+	defer dl.lock.RUnlock()
+
+	if dl.Stale() || dl.genMarker != nil {
+		return true
+	}
+
+	return false
+}
+
 // Storage directly retrieves the storage data associated with a particular hash,
 // within a particular account.
 func (dl *diskLayer) Storage(accountHash, storageHash common.Hash) ([]byte, error) {
