@@ -172,7 +172,7 @@ type StateObject struct {
 	fakeStorage         Storage   // Fake storage which constructed by caller for debugging purpose.
 
 	// Cache flags.
-	// When an object is marked suicided it will be delete from the trie
+	// When an object is marked suicided it will be deleted from the trie
 	// during the "update" phase of the state transition.
 	dirtyCode bool // true if the code was updated
 	suicided  bool
@@ -199,7 +199,7 @@ func (s *StateObject) empty() bool {
 	//   if codeHash is dirtied, it is ok, since code will not be updated.
 	//   if suicide, it is ok
 	//   if object is new created, it is ok
-	//   if CreateAccout, recreate the address, it is ok.
+	//   if CreateAccount, recreate the address, it is ok.
 
 	// Slot 0 tx 0: AddBalance(100) to addr_1, => addr_1: balance = 100, nonce = 0, code is empty
 	// Slot 1 tx 1: addr_1 Transfer 99.9979 with GasFee 0.0021, => addr_1: balance = 0, nonce = 1, code is empty
@@ -207,12 +207,12 @@ func (s *StateObject) empty() bool {
 	// Slot 0 tx 2: add balance 0 to addr_1(empty check for touch event),
 	//              the object was lightCopied from tx 0,
 
-	// in parallel mode, we should not check empty by raw nonce, balance, codeHash any more,
+	// in parallel mode, we should not check empty by raw nonce, balance, codeHash anymore,
 	// since it could be invalid.
 	// e.g., AddBalance() to an address, we will do lightCopy to get a new StateObject, we did balance fixup to
 	// make sure object's Balance is reliable. But we did not fixup nonce or code, we only do nonce or codehash
 	// fixup on need, that's when we wanna to update the nonce or codehash.
-	// So nonce, blance
+	// So nonce, balance
 	// Before the block is processed, addr_1 account: nonce = 0, emptyCodeHash, balance = 100
 	//   Slot 0 tx 0: no access to addr_1
 	//   Slot 1 tx 1: sub balance 100, it is empty and deleted
@@ -330,7 +330,7 @@ func (s *StateObject) GetState(db Database, key common.Hash) common.Hash {
 	if dirty {
 		return value
 	}
-	// Otherwise return the entry's original value
+	// Otherwise, return the entry's original value
 	return s.GetCommittedState(db, key)
 }
 
@@ -381,7 +381,7 @@ func (s *StateObject) GetCommittedState(db Database, key common.Hash) common.Has
 	readStart := time.Now()
 	if metrics.EnabledExpensive {
 		// If the snap is 'under construction', the first lookup may fail. If that
-		// happens, we don't want to double-count the time elapsed. Thus this
+		// happens, we don't want to double-count the time elapsed. Thus, this
 		// dance with the metering.
 		defer func() {
 			if meter != nil {
@@ -450,7 +450,7 @@ func (s *StateObject) SetState(db Database, key, value common.Hash) {
 	//    this `SetState could be skipped`
 	//  d.Finally, the key's value will be `val_2`, while it should be `val_1`
 	// such as: https://bscscan.com/txs?block=2491181
-	prev := s.dbItf.GetState(s.address, key) // fixme: if it is for journal, may not necessary, we can remove this change record
+	prev := s.dbItf.GetState(s.address, key)
 	if prev == value {
 		return
 	}
@@ -526,7 +526,7 @@ func (s *StateObject) finalise(prefetch bool) {
 // It will return nil if the trie has not been loaded and no changes have been made
 func (s *StateObject) updateTrie(db Database) Trie {
 	// Make sure all dirty slots are finalized into the pending storage area
-	s.finalise(false) // Don't prefetch any more, pull directly if need be
+	s.finalise(false) // Don't prefetch anymore, pull directly if need be
 	if s.pendingStorage.Length() == 0 {
 		return s.trie
 	}
