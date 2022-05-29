@@ -165,7 +165,6 @@ var (
 		utils.EVMInterpreterFlag,
 		utils.ParallelTxFlag,
 		utils.ParallelTxNumFlag,
-		utils.ParallelTxQueueSizeFlag,
 		utils.MinerNotifyFullFlag,
 		configFileFlag,
 		utils.CatalystFlag,
