@@ -261,14 +261,15 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	options ...BlockChainOption) (*BlockChain, error) {
 	// to register node version and startup arguments
 	versionName := strings.Replace(params.Version, ".", "_", -1)
+	log.Info("NewBlockChain", "versionName", versionName)
 	nodeVersionGauge := metrics.NewRegisteredGauge("node/version/"+versionName, nil)
 	nodeVersionGauge.Update(int64(0))
 
 	for _, arg := range os.Args[1:] { // argsWithoutProg := os.Args[1:]
-		log.Info("NewBlockChain", "arg", arg)
 		arg = strings.Replace(arg, ".", "_", -1)
 		arg = strings.Replace(arg, "-", "_", -1)
 		arg = strings.Replace(arg, "/", "_", -1)
+		arg = strings.Replace(arg, ",", "_", -1)
 		log.Info("NewBlockChain", "arg", arg)
 		argGauge := metrics.NewRegisteredGauge("node/argument/"+arg, nil)
 		argGauge.Update(int64(0))
