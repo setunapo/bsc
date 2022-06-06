@@ -23,7 +23,9 @@ import (
 	"io"
 	"math/big"
 	mrand "math/rand"
+	"os"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,8 +54,6 @@ var (
 	headBlockGauge     = metrics.NewRegisteredGauge("chain/head/block", nil)
 	headHeaderGauge    = metrics.NewRegisteredGauge("chain/head/header", nil)
 	headFastBlockGauge = metrics.NewRegisteredGauge("chain/head/receipt", nil)
-	nodeVersionGauge   = metrics.NewRegisteredGauge("nodeVersion/1_1_10", nil)
-	// nodeVersionGauge   = metrics.NewRegisteredGauge("nodeVersion/"+params.Version, nil)
 
 	accountReadTimer   = metrics.NewRegisteredTimer("chain/account/reads", nil)
 	accountHashTimer   = metrics.NewRegisteredTimer("chain/account/hashes", nil)
@@ -260,15 +260,18 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, txLookupLimit *uint64,
 	options ...BlockChainOption) (*BlockChain, error) {
 	// to register node version and startup arguments
-	log.Info("NewBlockChain", "params.Version", params.Version)
+	versionName := strings.Replace(params.Version, ".", "_", -1)
+	nodeVersionGauge := metrics.NewRegisteredGauge("node/version/"+versionName, nil)
 	nodeVersionGauge.Update(int64(0))
-	/*
-		for _, arg := range os.Args[1:] { // argsWithoutProg := os.Args[1:]
-			log.Info("NewBlockChain", "arg", arg)
-			argGauge := metrics.NewRegisteredGauge("node/__argument__/"+arg, nil)
-			argGauge.Update(int64(0))
-		}
-	*/
+
+	for _, arg := range os.Args[1:] { // argsWithoutProg := os.Args[1:]
+		log.Info("NewBlockChain", "arg", arg)
+		arg = strings.Replace(arg, ".", "_", -1)
+		arg = strings.Replace(arg, "-", "_", -1)
+		argGauge := metrics.NewRegisteredGauge("node/argument/"+arg, nil)
+		argGauge.Update(int64(0))
+	}
+
 	if cacheConfig == nil {
 		cacheConfig = defaultCacheConfig
 	}
@@ -1946,7 +1949,6 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals bool) (int, er
 	if atomic.LoadInt32(&bc.procInterrupt) == 1 {
 		return 0, nil
 	}
-	// nodeVersionGauge.Update(int64(0))
 	// Start a parallel signature recovery (signer will fluke on fork transition, minimal perf loss)
 	signer := types.MakeSigner(bc.chainConfig, chain[0].Number())
 	go senderCacher.recoverFromBlocks(signer, chain)
