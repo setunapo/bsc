@@ -268,6 +268,8 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		log.Info("NewBlockChain", "arg", arg)
 		arg = strings.Replace(arg, ".", "_", -1)
 		arg = strings.Replace(arg, "-", "_", -1)
+		arg = strings.Replace(arg, "/", "_", -1)
+		log.Info("NewBlockChain", "arg", arg)
 		argGauge := metrics.NewRegisteredGauge("node/argument/"+arg, nil)
 		argGauge.Update(int64(0))
 	}
