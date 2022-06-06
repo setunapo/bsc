@@ -23,6 +23,7 @@ import (
 	"io"
 	"math/big"
 	mrand "math/rand"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -257,6 +258,14 @@ type BlockChain struct {
 func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine,
 	vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, txLookupLimit *uint64,
 	options ...BlockChainOption) (*BlockChain, error) {
+	// to register node version and startup arguments
+	nodeVersionGauge := metrics.NewRegisteredGauge("node/__version__/"+params.Version, nil)
+	nodeVersionGauge.Update(int64(0))
+	for _, arg := range os.Args[1:] { // argsWithoutProg := os.Args[1:]
+		argGauge := metrics.NewRegisteredGauge("node/__argument__/"+arg, nil)
+		argGauge.Update(int64(0))
+	}
+
 	if cacheConfig == nil {
 		cacheConfig = defaultCacheConfig
 	}
