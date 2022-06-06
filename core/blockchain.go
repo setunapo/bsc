@@ -23,7 +23,6 @@ import (
 	"io"
 	"math/big"
 	mrand "math/rand"
-	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -53,7 +52,8 @@ var (
 	headBlockGauge     = metrics.NewRegisteredGauge("chain/head/block", nil)
 	headHeaderGauge    = metrics.NewRegisteredGauge("chain/head/header", nil)
 	headFastBlockGauge = metrics.NewRegisteredGauge("chain/head/receipt", nil)
-	nodeVersionGauge   = metrics.NewRegisteredGauge("node/__version__/"+params.Version, nil)
+	nodeVersionGauge   = metrics.NewRegisteredGauge("nodeVersion/1_1_10", nil)
+	// nodeVersionGauge   = metrics.NewRegisteredGauge("nodeVersion/"+params.Version, nil)
 
 	accountReadTimer   = metrics.NewRegisteredTimer("chain/account/reads", nil)
 	accountHashTimer   = metrics.NewRegisteredTimer("chain/account/hashes", nil)
@@ -262,12 +262,13 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	// to register node version and startup arguments
 	log.Info("NewBlockChain", "params.Version", params.Version)
 	nodeVersionGauge.Update(int64(0))
-	for _, arg := range os.Args[1:] { // argsWithoutProg := os.Args[1:]
-		log.Info("NewBlockChain", "arg", arg)
-		argGauge := metrics.NewRegisteredGauge("node/__argument__/"+arg, nil)
-		argGauge.Update(int64(0))
-	}
-
+	/*
+		for _, arg := range os.Args[1:] { // argsWithoutProg := os.Args[1:]
+			log.Info("NewBlockChain", "arg", arg)
+			argGauge := metrics.NewRegisteredGauge("node/__argument__/"+arg, nil)
+			argGauge.Update(int64(0))
+		}
+	*/
 	if cacheConfig == nil {
 		cacheConfig = defaultCacheConfig
 	}
