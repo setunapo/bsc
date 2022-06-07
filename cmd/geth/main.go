@@ -163,6 +163,8 @@ var (
 		utils.GpoMaxGasPriceFlag,
 		utils.EWASMInterpreterFlag,
 		utils.EVMInterpreterFlag,
+		utils.ParallelTxFlag,
+		utils.ParallelTxNumFlag,
 		utils.MinerNotifyFullFlag,
 		configFileFlag,
 		utils.CatalystFlag,
