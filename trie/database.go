@@ -380,6 +380,7 @@ func (db *Database) node(hash common.Hash) node {
 		if enc := db.cleans.Get(nil, hash[:]); enc != nil {
 			memcacheCleanHitMeter.Mark(1)
 			memcacheCleanReadMeter.Mark(int64(len(enc)))
+			log.Info("Database.node hit in clean cache", "hash", hash)
 			return mustDecodeNode(hash[:], enc)
 		}
 	}
@@ -391,6 +392,7 @@ func (db *Database) node(hash common.Hash) node {
 	if dirty != nil {
 		memcacheDirtyHitMeter.Mark(1)
 		memcacheDirtyReadMeter.Mark(int64(dirty.size))
+		log.Info("Database.node hit in dirty cache", "hash", hash)
 		return dirty.obj(hash)
 	}
 	memcacheDirtyMissMeter.Mark(1)
@@ -398,6 +400,7 @@ func (db *Database) node(hash common.Hash) node {
 	// Content unavailable in memory, attempt to retrieve from disk
 	enc, err := db.diskdb.Get(hash[:])
 	if err != nil || enc == nil {
+		log.Info("Database.node disk Get failed", "hash", hash, "err", err)
 		return nil
 	}
 	if db.cleans != nil {
@@ -405,6 +408,7 @@ func (db *Database) node(hash common.Hash) node {
 		memcacheCleanMissMeter.Mark(1)
 		memcacheCleanWriteMeter.Mark(int64(len(enc)))
 	}
+	log.Info("Database.node disk Get ok", "hash", hash, "len(enc)", len(enc))
 	return mustDecodeNode(hash[:], enc)
 }
 

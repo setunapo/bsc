@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -1045,11 +1044,13 @@ func (s *StateDB) populateSnapStorage(obj *StateObject) bool {
 }
 
 func (s *StateDB) AccountsIntermediateRoot() {
+	log.Info("AccountsIntermediateRoot", "len(s.stateObjectsPending)", len(s.stateObjectsPending))
 	tasks := make(chan func())
 	finishCh := make(chan struct{})
 	defer close(finishCh)
 	wg := sync.WaitGroup{}
-	for i := 0; i < runtime.NumCPU(); i++ {
+	// for i := 0; i < runtime.NumCPU(); i++ {
+	for i := 0; i < 1; i++ {
 		go func() {
 			for {
 				select {
@@ -1131,6 +1132,7 @@ func (s *StateDB) StateIntermediateRoot() common.Hash {
 	}
 
 	usedAddrs := make([][]byte, 0, len(s.stateObjectsPending))
+	log.Info("StateIntermediateRoot", "len(s.stateObjectsPending)", len(s.stateObjectsPending))
 	for addr := range s.stateObjectsPending {
 		if obj := s.stateObjects[addr]; obj.deleted {
 			s.deleteStateObject(obj)

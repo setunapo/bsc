@@ -19,6 +19,7 @@ package state
 import (
 	"bytes"
 	"fmt"
+	"github.com/ethereum/go-ethereum/log"
 	"io"
 	"math/big"
 	"sync"
@@ -396,9 +397,14 @@ func (s *StateObject) updateTrie(db Database) Trie {
 	tr := s.getTrie(db)
 
 	usedStorage := make([][]byte, 0, len(s.pendingStorage))
+	log.Info("updateTrie start", "addr", s.address, "len(s.pendingStorage)", len(s.pendingStorage))
+	defer func() {
+		log.Info("updateTrie done", "addr", s.address, "len(s.pendingStorage)", len(s.pendingStorage))
+	}()
 	for key, value := range s.pendingStorage {
 		// Skip noop changes, persist actual changes
 		if value == s.originStorage[key] {
+			log.Info("updateTrie skip unchanged key", "addr", s.address, "key", key)
 			continue
 		}
 		s.originStorage[key] = value

@@ -17,6 +17,7 @@
 package state
 
 import (
+	"encoding/hex"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -178,6 +179,10 @@ func (p *triePrefetcher) prefetch(root common.Hash, keys [][]byte, accountHash c
 		fetcher = newSubfetcher(p.db, root, accountHash)
 		p.fetchers[root] = fetcher
 	}
+	for _, key := range keys {
+		log.Info("triePrefetcher.prefetch", "root", root, "accountHash", accountHash,
+			"key", hex.EncodeToString(key))
+	}
 	fetcher.schedule(keys)
 }
 
@@ -331,9 +336,12 @@ func (sf *subfetcher) loop() {
 			if sf.trie == nil {
 				if sf.accountHash == emptyAddr {
 					sf.trie, err = sf.db.OpenTrie(sf.root)
+					log.Info("subfetcher.loop, OpenTrie", "sf.root", sf.root)
 				} else {
 					// address is useless
 					sf.trie, err = sf.db.OpenStorageTrie(sf.accountHash, sf.root)
+					log.Info("subfetcher.loop, OpenStorageTrie",
+						"sf.accountHash", sf.accountHash, "sf.root", sf.root)
 				}
 				if err != nil {
 					continue
@@ -365,6 +373,7 @@ func (sf *subfetcher) loop() {
 					if _, ok := sf.seen[taskid]; ok {
 						sf.dups++
 					} else {
+						log.Info("subfetcher.loop", "sf.root", sf.root, "task", hex.EncodeToString(task))
 						sf.trie.TryGet(task)
 						sf.seen[taskid] = struct{}{}
 					}

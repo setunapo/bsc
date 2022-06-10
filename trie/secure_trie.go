@@ -17,6 +17,7 @@
 package trie
 
 import (
+	"encoding/hex"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -75,6 +76,10 @@ func (t *SecureTrie) Get(key []byte) []byte {
 // The value bytes must not be modified by the caller.
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryGet(key []byte) ([]byte, error) {
+	if t.trie.root != nil {
+		log.Info("TryGet", "key", hex.EncodeToString(key), "hashKey", hex.EncodeToString(t.hashKey(key)),
+			"root", t.trie.root.fstring(""))
+	}
 	return t.trie.TryGet(t.hashKey(key))
 }
 
@@ -106,6 +111,7 @@ func (t *SecureTrie) Update(key, value []byte) {
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryUpdate(key, value []byte) error {
 	hk := t.hashKey(key)
+	log.Info("TryUpdate", "key", hex.EncodeToString(key), "hashKey", hex.EncodeToString(hk))
 	err := t.trie.TryUpdate(hk, value)
 	if err != nil {
 		return err
@@ -125,6 +131,8 @@ func (t *SecureTrie) Delete(key []byte) {
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryDelete(key []byte) error {
 	hk := t.hashKey(key)
+	log.Info("TryDelete", "key", hex.EncodeToString(key), "hashKey", hex.EncodeToString(hk),
+		"root", t.trie.root.fstring(""))
 	delete(t.getSecKeyCache(), string(hk))
 	return t.trie.TryDelete(hk)
 }
