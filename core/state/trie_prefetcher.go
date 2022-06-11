@@ -361,6 +361,8 @@ func (sf *subfetcher) loop() {
 					sf.lock.Lock()
 					sf.tasks = append(sf.tasks, tasks[i:]...)
 					sf.lock.Unlock()
+					log.Info("subfetcher.loop stop, but task not finished", "root", sf.root, "accountHash", sf.accountHash,
+						"unfinished task length", len(sf.tasks))
 					return
 
 				case ch := <-sf.copy:
@@ -371,9 +373,12 @@ func (sf *subfetcher) loop() {
 					// No termination request yet, prefetch the next entry
 					taskid := string(task)
 					if _, ok := sf.seen[taskid]; ok {
+						log.Info("subfetcher.loop task seen", "root", sf.root, "accountHash", sf.accountHash,
+							"task", hex.EncodeToString(task), "sf.dups", sf.dups)
 						sf.dups++
 					} else {
-						log.Info("subfetcher.loop", "sf.root", sf.root, "task", hex.EncodeToString(task))
+						log.Info("subfetcher.loop", "sf.root", sf.root, "accountHash", sf.accountHash,
+							"task", hex.EncodeToString(task))
 						sf.trie.TryGet(task)
 						sf.seen[taskid] = struct{}{}
 					}
@@ -385,6 +390,8 @@ func (sf *subfetcher) loop() {
 			ch <- sf.db.CopyTrie(sf.trie)
 
 		case <-sf.stop:
+			log.Info("subfetcher.loop stop, no task left", "root", sf.root, "accountHash", sf.accountHash,
+				"unfinished task length", len(sf.tasks))
 			// Termination is requested, abort and leave remaining tasks
 			return
 		}
