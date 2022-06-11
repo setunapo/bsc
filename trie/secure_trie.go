@@ -76,7 +76,9 @@ func (t *SecureTrie) Get(key []byte) []byte {
 // The value bytes must not be modified by the caller.
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryGet(key []byte) ([]byte, error) {
-	if t.trie.root != nil {
+	if t.trie.root == nil {
+		log.Info("TryGet root is nil", "key", hex.EncodeToString(key), "hashKey", hex.EncodeToString(t.hashKey(key)))
+	} else {
 		log.Info("TryGet", "key", hex.EncodeToString(key), "hashKey", hex.EncodeToString(t.hashKey(key)),
 			"root", t.trie.root.fstring(""))
 	}
@@ -111,7 +113,13 @@ func (t *SecureTrie) Update(key, value []byte) {
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryUpdate(key, value []byte) error {
 	hk := t.hashKey(key)
-	log.Info("TryUpdate", "key", hex.EncodeToString(key), "hashKey", hex.EncodeToString(hk))
+	if t.trie.root == nil {
+		log.Info("TryUpdate root is nil", "key", hex.EncodeToString(key), "hashKey", hex.EncodeToString(hk))
+	} else {
+		log.Info("TryUpdate", "key", hex.EncodeToString(key), "hashKey", hex.EncodeToString(hk),
+			"root", t.trie.root.fstring(""))
+	}
+
 	err := t.trie.TryUpdate(hk, value)
 	if err != nil {
 		return err
@@ -131,8 +139,12 @@ func (t *SecureTrie) Delete(key []byte) {
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryDelete(key []byte) error {
 	hk := t.hashKey(key)
-	log.Info("TryDelete", "key", hex.EncodeToString(key), "hashKey", hex.EncodeToString(hk),
-		"root", t.trie.root.fstring(""))
+	if t.trie.root == nil {
+		log.Info("TryDelete root is nil", "key", hex.EncodeToString(key), "hashKey", hex.EncodeToString(hk))
+	} else {
+		log.Info("TryUpdate", "key", hex.EncodeToString(key), "hashKey", hex.EncodeToString(hk),
+			"root", t.trie.root.fstring(""))
+	}
 	delete(t.getSecKeyCache(), string(hk))
 	return t.trie.TryDelete(hk)
 }

@@ -85,8 +85,10 @@ func (p *triePrefetcher) abortLoop() {
 	for {
 		select {
 		case fetcher := <-p.abortChan:
+			log.Info("triePrefetcher abortLoop abortChan", "fetcher", fetcher.root, "accountHash", fetcher.accountHash)
 			fetcher.abort()
 		case <-p.closeChan:
+			log.Info("triePrefetcher abortLoop closeChan, drain")
 			// drain fetcher channel
 			for {
 				select {
@@ -300,6 +302,7 @@ func (sf *subfetcher) peek() Trie {
 // abort interrupts the subfetcher immediately. It is safe to call abort multiple
 // times but it is not thread safe.
 func (sf *subfetcher) abort() {
+	log.Info("subfetcher.abort", "root", sf.root, "accountHash", sf.accountHash)
 	select {
 	case <-sf.stop:
 	default:

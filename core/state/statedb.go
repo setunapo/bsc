@@ -1108,6 +1108,7 @@ func (s *StateDB) StateIntermediateRoot() common.Hash {
 	// useless, so no sleep lost.
 	prefetcher := s.prefetcher
 	defer func() {
+		log.Info("StateIntermediateRoot do prefetcher.close()")
 		s.prefetcherLock.Lock()
 		if s.prefetcher != nil {
 			s.prefetcher.close()
