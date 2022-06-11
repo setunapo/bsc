@@ -295,8 +295,7 @@ func (t *Trie) insert(n node, prefix, key []byte, value node) (bool, node, error
 			return !bytes.Equal(v, value.(valueNode)), value, nil
 		}
 		log.Info("Trie.insert len(key)==0, not valueNode",
-			"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key),
-			"value", value.fstring(""))
+			"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key))
 		return true, value, nil
 	}
 	switch n := n.(type) {
@@ -554,9 +553,14 @@ func (t *Trie) delete(n node, prefix, key []byte) (bool, node, error) {
 				"dirty", dirty, "err", err)
 			return false, rn, err
 		}
-		log.Info("Trie.delete hashNode, deleted",
-			"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key),
-			"nn", nn.fstring(""))
+		if nn == nil {
+			log.Info("Trie.delete hashNode, deleted -> nil",
+				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key))
+		} else {
+			log.Info("Trie.delete hashNode, deleted",
+				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key),
+				"nn", nn.fstring(""))
+		}
 		return true, nn, nil
 
 	default:
