@@ -128,14 +128,13 @@ func (t *Trie) tryGet(origNode node, key []byte, pos int) (value []byte, newnode
 		log.Info("Trie.tryGet nil node", "key", hex.EncodeToString(key))
 		return nil, nil, false, nil
 	case valueNode:
-		log.Info("Trie.tryGet valueNode", "key", hex.EncodeToString(key), "node", n.fstring(""))
+		log.Info("Trie.tryGet valueNode", "key", hex.EncodeToString(key))
 		return n, n, false, nil
 	case *shortNode:
 		if len(key)-pos < len(n.Key) || !bytes.Equal(n.Key, key[pos:pos+len(n.Key)]) {
 			// key not found in trie
 			log.Info("Trie.tryGet shortNode, key not found", "key", hex.EncodeToString(key),
-				"pos", pos, "n.Key", hex.EncodeToString(n.Key),
-				"node", n.fstring(""))
+				"pos", pos, "n.Key", hex.EncodeToString(n.Key))
 			return nil, n, false, nil
 		}
 		value, newnode, didResolve, err = t.tryGet(n.Val, key, pos+len(n.Key))
@@ -144,8 +143,7 @@ func (t *Trie) tryGet(origNode node, key []byte, pos int) (value []byte, newnode
 			n.Val = newnode
 		}
 		log.Info("Trie.tryGet shortNode, return", "key", hex.EncodeToString(key),
-			"pos", pos, "n.Key", hex.EncodeToString(n.Key), "didResolve", didResolve,
-			"node", n.fstring(""))
+			"pos", pos, "n.Key", hex.EncodeToString(n.Key), "didResolve", didResolve)
 		return value, n, didResolve, err
 	case *fullNode:
 		value, newnode, didResolve, err = t.tryGet(n.Children[key[pos]], key, pos+1)
@@ -154,21 +152,18 @@ func (t *Trie) tryGet(origNode node, key []byte, pos int) (value []byte, newnode
 			n.Children[key[pos]] = newnode
 		}
 		log.Info("Trie.tryGet fullNode, return", "key", hex.EncodeToString(key),
-			"pos", pos, "didResolve", didResolve,
-			"node", n.fstring(""))
+			"pos", pos, "didResolve", didResolve)
 		return value, n, didResolve, err
 	case hashNode:
 		child, err := t.resolveHash(n, key[:pos])
 		if err != nil {
 			log.Info("Trie.tryGet hashNode, resolve failed", "key", hex.EncodeToString(key),
-				"pos", pos, "err", err,
-				"node", n.fstring(""))
+				"pos", pos, "err", err)
 			return nil, n, true, err
 		}
 		value, newnode, _, err := t.tryGet(child, key, pos)
 		log.Info("Trie.tryGet hashNode, resolved", "key", hex.EncodeToString(key),
-			"pos", pos,
-			"newnode", newnode.fstring(""))
+			"pos", pos, "newnode", newnode.fstring(""))
 		return value, newnode, true, err
 	default:
 		panic(fmt.Sprintf("%T: invalid node: %v", origNode, origNode))
@@ -296,7 +291,7 @@ func (t *Trie) insert(n node, prefix, key []byte, value node) (bool, node, error
 		if v, ok := n.(valueNode); ok {
 			log.Info("Trie.insert len(key)==0, valueNode",
 				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key),
-				"node", n.fstring(""), "value", value.fstring(""))
+				"value", value.fstring(""))
 			return !bytes.Equal(v, value.(valueNode)), value, nil
 		}
 		log.Info("Trie.insert len(key)==0, not valueNode",
@@ -314,13 +309,11 @@ func (t *Trie) insert(n node, prefix, key []byte, value node) (bool, node, error
 			if !dirty || err != nil {
 				log.Info("Trie.insert shortNode match, notDirty or error",
 					"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key),
-					"dirty", dirty, "err", err,
-					"node", n.fstring(""))
+					"dirty", dirty, "err", err)
 				return false, n, err
 			}
 			log.Info("Trie.insert shortNode match, changed",
-				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key),
-				"node", nn.fstring(""))
+				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key))
 			return true, &shortNode{n.Key, nn, t.newFlag()}, nil
 		}
 		// Otherwise branch out at the index where they differ.
@@ -366,8 +359,7 @@ func (t *Trie) insert(n node, prefix, key []byte, value node) (bool, node, error
 		n.flags = t.newFlag()
 		n.Children[key[0]] = nn
 		log.Info("Trie.insert fullNode, updated",
-			"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key),
-			"nn", nn.fstring(""))
+			"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key))
 		return true, n, nil
 
 	case nil:
@@ -433,8 +425,7 @@ func (t *Trie) delete(n node, prefix, key []byte) (bool, node, error) {
 		if matchlen < len(n.Key) {
 			log.Info("Trie.delete shortNode, not match no delete",
 				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key), "n.Key", hex.EncodeToString(n.Key),
-				"len(n.Key)", len(n.Key), "matchlen", matchlen,
-				"node", n.fstring(""))
+				"len(n.Key)", len(n.Key), "matchlen", matchlen)
 			return false, n, nil // don't replace n on mismatch
 		}
 		if matchlen == len(key) {
@@ -449,13 +440,11 @@ func (t *Trie) delete(n node, prefix, key []byte) (bool, node, error) {
 		// longer than n.Key.
 		log.Info("Trie.delete shortNode, longer key",
 			"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key), "n.Key", hex.EncodeToString(n.Key),
-			"len(n.Key)", len(n.Key), "matchlen", matchlen,
-			"node", n.fstring(""))
+			"len(n.Key)", len(n.Key), "matchlen", matchlen)
 		dirty, child, err := t.delete(n.Val, append(prefix, key[:len(n.Key)]...), key[len(n.Key):])
 		if !dirty || err != nil {
 			log.Info("Trie.delete shortNode deleted failed",
-				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key), "n.Key", hex.EncodeToString(n.Key),
-				"node", n.fstring(""))
+				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key), "n.Key", hex.EncodeToString(n.Key))
 			return false, n, err
 		}
 		switch child := child.(type) {
@@ -467,13 +456,11 @@ func (t *Trie) delete(n node, prefix, key []byte) (bool, node, error) {
 			// avoid modifying n.Key since it might be shared with
 			// other nodes.
 			log.Info("Trie.delete shortNode deleted another shortNode",
-				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key), "n.Key", hex.EncodeToString(n.Key),
-				"node", n.fstring(""))
+				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key), "n.Key", hex.EncodeToString(n.Key))
 			return true, &shortNode{concat(n.Key, child.Key...), child.Val, t.newFlag()}, nil
 		default:
 			log.Info("Trie.delete shortNode deleted a valueNode?",
-				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key), "n.Key", hex.EncodeToString(n.Key),
-				"child", child.fstring(""))
+				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key), "n.Key", hex.EncodeToString(n.Key))
 			return true, &shortNode{n.Key, child, t.newFlag()}, nil
 		}
 
@@ -481,8 +468,7 @@ func (t *Trie) delete(n node, prefix, key []byte) (bool, node, error) {
 		dirty, nn, err := t.delete(n.Children[key[0]], append(prefix, key[0]), key[1:])
 		if !dirty || err != nil {
 			log.Info("Trie.delete shortNode, noDirty or err",
-				"prefix", hex.EncodeToString(prefix),
-				"node", n.fstring(""))
+				"prefix", hex.EncodeToString(prefix))
 			return false, n, err
 		}
 		n = n.copy()
@@ -527,16 +513,14 @@ func (t *Trie) delete(n node, prefix, key []byte) (bool, node, error) {
 				if cnode, ok := cnode.(*shortNode); ok {
 					k := append([]byte{byte(pos)}, cnode.Key...)
 					log.Info("Trie.delete fullNode, to shortNode, resolved", "pos", pos,
-						"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key),
-						"cnode", cnode.fstring(""))
+						"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key))
 					return true, &shortNode{k, cnode.Val, t.newFlag()}, nil
 				}
 			}
 			// Otherwise, n is replaced by a one-nibble short node
 			// containing the child.
 			log.Info("Trie.delete fullNode, to shortNode end", "pos", pos,
-				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key),
-				"n.Children[pos]", n.Children[pos].fstring(""))
+				"prefix", hex.EncodeToString(prefix), "key", hex.EncodeToString(key))
 			return true, &shortNode{[]byte{byte(pos)}, n.Children[pos], t.newFlag()}, nil
 		}
 		// n still contains at least two values and cannot be reduced.
