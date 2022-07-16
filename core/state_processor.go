@@ -77,9 +77,10 @@ type ParallelStateProcessor struct {
 	// txReqAccountSorted   map[common.Address][]*ParallelTxRequest // fixme: *ParallelTxRequest => ParallelTxRequest?
 	slotState            []*SlotState // idle, or pending messages
 	mergedTxIndex        int          // the latest finalized tx index
-	slotDBsToRelease     []*state.StateDB
+	slotDBsToRelease     []*state.ParallelStateDB
 	debugErrorRedoNum    int
 	debugConflictRedoNum int
+	unconfirmedStateDBs  *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
 }
 
 func NewParallelStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consensus.Engine, parallelNum int, queueSize int) *ParallelStateProcessor {
@@ -398,10 +399,10 @@ func (p *LightStateProcessor) LightProcess(diffLayer *types.DiffLayer, block *ty
 type SlotState struct {
 	pendingTxReqChan   chan struct{}
 	pendingConfirmChan chan *ParallelTxResult
-	pendingTxReqList   []*ParallelTxRequest // maintained by dispatcher for dispatch policy
-	slotdbChan         chan *state.StateDB  // dispatch will create and send this slotDB to slot
+	pendingTxReqList   []*ParallelTxRequest        // maintained by dispatcher for dispatch policy
+	slotdbChan         chan *state.ParallelStateDB // dispatch will create and send this slotDB to slot
 	// txReqUnits         []*ParallelDispatchUnit // only dispatch can accesssd
-	unconfirmedStateDBs *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
+	// unconfirmedStateDBs *sync.Map // [int]*state.StateDB // fixme: concurrent safe, not use sync.Map?
 }
 
 type ParallelTxResult struct {
@@ -411,7 +412,7 @@ type ParallelTxResult struct {
 	err          error // to describe error message?
 	txReq        *ParallelTxRequest
 	receipt      *types.Receipt
-	slotDB       *state.StateDB // if updated, it is not equal to txReq.slotDB
+	slotDB       *state.ParallelStateDB // if updated, it is not equal to txReq.slotDB
 	gpSlot       *GasPool
 	evm          *vm.EVM
 	result       *ExecutionResult
@@ -420,7 +421,7 @@ type ParallelTxResult struct {
 type ParallelTxRequest struct {
 	txIndex        int
 	tx             *types.Transaction
-	slotDB         *state.StateDB
+	slotDB         *state.ParallelStateDB
 	gasLimit       uint64
 	msg            types.Message
 	block          *types.Block
@@ -441,7 +442,7 @@ func (p *ParallelStateProcessor) init() {
 
 	for i := 0; i < p.parallelNum; i++ {
 		p.slotState[i] = &SlotState{
-			slotdbChan:         make(chan *state.StateDB, 1),
+			slotdbChan:         make(chan *state.ParallelStateDB, 1),
 			pendingTxReqChan:   make(chan struct{}, 1),
 			pendingConfirmChan: make(chan *ParallelTxResult, p.queueSize),
 		}
@@ -679,7 +680,7 @@ func (p *ParallelStateProcessor) waitUntilNextTxDone(statedb *state.StateDB, gp 
 			// the target slot is waiting for new slotDB
 			slotState := p.slotState[result.slotIndex]
 			slotDB := state.NewSlotDB(statedb, consensus.SystemAddress, result.txReq.txIndex,
-				p.mergedTxIndex, result.keepSystem, slotState.unconfirmedStateDBs)
+				p.mergedTxIndex, result.keepSystem, p.unconfirmedStateDBs)
 			slotDB.SetSlotIndex(result.slotIndex)
 			p.slotDBsToRelease = append(p.slotDBsToRelease, slotDB)
 			slotState.slotdbChan <- slotDB
@@ -866,7 +867,7 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int) {
 				txReq.slotDB = <-curSlot.slotdbChan
 			}
 			result := p.executeInSlot(slotIndex, txReq)
-			curSlot.unconfirmedStateDBs.Store(txReq.txIndex, txReq.slotDB)
+			p.unconfirmedStateDBs.Store(txReq.txIndex, txReq.slotDB)
 			curSlot.pendingConfirmChan <- result
 		}
 	}
@@ -894,7 +895,7 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 
 	statedb.PrepareForParallel()
 
-	p.slotDBsToRelease = make([]*state.StateDB, 0, txNum)
+	p.slotDBsToRelease = make([]*state.ParallelStateDB, 0, txNum)
 	/*
 		stateDBsToRelease := p.slotDBsToRelease
 			go func() {
@@ -905,8 +906,9 @@ func (p *ParallelStateProcessor) resetState(txNum int, statedb *state.StateDB) {
 	*/
 	for _, slot := range p.slotState {
 		slot.pendingTxReqList = make([]*ParallelTxRequest, 0)
-		slot.unconfirmedStateDBs = new(sync.Map) // make(map[int]*state.StateDB), fixme: resue not new?
+		// slot.unconfirmedStateDBs = new(sync.Map) // make(map[int]*state.StateDB), fixme: resue not new?
 	}
+	p.unconfirmedStateDBs = new(sync.Map) // make(map[int]*state.StateDB), fixme: resue not new?
 }
 
 // Implement BEP-130: Parallel Transaction Execution.
@@ -916,10 +918,12 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		header  = block.Header()
 		gp      = new(GasPool).AddGas(block.GasLimit())
 	)
-	log.Info("ProcessParallel", "block", header.Number)
 	var receipts = make([]*types.Receipt, 0)
 	txNum := len(block.Transactions())
 	p.resetState(txNum, statedb)
+	if txNum > 0 {
+		log.Info("ProcessParallel", "block", header.Number)
+	}
 
 	// Iterate over and process the individual transactions
 	posa, isPoSA := p.engine.(consensus.PoSA)
@@ -1150,7 +1154,7 @@ func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainCon
 	return receipt, err
 }
 
-func applyTransactionStageExecution(msg types.Message, gp *GasPool, statedb *state.StateDB, evm *vm.EVM) (*vm.EVM, *ExecutionResult, error) {
+func applyTransactionStageExecution(msg types.Message, gp *GasPool, statedb *state.ParallelStateDB, evm *vm.EVM) (*vm.EVM, *ExecutionResult, error) {
 	// Create a new context to be used in the EVM environment.
 	txContext := NewEVMTxContext(msg)
 	evm.Reset(txContext, statedb)
@@ -1164,7 +1168,7 @@ func applyTransactionStageExecution(msg types.Message, gp *GasPool, statedb *sta
 	return evm, result, err
 }
 
-func applyTransactionStageFinalization(evm *vm.EVM, result *ExecutionResult, msg types.Message, config *params.ChainConfig, statedb *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, receiptProcessors ...ReceiptProcessor) (*types.Receipt, error) {
+func applyTransactionStageFinalization(evm *vm.EVM, result *ExecutionResult, msg types.Message, config *params.ChainConfig, statedb *state.ParallelStateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, receiptProcessors ...ReceiptProcessor) (*types.Receipt, error) {
 	// Update the state with pending changes.
 	var root []byte
 	if config.IsByzantium(header.Number) {
