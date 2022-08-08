@@ -8,4 +8,4 @@ jobs:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
-      - uses: setunapo/commitlint-github-action@test_v5
+      - uses: setunapo/commitlint-github-action@test_v6
