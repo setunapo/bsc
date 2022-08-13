@@ -690,6 +690,7 @@ func (s *StateDB) SetStorage(addr common.Address, storage map[common.Hash]common
 // The account's state object is still available until the state is committed,
 // getStateObject will return a non-nil account after Suicide.
 func (s *StateDB) Suicide(addr common.Address) bool {
+	log.Info("StateDB Suicide", "addr", addr)
 	stateObject := s.getStateObject(addr)
 	if stateObject == nil {
 		return false
@@ -2543,6 +2544,8 @@ func (s *ParallelStateDB) GetOrNewStateObject(addr common.Address) *StateObject 
 // Exist reports whether the given account address exists in the state.
 // Notably this also returns true for suicided accounts.
 func (s *ParallelStateDB) Exist(addr common.Address) bool {
+	log.Info("ParallelStateDB Exist enter", "txIndex", s.txIndex,
+		"baseTxIndex:", s.parallel.baseTxIndex, "addr", addr)
 	// 1.Try to get from dirty
 	if obj, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; ok {
 		// dirty object should not be deleted, since deleted is only flagged on finalise
@@ -2550,24 +2553,33 @@ func (s *ParallelStateDB) Exist(addr common.Address) bool {
 		// todo: add a check here, to be removed later
 		if obj.deleted || obj.suicided {
 			log.Error("Exist in dirty, but marked as deleted or suicided",
-				"txIndex", s.txIndex, "baseTxIndex:", s.parallel.baseTxIndex)
+				"txIndex", s.txIndex, "baseTxIndex:", s.parallel.baseTxIndex,
+				"obj.deleted", obj.deleted, "obj.suicided", obj.suicided)
 		}
+		log.Info("ParallelStateDB Exist true 1", "txIndex", s.txIndex,
+			"baseTxIndex:", s.parallel.baseTxIndex)
 		return true
 	}
 	// 2.Try to get from unconfirmed & main DB
 	// 2.1 Already read before
 	if exist, ok := s.parallel.addrStateReadsInSlot[addr]; ok {
+		log.Info("ParallelStateDB Exist 2.1", "txIndex", s.txIndex,
+			"baseTxIndex:", s.parallel.baseTxIndex, "exist", exist)
 		return exist
 	}
 	// 2.2 Try to get from unconfirmed DB if exist
 	if exist, ok := s.getAddrStateFromUnconfirmedDB(addr); ok {
 		s.parallel.addrStateReadsInSlot[addr] = exist // update and cache
+		log.Info("ParallelStateDB Exist 2.2", "txIndex", s.txIndex,
+			"baseTxIndex:", s.parallel.baseTxIndex, "exist", exist)
 		return exist
 	}
 
 	// 3.Try to get from main StateDB
 	exist := s.getStateObjectNoSlot(addr) != nil
 	s.parallel.addrStateReadsInSlot[addr] = exist // update and cache
+	log.Info("ParallelStateDB Exist 3", "txIndex", s.txIndex,
+		"baseTxIndex:", s.parallel.baseTxIndex, "exist", exist)
 	return exist
 }
 
@@ -3066,6 +3078,7 @@ func (s *ParallelStateDB) Suicide(addr common.Address) bool {
 		// 2.Try to get from unconfirmed, if deleted return false, since the address does not exist
 		if obj, ok := s.getStateObjectFromUnconfirmedDB(addr); ok {
 			stateObject = obj
+			log.Info("ParallelStateDB Suicide in unconfirmed", "addr", addr, "stateObject.deleted", stateObject.deleted)
 			s.parallel.addrStateReadsInSlot[addr] = !stateObject.deleted // true: exist, false: deleted
 			if stateObject.deleted {
 				log.Error("Suicide addr already deleted in confirmed DB", "txIndex", s.txIndex, "addr", addr)
@@ -3082,6 +3095,7 @@ func (s *ParallelStateDB) Suicide(addr common.Address) bool {
 			log.Error("Suicide addr not exist", "txIndex", s.txIndex, "addr", addr)
 			return false
 		}
+		log.Info("ParallelStateDB Suicide in mainDB", "addr", addr)
 		s.parallel.addrStateReadsInSlot[addr] = true // true: exist, false: deleted
 	}
 
@@ -3092,6 +3106,7 @@ func (s *ParallelStateDB) Suicide(addr common.Address) bool {
 	})
 
 	if _, ok := s.parallel.dirtiedStateObjectsInSlot[addr]; !ok {
+		log.Info("ParallelStateDB Suicide copy-on-write", "addr", addr)
 		// do copy-on-write for suicide "write"
 		newStateObject := stateObject.lightCopy(s)
 		newStateObject.markSuicided()
@@ -3104,6 +3119,7 @@ func (s *ParallelStateDB) Suicide(addr common.Address) bool {
 		// s.parallel.kvChangesInSlot[addr] = make(StateKeys) // all key changes are discarded
 		return true
 	}
+	log.Info("ParallelStateDB Suicide already in dirty?", "addr", addr)
 	s.parallel.addrStateChangesInSlot[addr] = false // false: the address does not exist anymore
 	s.parallel.balanceChangesInSlot[addr] = struct{}{}
 	s.parallel.codeChangesInSlot[addr] = struct{}{}
