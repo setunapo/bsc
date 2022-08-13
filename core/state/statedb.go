@@ -2791,10 +2791,14 @@ func (s *ParallelStateDB) GetState(addr common.Address, hash common.Hash) common
 	// 1.Try to get from dirty
 	if exist, ok := s.parallel.addrStateChangesInSlot[addr]; ok {
 		if !exist {
-			return common.Hash{}
+			// an address could be visited after it is suicided within a transaction.
+			// it should be able to get state from suicided address within a Tx:
+			// e.g. tx: 0xd3443e16127f4fef134a13a32abfe30ebf7ba345a4f91b1540cd558058bbddd7
+			log.Info("ParallelStateDB GetState from suicided object", "addr", addr, "hash", hash)
+		} else {
+			obj := s.parallel.dirtiedStateObjectsInSlot[addr] // addr must exist in dirtiedStateObjectsInSlot
+			return obj.GetState(s.db, hash)
 		}
-		obj := s.parallel.dirtiedStateObjectsInSlot[addr] // addr must exist in dirtiedStateObjectsInSlot
-		return obj.GetState(s.db, hash)
 	}
 	if keys, ok := s.parallel.kvChangesInSlot[addr]; ok {
 		if _, ok := keys[hash]; ok {
