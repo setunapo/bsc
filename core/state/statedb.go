@@ -2558,7 +2558,7 @@ func (s *ParallelStateDB) createObject(addr common.Address) (newobj *StateObject
 			// with the new object on block commit.
 			s.snapDestructs[prev.address] = struct{}{}
 		}
-		s.snapParallelLock.Lock()
+		s.snapParallelLock.Unlock()
 
 	}
 	newobj = newObject(s, s.isParallel, addr, types.StateAccount{})
