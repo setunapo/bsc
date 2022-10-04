@@ -922,14 +922,22 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	systemTxs := make([]*types.Transaction, 0, 2)
 
 	signer, _, bloomProcessor := p.preExecute(block, statedb, cfg, true)
+	log.Info("ProcessParallel enter", "block", header.Number, "hash", header.Hash(),
+		"txNum", txNum, "len(commonTxs)", len(commonTxs),
+		"len(systemTxs)", len(systemTxs))
+
 	// var txReqs []*ParallelTxRequest
 	for i, tx := range block.Transactions() {
 		if isPoSA {
 			if isSystemTx, err := posa.IsSystemTransaction(tx, block.Header()); err != nil {
 				bloomProcessor.Close()
+				log.Info("ParallelProcess IsSystemTransaction err",
+					"block", header.Number, "i", i, "err", err)
 				return statedb, nil, nil, 0, err
 			} else if isSystemTx {
 				systemTxs = append(systemTxs, tx)
+				log.Info("ParallelProcess IsSystemTransaction isSystemTx",
+					"block", header.Number, "i", i)
 				continue
 			}
 		}
@@ -941,6 +949,8 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		msg, err := tx.AsMessageNoNonceCheck(signer, header.BaseFee)
 		if err != nil {
 			bloomProcessor.Close()
+			log.Info("ParallelProcess AsMessageNoNonceCheck error",
+				"block", header.Number, "i", i, "err", err)
 			return statedb, nil, nil, 0, err
 		}
 
@@ -976,6 +986,11 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	for _, slot := range p.slotState {
 		slot.primaryWakeUpChan <- struct{}{}
 	}
+	log.Info("ParallelProcess static dispatch done", "block", header.Number,
+		"len(p.allTxReqs)", len(p.allTxReqs),
+		"len(commonTxs)", len(commonTxs),
+		"len(systemTxs)", len(systemTxs))
+
 	// wait until all Txs have processed.
 	for {
 		if len(commonTxs)+len(systemTxs) == txNum {
@@ -1033,6 +1048,12 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			"len(commonTxs)", len(commonTxs),
 			"conflictNum", p.debugConflictRedoNum,
 			"redoRate(%)", 100*(p.debugConflictRedoNum)/len(commonTxs))
+	} else {
+		log.Info("ProcessParallel tx all done", "block", header.Number, "usedGas", *usedGas,
+			"txNum", txNum,
+			"len(commonTxs)", len(commonTxs),
+			"conflictNum", p.debugConflictRedoNum)
+
 	}
 	allLogs, err := p.postExecute(block, statedb, &commonTxs, &receipts, &systemTxs, usedGas, bloomProcessor)
 	return statedb, receipts, allLogs, *usedGas, err
@@ -1098,24 +1119,26 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 
 	var receipts = make([]*types.Receipt, 0)
 	txNum := len(block.Transactions())
-	if txNum > 0 {
-		log.Info("Process", "block", header.Number, "txNum", txNum)
-	}
 	// Iterate over and process the individual transactions
 	posa, isPoSA := p.engine.(consensus.PoSA)
 	commonTxs := make([]*types.Transaction, 0, txNum)
 
 	// usually do have two tx, one for validator set contract, another for system reward contract.
 	systemTxs := make([]*types.Transaction, 0, 2)
+	log.Info("Process", "block", header.Number, "hash", header.Hash(), "txNum", txNum)
 
 	signer, vmenv, bloomProcessor := p.preExecute(block, statedb, cfg, false)
 	for i, tx := range block.Transactions() {
 		if isPoSA {
 			if isSystemTx, err := posa.IsSystemTransaction(tx, block.Header()); err != nil {
 				bloomProcessor.Close()
+				log.Info("Process IsSystemTransaction err",
+					"block", header.Number, "i", i, "err", err)
 				return statedb, nil, nil, 0, err
 			} else if isSystemTx {
 				systemTxs = append(systemTxs, tx)
+				log.Info("Process IsSystemTransaction isSystemTx",
+					"block", header.Number, "i", i)
 				continue
 			}
 		}
@@ -1123,17 +1146,24 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		msg, err := tx.AsMessage(signer, header.BaseFee)
 		if err != nil {
 			bloomProcessor.Close()
+			log.Info("Process AsMessage error",
+				"block", header.Number, "i", i, "err", err)
 			return statedb, nil, nil, 0, err
 		}
 		statedb.Prepare(tx.Hash(), i)
 		receipt, err := applyTransaction(msg, p.config, p.bc, nil, gp, statedb, blockNumber, blockHash, tx, usedGas, vmenv, bloomProcessor)
 		if err != nil {
 			bloomProcessor.Close()
+			log.Info("Process applyTransaction error",
+				"block", header.Number, "i", i, "err", err)
 			return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
 		commonTxs = append(commonTxs, tx)
 		receipts = append(receipts, receipt)
 	}
+
+	log.Info("Process ", "block", header.Number, "hash", header.Hash(), "txNum", txNum,
+		"len(commonTxs)", len(commonTxs), "len(systemTxs)", len(systemTxs))
 
 	allLogs, err := p.postExecute(block, statedb, &commonTxs, &receipts, &systemTxs, usedGas, bloomProcessor)
 	return statedb, receipts, allLogs, *usedGas, err

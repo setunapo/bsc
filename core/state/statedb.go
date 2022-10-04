@@ -96,6 +96,7 @@ func (s *StateDB) loadStateObj(addr common.Address) (*StateObject, bool) {
 
 // storeStateObj is the entry for storing state object to stateObjects in StateDB or stateObjects in parallel
 func (s *StateDB) storeStateObj(addr common.Address, stateObject *StateObject) {
+	log.Info("StateDB storeStateObj", "addr", addr)
 	if s.isParallel {
 		// When a state object is stored into s.parallel.stateObjects,
 		// it belongs to base StateDB, it is confirmed and valid.
@@ -290,6 +291,7 @@ func newStateDB(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, 
 
 	if sdb.snaps != nil {
 		if sdb.snap = sdb.snaps.Snapshot(root); sdb.snap != nil {
+			log.Info("newStateDB sdb.snap != nil")
 			sdb.snapDestructs = make(map[common.Address]struct{})
 			sdb.snapAccounts = make(map[common.Address][]byte)
 			sdb.snapStorage = make(map[common.Address]map[string][]byte)
@@ -303,6 +305,7 @@ func newStateDB(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, 
 		return nil, err
 	}
 	_, sdb.noTrie = tr.(*trie.EmptyTrie)
+	log.Info("newStateDB", "noTrie", sdb.noTrie)
 	sdb.trie = tr
 	sdb.EnableWriteOnSharedStorage()
 	return sdb, nil
@@ -1009,6 +1012,7 @@ func (s *StateDB) copyInternal(doPrefetch bool) *StateDB {
 
 			state.stateObjectsDirty[addr] = struct{}{}   // Mark the copy dirty to force internal (code/state) commits
 			state.stateObjectsPending[addr] = struct{}{} // Mark the copy pending to force external (account) commits
+			log.Info("copyInternal s.journal.dirties", "addr", addr)
 		}
 	}
 	// Above, we don't copy the actual journal. This means that if the copy is copied, the
@@ -1020,6 +1024,7 @@ func (s *StateDB) copyInternal(doPrefetch bool) *StateDB {
 			state.storeStateObj(addr, object.deepCopy(state))
 		}
 		state.stateObjectsPending[addr] = struct{}{}
+		log.Info("copyInternal stateObjectsPending", "addr", addr)
 	}
 	for addr := range s.stateObjectsDirty {
 		if _, exist := state.getStateObjectFromStateObjects(addr); !exist {
@@ -1395,6 +1400,7 @@ func (s *StateDB) Finalise(deleteEmptyObjects bool) { // fixme: concurrent safe.
 			// it will persist in the journal even though the journal is reverted. In this special circumstance,
 			// it may exist in `s.journal.dirties` but not in `s.stateObjects`.
 			// Thus, we can safely ignore it here
+			log.Info("Finalise !exist", "addr", addr)
 			continue
 		}
 		if obj.suicided || (deleteEmptyObjects && obj.empty()) {
@@ -1424,6 +1430,7 @@ func (s *StateDB) Finalise(deleteEmptyObjects bool) { // fixme: concurrent safe.
 		}
 		if _, exist := s.stateObjectsPending[addr]; !exist {
 			s.stateObjectsPending[addr] = struct{}{}
+			log.Info("Finalise stateObjectsPending", "addr", addr, "obj.suicided", obj.suicided)
 		}
 		if _, exist := s.stateObjectsDirty[addr]; !exist {
 			s.stateObjectsDirty[addr] = struct{}{}
@@ -1558,7 +1565,11 @@ func (s *StateDB) AccountsIntermediateRoot() {
 	// first, giving the account prefetches just a few more milliseconds of time
 	// to pull useful data from disk.
 	for addr := range s.stateObjectsPending {
-		if obj, _ := s.getStateObjectFromStateObjects(addr); !obj.deleted {
+		obj, _ := s.getStateObjectFromStateObjects(addr)
+		if obj == nil {
+			log.Info("AccountsIntermediateRoot addr nill obj", "addr", addr)
+		}
+		if !obj.deleted {
 			wg.Add(1)
 			tasks <- func() {
 				obj.updateRoot(s.db)
@@ -1569,7 +1580,12 @@ func (s *StateDB) AccountsIntermediateRoot() {
 				if s.snap != nil {
 					s.snapAccountMux.Lock()
 					// It is possible to add unnecessary change, but it is fine.
-					s.snapAccounts[obj.address] = snapshot.SlimAccountRLP(obj.data.Nonce, obj.data.Balance, obj.data.Root, obj.data.CodeHash)
+					encode := snapshot.SlimAccountRLP(obj.data.Nonce, obj.data.Balance, obj.data.Root, obj.data.CodeHash)
+					log.Info("SlimAccountRLP", "len encode:", len(encode))
+					if s.snapAccounts == nil {
+						log.Info("s.snapAccounts is nil!")
+					}
+					s.snapAccounts[obj.address] = encode
 					s.snapAccountMux.Unlock()
 				}
 				data, err := rlp.EncodeToBytes(obj)
@@ -2315,6 +2331,7 @@ func (s *StateDB) MergeSlotDB(slotDb *ParallelStateDB, slotReceipt *types.Receip
 	for addr := range slotDb.stateObjectsPending {
 		if _, exist := s.stateObjectsPending[addr]; !exist {
 			s.stateObjectsPending[addr] = struct{}{}
+			log.Info("MergeSlotDB stateObjectsPending", "addr", addr)
 		}
 	}
 
@@ -2490,6 +2507,7 @@ func (s *ParallelStateDB) getStateObject(addr common.Address) *StateObject {
 }
 
 func (s *ParallelStateDB) storeStateObj(addr common.Address, stateObject *StateObject) {
+	log.Info("ParallelStateDB storeStateObj", "addr", addr)
 	// When a state object is stored into s.parallel.stateObjects,
 	// it belongs to base StateDB, it is confirmed and valid.
 	stateObject.db = s.parallel.baseStateDB

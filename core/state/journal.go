@@ -20,6 +20,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/log"
 )
 
 // journalEntry is a modification entry in the state change journal that can be
@@ -66,6 +67,7 @@ func (j *journal) revert(dber StateDBer, snapshot int) {
 		// Drop any dirty tracking induced by the change
 		if addr := j.entries[i].dirtied(); addr != nil {
 			if j.dirties[*addr]--; j.dirties[*addr] == 0 {
+				log.Info("journal revert delete dirties", "addr", addr)
 				delete(j.dirties, *addr)
 			}
 		}
@@ -163,9 +165,11 @@ func (ch createObjectChange) dirtied() *common.Address {
 func (ch resetObjectChange) revert(dber StateDBer) {
 	s := dber.getBaseStateDB()
 	if s.parallel.isSlotDB {
+		log.Info("resetObjectChange is  SlotDB", "address", ch.prev.address)
 		// ch.prev must be from dirtiedStateObjectsInSlot, put it back
 		s.parallel.dirtiedStateObjectsInSlot[ch.prev.address] = ch.prev
 	} else {
+		log.Info("resetObjectChange not SlotDB", "address", ch.prev.address)
 		// ch.prev was got from main DB, put it back to main DB.
 		s.storeStateObj(ch.prev.address, ch.prev)
 	}
