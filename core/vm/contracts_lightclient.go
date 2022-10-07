@@ -52,7 +52,7 @@ func (c *tmHeaderValidate) Run(input []byte) (result []byte, err error) {
 			err = fmt.Errorf("internal error: %v\n", r)
 		}
 	}()
-
+	log.Info("tmHeaderValidate Run")
 	if uint64(len(input)) <= precompileContractInputMetaDataLength {
 		return nil, fmt.Errorf("invalid input")
 	}
@@ -110,7 +110,7 @@ func (c *iavlMerkleProofValidate) Run(input []byte) (result []byte, err error) {
 			err = fmt.Errorf("internal error: %v\n", r)
 		}
 	}()
-
+	log.Info("iavlMerkleProofValidate Run")
 	if uint64(len(input)) <= precompileContractInputMetaDataLength {
 		return nil, fmt.Errorf("invalid input: input should include %d bytes payload length and payload", precompileContractInputMetaDataLength)
 	}
