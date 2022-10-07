@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/core/vm/lightclient"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -104,7 +105,6 @@ func (c *iavlMerkleProofValidate) RequiredGas(input []byte) uint64 {
 // | payload length | payload    |
 // | 32 bytes       |            |
 func (c *iavlMerkleProofValidate) Run(input []byte) (result []byte, err error) {
-	//return nil, fmt.Errorf("suspend")
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("internal error: %v\n", r)
@@ -143,6 +143,7 @@ func (c *tmHeaderValidateNano) RequiredGas(input []byte) uint64 {
 }
 
 func (c *tmHeaderValidateNano) Run(input []byte) (result []byte, err error) {
+	log.Info("tmHeaderValidateNano Run")
 	return nil, fmt.Errorf("suspend")
 }
 
@@ -157,5 +158,6 @@ func (c *iavlMerkleProofValidateNano) RequiredGas(input []byte) uint64 {
 // | payload length | payload    |
 // | 32 bytes       |            |
 func (c *iavlMerkleProofValidateNano) Run(input []byte) (result []byte, err error) {
+	log.Info("iavlMerkleProofValidateNano Run")
 	return nil, fmt.Errorf("suspend")
 }
