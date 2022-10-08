@@ -428,7 +428,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 			return statedb, nil, nil, 0, err
 		}
 		statedb.Prepare(tx.Hash(), i)
-		log.Info("applyTransaction", "index", i, "From", msg.From(), "To", msg.To())
+		log.Info("applyTransaction", "index", i, "txHash", tx.Hash())
 
 		receipt, err := applyTransaction(msg, p.config, p.bc, nil, gp, statedb, blockNumber, blockHash, tx, usedGas, vmenv, bloomProcessors)
 		if err != nil {
