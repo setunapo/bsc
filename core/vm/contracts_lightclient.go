@@ -52,7 +52,8 @@ func (c *tmHeaderValidate) Run(input []byte) (result []byte, err error) {
 			err = fmt.Errorf("internal error: %v\n", r)
 		}
 	}()
-	log.Info("tmHeaderValidate Run")
+	inputHex := fmt.Sprintf("%x", input)
+	log.Info("tmHeaderValidate Run", "inputHex", inputHex)
 	if uint64(len(input)) <= precompileContractInputMetaDataLength {
 		return nil, fmt.Errorf("invalid input")
 	}
@@ -110,7 +111,8 @@ func (c *iavlMerkleProofValidate) Run(input []byte) (result []byte, err error) {
 			err = fmt.Errorf("internal error: %v\n", r)
 		}
 	}()
-	log.Info("iavlMerkleProofValidate Run")
+	inputHex := fmt.Sprintf("%x", input)
+	log.Info("iavlMerkleProofValidate Run", "inputHex", inputHex)
 	if uint64(len(input)) <= precompileContractInputMetaDataLength {
 		return nil, fmt.Errorf("invalid input: input should include %d bytes payload length and payload", precompileContractInputMetaDataLength)
 	}
@@ -143,7 +145,9 @@ func (c *tmHeaderValidateNano) RequiredGas(input []byte) uint64 {
 }
 
 func (c *tmHeaderValidateNano) Run(input []byte) (result []byte, err error) {
-	log.Info("tmHeaderValidateNano Run")
+	inputHex := fmt.Sprintf("%x", input)
+	log.Info("tmHeaderValidateNano Run", "inputHex", inputHex)
+
 	return nil, fmt.Errorf("suspend")
 }
 
@@ -158,6 +162,8 @@ func (c *iavlMerkleProofValidateNano) RequiredGas(input []byte) uint64 {
 // | payload length | payload    |
 // | 32 bytes       |            |
 func (c *iavlMerkleProofValidateNano) Run(input []byte) (result []byte, err error) {
-	log.Info("iavlMerkleProofValidateNano Run")
+	inputHex := fmt.Sprintf("%x", input)
+	log.Info("iavlMerkleProofValidateNano Run", "inputHex", inputHex)
+
 	return nil, fmt.Errorf("suspend")
 }
