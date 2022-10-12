@@ -1144,7 +1144,7 @@ func (s *StateDB) PutSyncPool() {
 	for key := range s.parallel.codeReadsInSlot {
 		delete(s.parallel.codeReadsInSlot, key)
 	}
-	addressToStructPool.Put(s.parallel.codeReadsInSlot)
+	addressToBytesPool.Put(s.parallel.codeReadsInSlot)
 
 	for key := range s.parallel.codeHashReadsInSlot {
 		delete(s.parallel.codeHashReadsInSlot, key)
