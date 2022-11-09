@@ -800,11 +800,6 @@ func (p *Parlia) Delay(chain consensus.ChainReader, header *types.Header) *time.
 		return nil
 	}
 	delay := p.delayForRamanujanFork(snap, header)
-	// The blocking time should be no more than half of period
-	half := time.Duration(p.config.Period) * time.Second / 2
-	if delay > half {
-		delay = half
-	}
 	return &delay
 }
 
@@ -852,7 +847,9 @@ func (p *Parlia) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 	// Sweet, the protocol permits us to sign the block, wait for our time
 	delay := p.delayForRamanujanFork(snap, header)
 
-	log.Info("Sealing block with", "number", number, "delay", delay, "headerDifficulty", header.Difficulty, "val", val.Hex())
+	log.Info("Sealing block with", "number", number, "delay", delay,
+		"header.Time Second", time.Unix(int64(header.Time), 0).Second(),
+		"headerDifficulty", header.Difficulty, "val", val.Hex())
 
 	// Sign all the things!
 	sig, err := signFn(accounts.Account{Address: val}, accounts.MimetypeParlia, ParliaRLP(header, p.chainConfig.ChainID))
@@ -962,6 +959,11 @@ func (p *Parlia) CalcDifficulty(chain consensus.ChainHeaderReader, time uint64, 
 		return nil
 	}
 	return CalcDifficulty(snap, p.val)
+}
+
+func (p *Parlia) DropOnNewBlock(header *types.Header) bool {
+	// drop the block if it is not in turn.
+	return header.Difficulty.Cmp(diffNoTurn) == 0
 }
 
 // CalcDifficulty is the difficulty adjustment algorithm. It returns the difficulty
