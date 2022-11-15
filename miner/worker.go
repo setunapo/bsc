@@ -383,6 +383,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 			close(interruptCh)
 		}
 		interruptCh = make(chan int32, 1)
+		log.Info("newWorkLoop commit", "reason", reason)
 		select {
 		case w.newWorkCh <- &newWorkReq{interruptCh: interruptCh, timestamp: timestamp}:
 		case <-w.exitCh:
@@ -407,6 +408,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 		case <-w.startCh:
 			clearPending(w.chain.CurrentBlock().NumberU64())
 			timestamp = time.Now().Unix()
+			log.Info("newWorkLoop commit on start")
 			commit(commitInterruptNewHead)
 
 		case head := <-w.chainHeadCh:
@@ -777,7 +779,7 @@ func (w *worker) commitTransactions(env *environment, txs *types.TransactionsByP
 	}
 
 	var coalescedLogs []*types.Log
-	// initilise bloom processors
+	// initialize bloom processors
 	processorCapacity := 100
 	if txs.CurrentSize() < processorCapacity {
 		processorCapacity = txs.CurrentSize()
@@ -1002,7 +1004,7 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 // fillTransactions retrieves the pending transactions from the txpool and fills them
 // into the given sealing block. The transaction selection and ordering strategy can
 // be customized with the plugin in the future.
-func (w *worker) fillTransactions(interruptCh chan int32, env *environment) (err error) {
+func (w *worker) fillTransactions(interruptCh chan int32, env *environment, stopTimer *time.Timer) (err error) {
 	// Split the pending transactions into locals and remotes
 	// Fill the block with all available pending transactions.
 	pending := w.eth.TxPool().Pending(false)
@@ -1012,14 +1014,6 @@ func (w *worker) fillTransactions(interruptCh chan int32, env *environment) (err
 			delete(remoteTxs, account)
 			localTxs[account] = txs
 		}
-	}
-
-	var stopTimer *time.Timer
-	delay := w.engine.Delay(w.chain, env.header, &w.config.DelayLeftOver)
-	if delay != nil {
-		stopTimer = time.NewTimer(*delay)
-		log.Debug("Time left for mining work", "delay", delay.String())
-		defer stopTimer.Stop()
 	}
 
 	err = nil
@@ -1049,7 +1043,7 @@ func (w *worker) generateWork(params *generateParams) (*types.Block, error) {
 	}
 	defer work.discard()
 
-	w.fillTransactions(nil, work)
+	w.fillTransactions(nil, work, nil)
 	block, _, err := w.engine.FinalizeAndAssemble(w.chain, work.header, work.state, work.txs, work.unclelist(), work.receipts)
 	return block, err
 }
@@ -1068,7 +1062,11 @@ func (w *worker) commitWork(interruptCh chan int32, timestamp int64) {
 		}
 		coinbase = w.coinbase // Use the preset address as the fee recipient
 	}
-	var stopTimer *time.Timer
+
+	stopTimer := time.NewTimer(0)
+	defer stopTimer.Stop()
+	<-stopTimer.C // discard the initial tick
+
 	// validator can try several times to get the most profitable block,
 	// as long as the timestamp is not reached.
 	workList := make([]*environment, 0, 10)
@@ -1092,28 +1090,31 @@ LOOP:
 		if err != nil {
 			return
 		}
-		log.Info("commitWork for", "block", work.header.Number, "timestamp", time.Unix(int64(timestamp), 0).Second())
+
+		log.Info("commitWork for", "block", work.header.Number,
+			"until header time", time.Until(time.Unix(int64(work.header.Time), 0)))
 		workList = append(workList, work)
 
-		if stopTimer == nil {
-			delay := w.engine.Delay(w.chain, work.header, &w.config.DelayLeftOver)
-			if delay != nil {
-				left := *delay - w.config.DelayLeftOver
-				if left <= 0 {
-					log.Info("Not enough time for commitWork", "delay", *delay, "DelayLeftOver", w.config.DelayLeftOver)
-					break
-				}
-				log.Info("commitWork stopTimer", "delay", *delay, "DelayLeftOver", w.config.DelayLeftOver)
-				stopTimer = time.NewTimer(left)
-				defer stopTimer.Stop()
-			}
+		delay := w.engine.Delay(w.chain, work.header, &w.config.DelayLeftOver)
+		if delay == nil {
+			log.Warn("commitWork delay is nil, something is wrong")
+			stopTimer = nil
+		} else if *delay <= 0 {
+			log.Info("Not enough time for commitWork")
+			break
+		} else {
+			log.Info("commitWork stopTimer", "delay", *delay, "DelayLeftOver", w.config.DelayLeftOver)
+			stopTimer.Reset(*delay)
 		}
+
 		// subscribe before fillTransactions
 		txsCh := make(chan core.NewTxsEvent, txChanSize)
 		sub := w.eth.TxPool().SubscribeNewTxsEvent(txsCh)
 		defer sub.Unsubscribe()
 		// Fill pending transactions from the txpool
-		err = w.fillTransactions(interruptCh, work)
+		startT := time.Now()
+		err = w.fillTransactions(interruptCh, work, stopTimer)
+		fillDuration := time.Since(startT)
 		switch {
 		case errors.Is(err, errBlockInterruptedByNewHead):
 			// For Parlia, it will drop the work on receiving new block if it is not inturn.
@@ -1130,23 +1131,26 @@ LOOP:
 			break LOOP
 		}
 
-		if interruptCh == nil {
-			log.Info("commitWork interruptChan is nil")
+		if interruptCh == nil || stopTimer == nil {
+			// it is single commit work, no need to try several time.
+			log.Info("commitWork interruptCh or stopTimer is nil")
 			break
 		}
-		done := false
+
 		select {
-		case <-stopTimer.C:
-			// log.Info("commitWork stopTimer expired")
-			done = true
 		case <-txsCh:
-			// log.Info("commitWork txsCh arrived")
+			delay := w.engine.Delay(w.chain, work.header, &w.config.DelayLeftOver)
+			log.Info("commitWork txsCh arrived", "fillDuration", fillDuration.String(), "delay", delay.String())
+			if fillDuration > *delay {
+				// there may not have enough time for another fillTransactions
+				break LOOP
+			}
+		case <-stopTimer.C:
+			log.Info("commitWork stopTimer expired")
+			break LOOP
 		case <-interruptCh:
 			log.Info("commitWork interruptChan closed, new block imported or resubmit triggered")
 			return
-		}
-		if done {
-			break
 		}
 	}
 	// get the most profitable work
@@ -1154,7 +1158,7 @@ LOOP:
 	bestReward := new(big.Int)
 	for i, w := range workList {
 		balance := w.state.GetBalance(consensus.SystemAddress)
-		log.Debug("Get the best work", "index", i, "balance", balance, "bestReward", bestReward)
+		log.Debug("Get the most profitable work", "index", i, "balance", balance, "bestReward", bestReward)
 		if balance.Cmp(bestReward) > 0 {
 			bestWork = w
 			bestReward = balance
