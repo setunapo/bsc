@@ -383,7 +383,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 			close(interruptCh)
 		}
 		interruptCh = make(chan int32, 1)
-		log.Info("newWorkLoop commit", "reason", reason)
+		log.Debug("newWorkLoop commit", "reason", reason)
 		select {
 		case w.newWorkCh <- &newWorkReq{interruptCh: interruptCh, timestamp: timestamp}:
 		case <-w.exitCh:
@@ -408,11 +408,9 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 		case <-w.startCh:
 			clearPending(w.chain.CurrentBlock().NumberU64())
 			timestamp = time.Now().Unix()
-			log.Info("newWorkLoop commit on start")
 			commit(commitInterruptNewHead)
 
 		case head := <-w.chainHeadCh:
-			log.Info("newWorkLoop chainHeadCh", "block number", head.Block.NumberU64())
 			if !w.isRunning() {
 				continue
 			}
@@ -483,7 +481,6 @@ func (w *worker) mainLoop() {
 	for {
 		select {
 		case req := <-w.newWorkCh:
-			log.Info("mainLoop newWorkCh")
 			w.commitWork(req.interruptCh, req.timestamp)
 
 		case req := <-w.getWorkCh:
@@ -1091,7 +1088,7 @@ LOOP:
 			return
 		}
 
-		log.Info("commitWork for", "block", work.header.Number,
+		log.Debug("commitWork for", "block", work.header.Number,
 			"until header time", time.Until(time.Unix(int64(work.header.Time), 0)))
 		workList = append(workList, work)
 
@@ -1100,10 +1097,10 @@ LOOP:
 			log.Warn("commitWork delay is nil, something is wrong")
 			stopTimer = nil
 		} else if *delay <= 0 {
-			log.Info("Not enough time for commitWork")
+			log.Debug("Not enough time for commitWork")
 			break
 		} else {
-			log.Info("commitWork stopTimer", "delay", *delay, "DelayLeftOver", w.config.DelayLeftOver)
+			log.Debug("commitWork stopTimer", "delay", *delay, "DelayLeftOver", w.config.DelayLeftOver)
 			stopTimer.Reset(*delay)
 		}
 
@@ -1112,22 +1109,22 @@ LOOP:
 		sub := w.eth.TxPool().SubscribeNewTxsEvent(txsCh)
 		defer sub.Unsubscribe()
 		// Fill pending transactions from the txpool
-		startT := time.Now()
+		fillStart := time.Now()
 		err = w.fillTransactions(interruptCh, work, stopTimer)
-		fillDuration := time.Since(startT)
+		fillDuration := time.Since(fillStart)
 		switch {
 		case errors.Is(err, errBlockInterruptedByNewHead):
 			// For Parlia, it will drop the work on receiving new block if it is not inturn.
 			if w.engine.DropOnNewBlock(work.header) {
-				log.Info("drop the block, when new block is imported")
+				log.Debug("drop the block, when new block is imported")
 				return
 			}
 		case errors.Is(err, errBlockInterruptedByTimeout):
 			// break the loop to get the best work
-			log.Info("commitWork timeout")
+			log.Debug("commitWork timeout")
 			break LOOP
 		case errors.Is(err, errBlockInterruptedByOutOfGas):
-			log.Info("commitWork out of gas")
+			log.Debug("commitWork out of gas")
 			break LOOP
 		}
 
@@ -1140,16 +1137,16 @@ LOOP:
 		select {
 		case <-txsCh:
 			delay := w.engine.Delay(w.chain, work.header, &w.config.DelayLeftOver)
-			log.Info("commitWork txsCh arrived", "fillDuration", fillDuration.String(), "delay", delay.String())
+			log.Debug("commitWork txsCh arrived", "fillDuration", fillDuration.String(), "delay", delay.String())
 			if fillDuration > *delay {
 				// there may not have enough time for another fillTransactions
 				break LOOP
 			}
 		case <-stopTimer.C:
-			log.Info("commitWork stopTimer expired")
+			log.Debug("commitWork stopTimer expired")
 			break LOOP
 		case <-interruptCh:
-			log.Info("commitWork interruptChan closed, new block imported or resubmit triggered")
+			log.Debug("commitWork interruptCh closed, new block imported or resubmit triggered")
 			return
 		}
 	}
