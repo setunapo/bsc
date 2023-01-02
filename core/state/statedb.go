@@ -3689,8 +3689,9 @@ func (s *ParallelStateDB) IsParallelReadsValid(isStage2 bool) bool {
 	// snapshot destructs check
 	for addr, destructRead := range slotDB.parallel.addrSnapDestructsReadsInSlot {
 		mainObj := mainDB.getStateObject(addr)
-		if mainObj == nil {
-			log.Debug("IsSlotDBReadsValid snapshot destructs read invalid, address should exist",
+		// if mainObj == nil, destructRead should not be true
+		if mainObj == nil && destructRead {
+			log.Warn("IsSlotDBReadsValid snapshot destructs read invalid, address should exist",
 				"addr", addr, "destruct", destructRead,
 				"SlotIndex", slotDB.parallel.SlotIndex,
 				"txIndex", slotDB.txIndex, "baseTxIndex", slotDB.parallel.baseTxIndex)
