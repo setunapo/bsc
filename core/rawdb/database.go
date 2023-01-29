@@ -20,17 +20,34 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
+	"sort"
 	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/ethdb/memorydb"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/olekukonko/tablewriter"
 )
+
+var emptyCodeHash = crypto.Keccak256(nil)
+
+type Account struct {
+	Nonce    uint64
+	Balance  *big.Int
+	Root     []byte
+	CodeHash []byte
+}
+type AddrKvNum struct {
+	addr  common.Hash
+	kvNum uint64
+}
 
 // freezerdb is a database wrapper that enabled freezer data retrievals.
 type freezerdb struct {
@@ -422,21 +439,23 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 		logged = time.Now()
 
 		// Key-value store statistics
-		headers         stat
-		bodies          stat
-		receipts        stat
-		tds             stat
-		numHashPairings stat
-		hashNumPairings stat
-		tries           stat
-		codes           stat
-		txLookups       stat
-		accountSnaps    stat
-		storageSnaps    stat
-		preimages       stat
-		bloomBits       stat
-		cliqueSnaps     stat
-		parliaSnaps     stat
+		headers              stat
+		bodies               stat
+		receipts             stat
+		tds                  stat
+		numHashPairings      stat
+		hashNumPairings      stat
+		tries                stat
+		codes                stat
+		txLookups            stat
+		accountSnaps         stat
+		accountSnapsEOA      stat
+		accountSnapsContract stat
+		storageSnaps         stat
+		preimages            stat
+		bloomBits            stat
+		cliqueSnaps          stat
+		parliaSnaps          stat
 
 		// Ancient store statistics
 		ancientHeadersSize  common.StorageSize
@@ -455,6 +474,9 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 
 		// Totals
 		total common.StorageSize
+
+		//
+		addrKvNumMap = make(map[common.Hash]uint64)
 	)
 	// Inspect key-value database first.
 	for it.Next() {
@@ -483,9 +505,25 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 		case bytes.HasPrefix(key, txLookupPrefix) && len(key) == (len(txLookupPrefix)+common.HashLength):
 			txLookups.Add(size)
 		case bytes.HasPrefix(key, SnapshotAccountPrefix) && len(key) == (len(SnapshotAccountPrefix)+common.HashLength):
+			account := new(Account)
+			if err := rlp.DecodeBytes(it.Value(), account); err != nil {
+				panic(err)
+			}
+			if account.CodeHash == nil {
+				accountSnapsEOA.Add(size)
+			} else if len(account.CodeHash) == 0 {
+				accountSnapsEOA.Add(size)
+			} else if bytes.Equal(account.CodeHash, emptyCodeHash) {
+				accountSnapsEOA.Add(size)
+			} else {
+				accountSnapsContract.Add(size)
+			}
 			accountSnaps.Add(size)
 		case bytes.HasPrefix(key, SnapshotStoragePrefix) && len(key) == (len(SnapshotStoragePrefix)+2*common.HashLength):
 			storageSnaps.Add(size)
+			addr := common.BytesToHash(key[1:33])
+			addrKvNumMap[addr] = addrKvNumMap[addr] + 1
+
 		case bytes.HasPrefix(key, PreimagePrefix) && len(key) == (len(PreimagePrefix)+common.HashLength):
 			preimages.Add(size)
 		case bytes.HasPrefix(key, configPrefix) && len(key) == (len(configPrefix)+common.HashLength):
@@ -545,6 +583,24 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 		ancients = counter(count)
 	}
 
+	// To display top 5
+	addrKvNumSlice := make([]AddrKvNum, 0, len(addrKvNumMap))
+	for addr, num := range addrKvNumMap {
+		addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{addr, num})
+	}
+	sort.Slice(addrKvNumSlice, func(i, j int) bool {
+		return addrKvNumSlice[i].kvNum > addrKvNumSlice[j].kvNum
+	})
+	// make sure there are 5 elements at least to be displayed
+	if len(addrKvNumSlice) < 5 {
+		emptyAddr := common.BytesToHash([]byte{})
+		addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{emptyAddr, 0})
+		addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{emptyAddr, 0})
+		addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{emptyAddr, 0})
+		addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{emptyAddr, 0})
+		addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{emptyAddr, 0})
+	}
+
 	// Display the database statistic.
 	stats := [][]string{
 		{"Key-Value store", "Headers", headers.Size(), headers.Count()},
@@ -559,7 +615,14 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 		{"Key-Value store", "Trie nodes", tries.Size(), tries.Count()},
 		{"Key-Value store", "Trie preimages", preimages.Size(), preimages.Count()},
 		{"Key-Value store", "Account snapshot", accountSnaps.Size(), accountSnaps.Count()},
+		{"Key-Value store", "Account snapshot EOA", accountSnapsEOA.Size(), accountSnapsEOA.Count()},
+		{"Key-Value store", "Account snapshot Contract", accountSnapsContract.Size(), accountSnapsContract.Count()},
 		{"Key-Value store", "Storage snapshot", storageSnaps.Size(), storageSnaps.Count()},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[0].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[0].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[1].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[1].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[2].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[2].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[3].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[3].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[4].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[4].kvNum)},
 		{"Key-Value store", "Clique snapshots", cliqueSnaps.Size(), cliqueSnaps.Count()},
 		{"Key-Value store", "Parlia snapshots", parliaSnaps.Size(), parliaSnaps.Count()},
 		{"Key-Value store", "Singleton metadata", metadata.Size(), metadata.Count()},
