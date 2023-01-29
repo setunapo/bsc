@@ -50,7 +50,14 @@ var (
 	// emptyRoot is the known root hash of an empty trie.
 	emptyRoot = common.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
 
-	emptyAddr = crypto.Keccak256Hash(common.Address{}.Bytes())
+	emptyAddr   = crypto.Keccak256Hash(common.Address{}.Bytes())
+	topAddrHash = []string{
+		"0xe3ee5c338fb03ba97621fbf6b62c153a7a9b3c4dc567d43368d31a1ae9a2d6b5",
+		"0xcbfc208cdd69e775207d3575299a371560c11e9896b0a4163c2b845a7d9700ff",
+		"0xbe09a843e96d820323ffaac74f0f119734db1f158ac0d0d5b627ac7f3bcc82c2",
+		"0xa2aea0f231dc891cdb73930caa95a9cc139c3a15aa82bdd058ed70f340639f03",
+		"0xe9f236c88a4a8a733cdc8006ea8ea015b72d5af7ce2349c63fbf18d8e8caf967",
+	}
 )
 
 type proofList [][]byte
@@ -687,7 +694,13 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *StateObject {
 	var data *types.StateAccount
 	if s.snap != nil {
 		start := time.Now()
-		acc, err := s.snap.Account(crypto.HashData(s.hasher, addr.Bytes()))
+		addrHash := crypto.HashData(s.hasher, addr.Bytes())
+		for _, hash := range topAddrHash {
+			if addrHash.String() == hash {
+				log.Info("Detected ", "hash", hash, "addr", addr)
+			}
+		}
+		acc, err := s.snap.Account(addrHash)
 		if metrics.EnabledExpensive {
 			s.SnapshotAccountReads += time.Since(start)
 		}
