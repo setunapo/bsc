@@ -583,7 +583,7 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 		ancients = counter(count)
 	}
 
-	// To display top 5
+	// To display top 20
 	addrKvNumSlice := make([]AddrKvNum, 0, len(addrKvNumMap))
 	for addr, num := range addrKvNumMap {
 		addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{addr, num})
@@ -591,14 +591,12 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 	sort.Slice(addrKvNumSlice, func(i, j int) bool {
 		return addrKvNumSlice[i].kvNum > addrKvNumSlice[j].kvNum
 	})
-	// make sure there are 5 elements at least to be displayed
-	if len(addrKvNumSlice) < 5 {
+	// make sure there are 20 elements at least to be displayed
+	if len(addrKvNumSlice) < 20 {
 		emptyAddr := common.BytesToHash([]byte{})
-		addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{emptyAddr, 0})
-		addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{emptyAddr, 0})
-		addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{emptyAddr, 0})
-		addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{emptyAddr, 0})
-		addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{emptyAddr, 0})
+		for i := 0; i < 20; i++ {
+			addrKvNumSlice = append(addrKvNumSlice, AddrKvNum{emptyAddr, 0})
+		}
 	}
 
 	// Display the database statistic.
@@ -623,6 +621,21 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[2].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[2].kvNum)},
 		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[3].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[3].kvNum)},
 		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[4].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[4].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[5].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[5].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[6].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[6].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[7].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[7].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[8].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[8].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[9].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[9].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[10].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[10].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[11].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[11].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[12].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[12].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[13].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[13].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[14].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[14].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[15].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[15].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[16].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[16].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[17].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[17].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[18].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[18].kvNum)},
+		{"Key-Value store", "Storage snapshot addr", addrKvNumSlice[19].addr.String(), fmt.Sprintf("%d", addrKvNumSlice[19].kvNum)},
 		{"Key-Value store", "Clique snapshots", cliqueSnaps.Size(), cliqueSnaps.Count()},
 		{"Key-Value store", "Parlia snapshots", parliaSnaps.Size(), parliaSnaps.Count()},
 		{"Key-Value store", "Singleton metadata", metadata.Size(), metadata.Count()},
