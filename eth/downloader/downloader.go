@@ -486,9 +486,9 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 	}
 	mode := d.getMode()
 
-	log.Debug("Synchronising with the network", "peer", p.id, "eth", p.version, "head", hash, "td", td, "mode", mode)
+	log.Info("Synchronising with the network", "peer", p.id, "eth", p.version, "head", hash, "td", td, "mode", mode)
 	defer func(start time.Time) {
-		log.Debug("Synchronisation terminated", "elapsed", common.PrettyDuration(time.Since(start)))
+		log.Info("Synchronisation terminated", "elapsed", common.PrettyDuration(time.Since(start)))
 	}(time.Now())
 
 	// Look up the sync boundaries: the common ancestor and the target block
@@ -593,6 +593,7 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 	} else if mode == FullSync {
 		fetchers = append(fetchers, d.processFullSyncContent)
 	}
+	log.Info("syncWithPeer", "origin", origin, "latest", latest.Number.Uint64())
 	return d.spawnSync(fetchers)
 }
 
@@ -782,7 +783,7 @@ func (d *Downloader) findAncestor(p *peerConnection, remoteHeader *types.Header)
 	default:
 		localHeight = d.lightchain.CurrentHeader().Number.Uint64()
 	}
-	p.log.Debug("Looking for common ancestor", "local", localHeight, "remote", remoteHeight)
+	p.log.Info("Looking for common ancestor", "local", localHeight, "remote", remoteHeight, "mode", mode)
 
 	// Recap floor value for binary search
 	maxForkAncestry := fullMaxForkAncestry
@@ -835,7 +836,7 @@ func (d *Downloader) findAncestor(p *peerConnection, remoteHeader *types.Header)
 func (d *Downloader) findAncestorSpanSearch(p *peerConnection, mode SyncMode, remoteHeight, localHeight uint64, floor int64) (uint64, error) {
 	from, count, skip, max := calculateRequestSpan(remoteHeight, localHeight)
 
-	p.log.Trace("Span searching for common ancestor", "count", count, "from", from, "skip", skip)
+	p.log.Info("Span searching for common ancestor", "count", count, "from", from, "skip", skip)
 	headers, hashes, err := d.fetchHeadersByNumber(p, uint64(from), count, skip, false)
 	if err != nil {
 		return 0, err
@@ -886,7 +887,7 @@ func (d *Downloader) findAncestorSpanSearch(p *peerConnection, mode SyncMode, re
 			p.log.Warn("Ancestor below allowance", "number", number, "hash", hash, "allowance", floor)
 			return 0, errInvalidAncestor
 		}
-		p.log.Debug("Found common ancestor", "number", number, "hash", hash)
+		p.log.Info("Found common ancestor", "number", number, "hash", hash)
 		return number, nil
 	}
 	return 0, errNoAncestorFound
@@ -900,7 +901,7 @@ func (d *Downloader) findAncestorBinarySearch(p *peerConnection, mode SyncMode, 
 	if floor > 0 {
 		start = uint64(floor)
 	}
-	p.log.Trace("Binary searching for common ancestor", "start", start, "end", end)
+	p.log.Info("Binary searching for common ancestor", "start", start, "end", end)
 
 	for start+1 < end {
 		// Split our chain interval in two, and request the hash to cross check
@@ -949,7 +950,7 @@ func (d *Downloader) findAncestorBinarySearch(p *peerConnection, mode SyncMode, 
 		p.log.Warn("Ancestor below allowance", "number", start, "hash", hash, "allowance", floor)
 		return 0, errInvalidAncestor
 	}
-	p.log.Debug("Found common ancestor", "number", start, "hash", hash)
+	p.log.Info("Found common ancestor", "number", start, "hash", hash)
 	return start, nil
 }
 
