@@ -68,6 +68,7 @@ var (
 var (
 	errBusy                    = errors.New("busy")
 	errUnknownPeer             = errors.New("peer is unknown or unhealthy")
+	errLaggingPeer             = errors.New("peer's latest block is already imported")
 	errBadPeer                 = errors.New("action from bad peer ignored")
 	errStallingPeer            = errors.New("peer is stalling")
 	errUnsyncedPeer            = errors.New("unsynced peer")
@@ -384,7 +385,8 @@ func (d *Downloader) Synchronise(id string, head common.Hash, td *big.Int, mode 
 	}
 	if errors.Is(err, errInvalidChain) || errors.Is(err, errBadPeer) || errors.Is(err, errTimeout) ||
 		errors.Is(err, errStallingPeer) || errors.Is(err, errUnsyncedPeer) || errors.Is(err, errEmptyHeaderSet) ||
-		errors.Is(err, errPeersUnavailable) || errors.Is(err, errTooOld) || errors.Is(err, errInvalidAncestor) {
+		errors.Is(err, errPeersUnavailable) || errors.Is(err, errTooOld) || errors.Is(err, errInvalidAncestor) ||
+		errors.Is(err, errLaggingPeer) {
 		log.Warn("Synchronisation failed, dropping peer", "peer", id, "err", err)
 		if d.dropPeer == nil {
 			// The dropPeer method is nil when `--copydb` is used for a local copy.
@@ -783,6 +785,14 @@ func (d *Downloader) findAncestor(p *peerConnection, remoteHeader *types.Header)
 	default:
 		localHeight = d.lightchain.CurrentHeader().Number.Uint64()
 	}
+
+	// remote height is <= local & exist, then drop the peer
+	if localHeight >= remoteHeight {
+		if d.blockchain.GetBlockByHash(remoteHeader.Hash()) != nil {
+			p.log.Warn("Looking for common ancestor", "local", localHeight, "remote", remoteHeight, "mode", mode, "err", errLaggingPeer)
+			return 0, errLaggingPeer
+		}
+	}
 	p.log.Info("Looking for common ancestor", "local", localHeight, "remote", remoteHeight, "mode", mode)
 
 	// Recap floor value for binary search
@@ -963,8 +973,8 @@ func (d *Downloader) findAncestorBinarySearch(p *peerConnection, mode SyncMode, 
 // can fill in the skeleton - not even the origin peer - it's assumed invalid and
 // the origin is dropped.
 func (d *Downloader) fetchHeaders(p *peerConnection, from uint64, head uint64) error {
-	p.log.Debug("Directing header downloads", "origin", from)
-	defer p.log.Debug("Header download terminated")
+	p.log.Info("Directing header downloads", "origin", from, "head", head)
+	defer p.log.Info("Header download terminated")
 
 	// Start pulling the header chain skeleton until all is done
 	var (
