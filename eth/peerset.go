@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/eth/protocols/snap"
 	"github.com/ethereum/go-ethereum/eth/protocols/trust"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
 )
 
@@ -479,6 +480,7 @@ func (ps *peerSet) peerWithHighestTD() *eth.Peer {
 	)
 	for _, p := range ps.peers {
 		if p.Lagging() {
+			log.Info("peerWithHighestTD, peer is lagging", "p.ID()", p.ID())
 			continue
 		}
 		if _, td := p.Head(); bestPeer == nil || td.Cmp(bestTd) > 0 {

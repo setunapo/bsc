@@ -25,6 +25,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -159,6 +160,7 @@ func (p *Peer) Lagging() bool {
 }
 
 func (p *Peer) MarkLagging() {
+	log.Info("MarkLagging")
 	p.lagging = true
 }
 
@@ -175,6 +177,10 @@ func (p *Peer) Head() (hash common.Hash, td *big.Int) {
 func (p *Peer) SetHead(hash common.Hash, td *big.Int) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
+	if p.lagging {
+		log.Info("Peer SetHead, clear lagging flag", "previous hash", p.head,
+			"previous td", p.td, "hash", hash, "td", td)
+	}
 	p.lagging = false
 	copy(p.head[:], hash[:])
 	p.td.Set(td)
