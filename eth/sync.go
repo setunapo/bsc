@@ -168,7 +168,7 @@ func (cs *chainSyncer) nextSyncOp() *chainSyncOp {
 
 	op := peerToSyncOp(mode, peer)
 	if op.td.Cmp(ourTD) <= 0 {
-		log.Info("nextSyncOp in sync", "mode", mode, "ourTD", ourTD, "peer td", op.td, "peer id", peer.ID())
+		// log.Info("nextSyncOp in sync", "mode", mode, "ourTD", ourTD, "peer td", op.td, "peer id", peer.ID())
 		return nil // We're in sync.
 	}
 	log.Info("nextSyncOp to sync", "mode", mode, "ourTD", ourTD, "peer td", op.td, "peer id", peer.ID())
