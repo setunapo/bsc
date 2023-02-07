@@ -151,7 +151,8 @@ func (d *Downloader) concurrentFetch(queue typedQueue) error {
 						// Request has been in flight longer than the grace period
 						// permitted it, consider the peer malicious attempting to
 						// stall the sync.
-						peer.log.Warn("Peer stalling, dropping", "waited", common.PrettyDuration(waited))
+						head, td := peer.peer.Head()
+						peer.log.Warn("Peer stalling, dropping", "peer", peer.id, "head", head, "td", td, "waited", common.PrettyDuration(waited))
 						d.dropPeer(peer.id)
 					}
 				}

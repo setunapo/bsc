@@ -487,6 +487,8 @@ func (ps *peerSet) peerWithHighestTD() *eth.Peer {
 			bestPeer, bestTd = p.Peer, td
 		}
 	}
+	head, td := bestPeer.Head()
+	log.Info("peerWithHighestTD", "peer", bestPeer.ID(), "head", head, "td", td)
 	return bestPeer
 }
 
