@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"math/rand"
 	"sync"
+	"time"
 
 	mapset "github.com/deckarep/golang-set"
 
@@ -95,6 +96,8 @@ type Peer struct {
 	term   chan struct{} // Termination channel to stop the broadcasters
 	txTerm chan struct{} // Termination channel to stop the tx broadcasters
 	lock   sync.RWMutex  // Mutex protecting the internal fields
+
+	reportTime time.Time
 }
 
 // NewPeer create a wrapper for a network connection and negotiated  protocol
@@ -183,6 +186,10 @@ func (p *Peer) SetHead(hash common.Hash, td *big.Int) {
 	}
 	p.lagging = false
 	copy(p.head[:], hash[:])
+	if time.Since(p.reportTime) >= 30*time.Second {
+		p.reportTime = time.Now()
+		log.Info("Peer SetHead", "previous hash", p.head, "previous td", p.td, "hash", hash, "td", td)
+	}
 	p.td.Set(td)
 }
 
