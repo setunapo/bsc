@@ -115,6 +115,8 @@ var (
 		MoranBlock:          big.NewInt(22107423),
 		GibbsBlock:          big.NewInt(23846001),
 		PlanckBlock:         big.NewInt(27281024),
+		//ClaudeBlock:         big.NewInt(-), // enable state expiry hard fork1 on mainNet
+		//ElwoodBlock:         big.NewInt(-),
 
 		Parlia: &ParliaConfig{
 			Period: 3,
@@ -142,6 +144,9 @@ var (
 		NanoBlock:           big.NewInt(23482428),
 		MoranBlock:          big.NewInt(23603940),
 		PlanckBlock:         big.NewInt(28196022),
+		//ClaudeBlock:         big.NewInt(-), // enable state expiry hard fork1 on testnet
+		//ElwoodBlock:         big.NewInt(-),
+
 		Parlia: &ParliaConfig{
 			Period: 3,
 			Epoch:  200,
@@ -168,6 +173,8 @@ var (
 		NanoBlock:           nil,
 		MoranBlock:          nil,
 		PlanckBlock:         nil,
+		//ClaudeBlock:         big.NewInt(-), // enable state expiry hard fork1 on QA net
+		//ElwoodBlock:         big.NewInt(-),
 
 		Parlia: &ParliaConfig{
 			Period: 3,
@@ -180,16 +187,16 @@ var (
 	//
 	// This configuration is intentionally not using keyed fields to force anyone
 	// adding flags to the config to also have to set these fields.
-	AllEthashProtocolChanges = &ChainConfig{big.NewInt(1337), big.NewInt(0), nil, false, big.NewInt(0), common.Hash{}, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), new(EthashConfig), nil, nil}
+	AllEthashProtocolChanges = &ChainConfig{big.NewInt(1337), big.NewInt(0), nil, false, big.NewInt(0), common.Hash{}, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), new(EthashConfig), nil, nil}
 
 	// AllCliqueProtocolChanges contains every protocol change (EIPs) introduced
 	// and accepted by the Ethereum core developers into the Clique consensus.
 	//
 	// This configuration is intentionally not using keyed fields to force anyone
 	// adding flags to the config to also have to set these fields.
-	AllCliqueProtocolChanges = &ChainConfig{big.NewInt(1337), big.NewInt(0), nil, false, big.NewInt(0), common.Hash{}, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, big.NewInt(0), nil, nil, nil, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, nil, nil, &CliqueConfig{Period: 0, Epoch: 30000}, nil}
+	AllCliqueProtocolChanges = &ChainConfig{big.NewInt(1337), big.NewInt(0), nil, false, big.NewInt(0), common.Hash{}, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, big.NewInt(0), nil, nil, nil, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, nil, nil, nil, nil, &CliqueConfig{Period: 0, Epoch: 30000}, nil}
 
-	TestChainConfig = &ChainConfig{big.NewInt(1), big.NewInt(0), nil, false, big.NewInt(0), common.Hash{}, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, new(EthashConfig), nil, nil}
+	TestChainConfig = &ChainConfig{big.NewInt(1), big.NewInt(0), nil, false, big.NewInt(0), common.Hash{}, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0), nil, nil, nil, nil, new(EthashConfig), nil, nil}
 	TestRules       = TestChainConfig.Rules(new(big.Int), false)
 )
 
@@ -286,6 +293,8 @@ type ChainConfig struct {
 	NanoBlock       *big.Int `json:"nanoBlock,omitempty" toml:",omitempty"`       // nanoBlock switch block (nil = no fork, 0 = already activated)
 	MoranBlock      *big.Int `json:"moranBlock,omitempty" toml:",omitempty"`      // moranBlock switch block (nil = no fork, 0 = already activated)
 	PlanckBlock     *big.Int `json:"planckBlock,omitempty" toml:",omitempty"`     // planckBlock switch block (nil = no fork, 0 = already activated)
+	ClaudeBlock     *big.Int `json:"claudeBlock,omitempty" toml:",omitempty"`     // claudeBlock switch block (nil = no fork, 0 = already activated)
+	ElwoodBlock     *big.Int `json:"elwoodBlock,omitempty" toml:",omitempty"`     // elwoodBlock switch block (nil = no fork, 0 = already activated)
 
 	// Various consensus engines
 	Ethash *EthashConfig `json:"ethash,omitempty" toml:",omitempty"`
@@ -336,7 +345,7 @@ func (c *ChainConfig) String() string {
 	default:
 		engine = "unknown"
 	}
-	return fmt.Sprintf("{ChainID: %v Homestead: %v DAO: %v DAOSupport: %v EIP150: %v EIP155: %v EIP158: %v Byzantium: %v Constantinople: %v Petersburg: %v Istanbul: %v, Muir Glacier: %v, Ramanujan: %v, Niels: %v, MirrorSync: %v, Bruno: %v, Berlin: %v, YOLO v3: %v, CatalystBlock: %v, London: %v, ArrowGlacier: %v, MergeFork:%v, Euler: %v, Gibbs: %v, Nano: %v, Moran: %v, Planck: %v, Engine: %v}",
+	return fmt.Sprintf("{ChainID: %v Homestead: %v DAO: %v DAOSupport: %v EIP150: %v EIP155: %v EIP158: %v Byzantium: %v Constantinople: %v Petersburg: %v Istanbul: %v, Muir Glacier: %v, Ramanujan: %v, Niels: %v, MirrorSync: %v, Bruno: %v, Berlin: %v, YOLO v3: %v, CatalystBlock: %v, London: %v, ArrowGlacier: %v, MergeFork:%v, Euler: %v, Gibbs: %v, Nano: %v, Moran: %v, Planck: %v, Claude: %v, Elwood: %v, Engine: %v}",
 		c.ChainID,
 		c.HomesteadBlock,
 		c.DAOForkBlock,
@@ -364,6 +373,8 @@ func (c *ChainConfig) String() string {
 		c.NanoBlock,
 		c.MoranBlock,
 		c.PlanckBlock,
+		c.ClaudeBlock,
+		c.ElwoodBlock,
 		engine,
 	)
 }
@@ -527,6 +538,22 @@ func (c *ChainConfig) IsOnPlanck(num *big.Int) bool {
 	return configNumEqual(c.PlanckBlock, num)
 }
 
+func (c *ChainConfig) IsClaude(num *big.Int) bool {
+	return isForked(c.ClaudeBlock, num)
+}
+
+func (c *ChainConfig) IsOnClaude(num *big.Int) bool {
+	return configNumEqual(c.ClaudeBlock, num)
+}
+
+func (c *ChainConfig) IsElwood(num *big.Int) bool {
+	return isForked(c.ElwoodBlock, num)
+}
+
+func (c *ChainConfig) IsOnElwood(num *big.Int) bool {
+	return configNumEqual(c.ElwoodBlock, num)
+}
+
 // CheckCompatible checks whether scheduled fork transitions have been imported
 // with a mismatching chain configuration.
 func (c *ChainConfig) CheckCompatible(newcfg *ChainConfig, height uint64) *ConfigCompatError {
@@ -578,6 +605,25 @@ func (c *ChainConfig) CheckConfigForkOrder() error {
 			lastFork = cur
 		}
 	}
+
+	// check state expiry's hard forks
+	if c.ClaudeBlock != nil || c.ElwoodBlock != nil {
+		if c.ClaudeBlock == nil {
+			return fmt.Errorf("unsupported state expiry fork number ClaudeBlock: %v ElwoodBlock %v",
+				c.ClaudeBlock, c.ElwoodBlock)
+		}
+
+		if c.ClaudeBlock.Cmp(common.Big0) <= 0 {
+			return fmt.Errorf("unsupported state expiry fork number ClaudeBlock: %v",
+				c.ClaudeBlock)
+		}
+
+		if c.ElwoodBlock != nil && c.ClaudeBlock.Cmp(c.ElwoodBlock) >= 0 {
+			return fmt.Errorf("unsupported state expiry fork number ClaudeBlock: %v ElwoodBlock %v",
+				c.ClaudeBlock, c.ElwoodBlock)
+		}
+	}
+
 	return nil
 }
 
@@ -657,6 +703,12 @@ func (c *ChainConfig) checkCompatible(newcfg *ChainConfig, head *big.Int) *Confi
 	}
 	if isForkIncompatible(c.PlanckBlock, newcfg.PlanckBlock, head) {
 		return newCompatError("planck fork block", c.PlanckBlock, newcfg.PlanckBlock)
+	}
+	if isForkIncompatible(c.ClaudeBlock, newcfg.ClaudeBlock, head) {
+		return newCompatError("claude fork block", c.ClaudeBlock, newcfg.ClaudeBlock)
+	}
+	if isForkIncompatible(c.ElwoodBlock, newcfg.ElwoodBlock, head) {
+		return newCompatError("elwood fork block", c.ElwoodBlock, newcfg.ElwoodBlock)
 	}
 	return nil
 }
