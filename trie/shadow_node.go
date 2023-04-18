@@ -2,6 +2,7 @@ package trie
 
 import (
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -41,11 +42,11 @@ func NewShadowNodeManager(diskdb ethdb.KeyValueStore) *ShadowNodeManager {
 //}
 
 type shadowNodeStorageReaderWriterMock struct {
-	mockEpoch uint16
+	mockEpoch types.StateEpoch
 	nodeMap   map[string][]byte
 }
 
-func newShadowNodeStorageMock(epoch uint16) ShadowNodeStorage {
+func newShadowNodeStorageMock(epoch types.StateEpoch) ShadowNodeStorage {
 	return &shadowNodeStorageReaderWriterMock{
 		mockEpoch: epoch,
 		nodeMap:   make(map[string][]byte),
@@ -58,8 +59,8 @@ func (s *shadowNodeStorageReaderWriterMock) Get(key []byte) ([]byte, error) {
 	val, ok := s.nodeMap[tmp]
 	if !ok {
 		n := shadowBranchNode{
-			ShadowHash: nil,
-			EpochMap:   [16]uint16{},
+			ShadowHash: common.Hash{},
+			EpochMap:   [16]types.StateEpoch{},
 		}
 		for i := range n.EpochMap {
 			n.EpochMap[i] = s.mockEpoch
