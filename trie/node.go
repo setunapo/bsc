@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -46,30 +47,30 @@ type node interface {
 	encode(w rlp.EncoderBuffer)
 	fstring(string) string
 	nodeType() int
-	setEpoch(epoch uint16)
-	getEpoch() uint16
+	setEpoch(epoch types.StateEpoch)
+	getEpoch() types.StateEpoch
 }
 
 type (
 	fullNode struct {
 		Children   [BranchNodeLength]node // Actual trie node data to encode/decode (needs custom encoder)
 		flags      nodeFlag
-		epoch      uint16            `rlp:"-" json:"-"`
-		shadowNode *shadowBranchNode `rlp:"-" json:"-"`
+		epoch      types.StateEpoch `rlp:"-" json:"-"`
+		shadowNode shadowBranchNode `rlp:"-" json:"-"`
 	}
 	shortNode struct {
 		Key        []byte
 		Val        node
 		flags      nodeFlag
-		epoch      uint16               `rlp:"-" json:"-"`
-		shadowNode *shadowExtensionNode `rlp:"-" json:"-"`
+		epoch      types.StateEpoch    `rlp:"-" json:"-"`
+		shadowNode shadowExtensionNode `rlp:"-" json:"-"`
 	}
 	hashNode  []byte
 	valueNode []byte
 )
 
 type RootNode struct {
-	Epoch      uint16
+	Epoch      types.StateEpoch
 	TrieHash   common.Hash
 	ShadowHash common.Hash
 }
@@ -86,19 +87,33 @@ func (n *fullNode) EncodeRLP(w io.Writer) error {
 }
 
 func (n *fullNode) GetShadowNode() *shadowBranchNode {
+	// TODO:get shadow node from cache or disk if shadow node is nil
 	return &shadowBranchNode{}
 }
 
-func (n *fullNode) IsChildExpired(pos int) (bool, error) {
+func (n *fullNode) GetChildEpoch(index int) types.StateEpoch {
+	if index < 16 {
+		return n.GetShadowNode().EpochMap[index]
+	}
+	return n.epoch
+}
+
+func (n *fullNode) UpdateChildEpoch(index int, epoch types.StateEpoch) {
+	if index < 16 {
+		n.GetShadowNode().EpochMap[index] = epoch
+	}
+}
+
+func (n *fullNode) ChildExpired(prefix []byte, index int, currentEpoch types.StateEpoch) (bool, error) {
+	childEpoch := n.GetChildEpoch(index)
+	if currentEpoch-childEpoch >= 2 {
+		return true, &ExpiredNodeError{
+			ExpiredNode: n.Children[index],
+			Path:        prefix,
+			Epoch:       childEpoch,
+		}
+	}
 	return false, nil
-}
-
-func (n *fullNode) GetChildEpoch(pos int) uint16 {
-	return n.GetShadowNode().EpochMap[pos]
-}
-
-func (n *fullNode) UpdateChildEpoch(pos int, epoch uint16) {
-	n.GetShadowNode().EpochMap[pos] = epoch
 }
 
 func (n *shortNode) GetShadowNode() *shadowExtensionNode {
@@ -125,15 +140,15 @@ func (n *shortNode) String() string { return n.fstring("") }
 func (n hashNode) String() string   { return n.fstring("") }
 func (n valueNode) String() string  { return n.fstring("") }
 
-func (n *fullNode) setEpoch(epoch uint16)  { n.epoch = epoch }
-func (n *shortNode) setEpoch(epoch uint16) { n.epoch = epoch }
-func (n hashNode) setEpoch(epoch uint16)   {}
-func (n valueNode) setEpoch(epoch uint16)  {}
+func (n *fullNode) setEpoch(epoch types.StateEpoch)  { n.epoch = epoch }
+func (n *shortNode) setEpoch(epoch types.StateEpoch) { n.epoch = epoch }
+func (n hashNode) setEpoch(epoch types.StateEpoch)   {}
+func (n valueNode) setEpoch(epoch types.StateEpoch)  {}
 
-func (n *fullNode) getEpoch() uint16  { return n.epoch }
-func (n *shortNode) getEpoch() uint16 { return n.epoch }
-func (n hashNode) getEpoch() uint16   { return 0 }
-func (n valueNode) getEpoch() uint16  { return 0 }
+func (n *fullNode) getEpoch() types.StateEpoch  { return n.epoch }
+func (n *shortNode) getEpoch() types.StateEpoch { return n.epoch }
+func (n hashNode) getEpoch() types.StateEpoch   { return 0 }
+func (n valueNode) getEpoch() types.StateEpoch  { return 0 }
 
 func (n *fullNode) fstring(ind string) string {
 	resp := fmt.Sprintf("[\n%s  ", ind)
