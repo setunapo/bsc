@@ -146,7 +146,7 @@ func odrAccounts(ctx context.Context, db ethdb.Database, bc *core.BlockChain, lc
 	var st *state.StateDB
 	if bc == nil {
 		header := lc.GetHeaderByHash(bhash)
-		st = NewState(ctx, header, lc.Odr())
+		st = NewState(ctx, lc.Config(), header, lc.Odr())
 	} else {
 		header := bc.GetHeaderByHash(bhash)
 		st, _ = state.New(header.Root, state.NewDatabase(db), nil)
@@ -185,7 +185,7 @@ func odrContractCall(ctx context.Context, db ethdb.Database, bc *core.BlockChain
 		if bc == nil {
 			chain = lc
 			header = lc.GetHeaderByHash(bhash)
-			st = NewState(ctx, header, lc.Odr())
+			st = NewState(ctx, lc.Config(), header, lc.Odr())
 		} else {
 			chain = bc
 			header = bc.GetHeaderByHash(bhash)
@@ -194,7 +194,7 @@ func odrContractCall(ctx context.Context, db ethdb.Database, bc *core.BlockChain
 
 		// Perform read-only call.
 		st.SetBalance(testBankAddress, math.MaxBig256)
-		msg := callmsg{types.NewMessage(testBankAddress, &testContractAddr, 0, new(big.Int), 1000000, big.NewInt(params.InitialBaseFee), big.NewInt(params.InitialBaseFee), new(big.Int), data, nil, true)}
+		msg := callmsg{types.NewMessage(testBankAddress, &testContractAddr, 0, new(big.Int), 1000000, big.NewInt(params.InitialBaseFee), big.NewInt(params.InitialBaseFee), new(big.Int), data, nil, nil, true)}
 		txContext := core.NewEVMTxContext(msg)
 		context := core.NewEVMBlockContext(header, chain, nil)
 		vmenv := vm.NewEVM(context, txContext, st, config, vm.Config{NoBaseFee: true})

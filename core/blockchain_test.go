@@ -1785,8 +1785,10 @@ func TestTrieForkGC(t *testing.T) {
 	}
 	// Dereference all the recent tries and ensure no past trie is left in
 	for i := 0; i < TestTriesInMemory; i++ {
-		chain.stateCache.TrieDB().Dereference(blocks[len(blocks)-1-i].Root())
-		chain.stateCache.TrieDB().Dereference(forks[len(blocks)-1-i].Root())
+		blockEpoch := types.GetStateEpoch(params.TestChainConfig, blocks[len(blocks)-1-i].Number())
+		chain.stateCache.TrieDB().Dereference(blocks[len(blocks)-1-i].Root(), blockEpoch)
+		forkEpoch := types.GetStateEpoch(params.TestChainConfig, forks[len(blocks)-1-i].Number())
+		chain.stateCache.TrieDB().Dereference(forks[len(blocks)-1-i].Root(), forkEpoch)
 	}
 	if len(chain.stateCache.TrieDB().Nodes()) > 0 {
 		t.Fatalf("stale tries still alive after garbase collection")
@@ -3178,19 +3180,24 @@ func TestDeleteRecreateSlots(t *testing.T) {
 	statedb, _ := chain.State()
 
 	// If all is correct, then slot 1 and 2 are zero
-	if got, exp := statedb.GetState(aa, common.HexToHash("01")), (common.Hash{}); got != exp {
+	if got, exp := getStateIgnoreErr(statedb, aa, common.HexToHash("01")), (common.Hash{}); got != exp {
 		t.Errorf("got %x exp %x", got, exp)
 	}
-	if got, exp := statedb.GetState(aa, common.HexToHash("02")), (common.Hash{}); got != exp {
+	if got, exp := getStateIgnoreErr(statedb, aa, common.HexToHash("02")), (common.Hash{}); got != exp {
 		t.Errorf("got %x exp %x", got, exp)
 	}
 	// Also, 3 and 4 should be set
-	if got, exp := statedb.GetState(aa, common.HexToHash("03")), common.HexToHash("03"); got != exp {
+	if got, exp := getStateIgnoreErr(statedb, aa, common.HexToHash("03")), common.HexToHash("03"); got != exp {
 		t.Fatalf("got %x exp %x", got, exp)
 	}
-	if got, exp := statedb.GetState(aa, common.HexToHash("04")), common.HexToHash("04"); got != exp {
+	if got, exp := getStateIgnoreErr(statedb, aa, common.HexToHash("04")), common.HexToHash("04"); got != exp {
 		t.Fatalf("got %x exp %x", got, exp)
 	}
+}
+
+func getStateIgnoreErr(statedb *state.StateDB, addr common.Address, hash common.Hash) common.Hash {
+	val, _ := statedb.GetState(addr, hash)
+	return val
 }
 
 // TestDeleteRecreateAccount tests a state-transition that contains deletion of a
@@ -3258,10 +3265,10 @@ func TestDeleteRecreateAccount(t *testing.T) {
 	statedb, _ := chain.State()
 
 	// If all is correct, then both slots are zero
-	if got, exp := statedb.GetState(aa, common.HexToHash("01")), (common.Hash{}); got != exp {
+	if got, exp := getStateIgnoreErr(statedb, aa, common.HexToHash("01")), (common.Hash{}); got != exp {
 		t.Errorf("got %x exp %x", got, exp)
 	}
-	if got, exp := statedb.GetState(aa, common.HexToHash("02")), (common.Hash{}); got != exp {
+	if got, exp := getStateIgnoreErr(statedb, aa, common.HexToHash("02")), (common.Hash{}); got != exp {
 		t.Errorf("got %x exp %x", got, exp)
 	}
 }
@@ -3435,10 +3442,10 @@ func TestDeleteRecreateSlotsAcrossManyBlocks(t *testing.T) {
 		}
 		statedb, _ := chain.State()
 		// If all is correct, then slot 1 and 2 are zero
-		if got, exp := statedb.GetState(aa, common.HexToHash("01")), (common.Hash{}); got != exp {
+		if got, exp := getStateIgnoreErr(statedb, aa, common.HexToHash("01")), (common.Hash{}); got != exp {
 			t.Errorf("block %d, got %x exp %x", blockNum, got, exp)
 		}
-		if got, exp := statedb.GetState(aa, common.HexToHash("02")), (common.Hash{}); got != exp {
+		if got, exp := getStateIgnoreErr(statedb, aa, common.HexToHash("02")), (common.Hash{}); got != exp {
 			t.Errorf("block %d, got %x exp %x", blockNum, got, exp)
 		}
 		exp := expectations[i]
@@ -3447,7 +3454,7 @@ func TestDeleteRecreateSlotsAcrossManyBlocks(t *testing.T) {
 				t.Fatalf("block %d, expected %v to exist, it did not", blockNum, aa)
 			}
 			for slot, val := range exp.values {
-				if gotValue, expValue := statedb.GetState(aa, asHash(slot)), asHash(val); gotValue != expValue {
+				if gotValue, expValue := getStateIgnoreErr(statedb, aa, asHash(slot)), asHash(val); gotValue != expValue {
 					t.Fatalf("block %d, slot %d, got %x exp %x", blockNum, slot, gotValue, expValue)
 				}
 			}

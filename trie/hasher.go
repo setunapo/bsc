@@ -19,6 +19,8 @@ package trie
 import (
 	"sync"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 	"golang.org/x/crypto/sha3"
@@ -139,6 +141,28 @@ func (h *hasher) hashFullNodeChildren(n *fullNode) (collapsed *fullNode, cached 
 	return collapsed, cached
 }
 
+// shadowFullNodeToHash hash shadowBranchNode
+func (h *hasher) shadowBranchNodeToHash(n *shadowBranchNode) *common.Hash {
+	n.encode(h.encbuf)
+	enc := h.encodedBytes()
+	return h.hashCommon(enc)
+}
+
+func (h *hasher) shadowNodeHashListToHash(hashList []*common.Hash) *common.Hash {
+	if len(hashList) == 0 {
+		return nil
+	}
+	w := h.encbuf
+	offset := w.List()
+	for _, hash := range hashList {
+		w.WriteBytes(hash[:])
+	}
+	w.ListEnd(offset)
+
+	enc := h.encodedBytes()
+	return h.hashCommon(enc)
+}
+
 // shortnodeToHash creates a hashNode from a shortNode. The supplied shortnode
 // should have hex-type Key, which will be converted (without modification)
 // into compact form for RLP encoding.
@@ -188,6 +212,15 @@ func (h *hasher) hashData(data []byte) hashNode {
 	h.sha.Write(data)
 	h.sha.Read(n)
 	return n
+}
+
+// hashCommon hashes the provided data
+func (h *hasher) hashCommon(data []byte) *common.Hash {
+	var n common.Hash
+	h.sha.Reset()
+	h.sha.Write(data)
+	h.sha.Read(n[:])
+	return &n
 }
 
 // proofHash is used to construct trie proofs, and returns the 'collapsed'

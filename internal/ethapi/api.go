@@ -686,7 +686,11 @@ func (s *PublicBlockChainAPI) GetProof(ctx context.Context, address common.Addre
 			if storageError != nil {
 				return nil, storageError
 			}
-			storageProof[i] = StorageResult{key, (*hexutil.Big)(state.GetState(address, common.HexToHash(key)).Big()), toHexSlice(proof)}
+			val, stateErr := state.GetState(address, common.HexToHash(key))
+			if stateErr != nil {
+				return nil, stateErr
+			}
+			storageProof[i] = StorageResult{key, (*hexutil.Big)(val.Big()), toHexSlice(proof)}
 		} else {
 			storageProof[i] = StorageResult{key, &hexutil.Big{}, []string{}}
 		}
@@ -839,7 +843,10 @@ func (s *PublicBlockChainAPI) GetStorageAt(ctx context.Context, address common.A
 	if state == nil || err != nil {
 		return nil, err
 	}
-	res := state.GetState(address, common.HexToHash(key))
+	res, err := state.GetState(address, common.HexToHash(key))
+	if err != nil {
+		return nil, err
+	}
 	return res[:], state.Error()
 }
 
@@ -948,6 +955,61 @@ func DoCall(ctx context.Context, b Backend, args TransactionArgs, blockNrOrHash 
 		return result, fmt.Errorf("err: %w (supplied gas %d)", err, msg.Gas())
 	}
 	return result, nil
+}
+
+func DoCallExpired(ctx context.Context, b Backend, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride, timeout time.Duration, globalGasCap uint64) (*core.ExecutionResult, []*vm.EVMError, *state.StateDB, error) {
+	defer func(start time.Time) { log.Debug("Executing EVM call finished", "runtime", time.Since(start)) }(time.Now())
+
+	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
+	if state == nil || err != nil {
+		return nil, nil, nil, err
+	}
+	if err := overrides.Apply(state); err != nil {
+		return nil, nil, nil, err
+	}
+	// Setup context so it may be cancelled the call has completed
+	// or, in case of unmetered gas, setup a context with a timeout.
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
+	// Make sure the context is cancelled when the call has completed
+	// this makes sure resources are cleaned up.
+	defer cancel()
+
+	// Get a new instance of the EVM.
+	msg, err := args.ToMessage(globalGasCap, header.BaseFee)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	evm, vmError, err := b.GetEVM(ctx, msg, state, header, &vm.Config{NoBaseFee: true})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// Wait for the context to be done and cancel the evm. Even if the
+	// EVM has finished, cancelling may be done (repeatedly)
+	gopool.Submit(func() {
+		<-ctx.Done()
+		evm.Cancel()
+	})
+
+	// Execute the message.
+	gp := new(core.GasPool).AddGas(math.MaxUint64)
+	result, err := core.ApplyMessage(evm, msg, gp)
+	if err := vmError(); err != nil {
+		return nil, evm.ErrorCollection, nil, err
+	}
+
+	// If the timer caused an abort, return an appropriate error message
+	if evm.Cancelled() {
+		return nil, evm.ErrorCollection, nil, fmt.Errorf("execution aborted (timeout = %v)", timeout)
+	}
+	if err != nil {
+		return result, evm.ErrorCollection, nil, fmt.Errorf("err: %w (supplied gas %d)", err, msg.Gas())
+	}
+	return result, evm.ErrorCollection, state, nil
 }
 
 func newRevertError(result *core.ExecutionResult) *revertError {
@@ -1128,6 +1190,222 @@ func (s *PublicBlockChainAPI) EstimateGas(ctx context.Context, args TransactionA
 	return DoEstimateGas(ctx, s.b, args, bNrOrHash, s.b.RPCGasCap())
 }
 
+// Result structs for EstimateGasAndReviveState
+type EstimateGasAndReviveStateResult struct {
+	Hex           hexutil.Uint64        `json:"gas"`
+	ReviveWitness []types.ReviveWitness `json:"reviveWitness"`
+}
+
+// DoEstimateGasAndReviveState returns an estimate of the amount of gas needed to execute the
+// given transaction against the current pending block. It also attempts to revive expired
+// storage trie and returns the revive witness list.
+func DoEstimateGasAndReviveState(ctx context.Context, b Backend, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, gasCap uint64) (*EstimateGasAndReviveStateResult, error) {
+
+	var result EstimateGasAndReviveStateResult
+
+	// Initialize witnessList
+	if args.WitnessList == nil {
+		args.WitnessList = (*types.WitnessList)(&[]types.ReviveWitness{})
+	}
+	witLen := len(*args.WitnessList)
+
+	// Binary search the gas requirement, as it may be higher than the amount used
+	var (
+		lo  uint64 = params.TxGas - 1
+		hi  uint64
+		cap uint64
+	)
+	// Use zero address if sender unspecified.
+	if args.From == nil {
+		args.From = new(common.Address)
+	}
+	// Determine the highest gas limit can be used during the estimation.
+	if args.Gas != nil && uint64(*args.Gas) >= params.TxGas {
+		hi = uint64(*args.Gas)
+	} else {
+		// Retrieve the block to act as the gas ceiling
+		block, err := b.BlockByNumberOrHash(ctx, blockNrOrHash)
+		if err != nil {
+			return nil, err
+		}
+		if block == nil {
+			return nil, errors.New("block not found")
+		}
+		hi = block.GasLimit()
+	}
+	// Normalize the max fee per gas the call is willing to spend.
+	var feeCap *big.Int
+	if args.GasPrice != nil && (args.MaxFeePerGas != nil || args.MaxPriorityFeePerGas != nil) {
+		return nil, errors.New("both gasPrice and (maxFeePerGas or maxPriorityFeePerGas) specified")
+	} else if args.GasPrice != nil {
+		feeCap = args.GasPrice.ToInt()
+	} else if args.MaxFeePerGas != nil {
+		feeCap = args.MaxFeePerGas.ToInt()
+	} else {
+		feeCap = common.Big0
+	}
+	// Recap the highest gas limit with account's available balance.
+	if feeCap.BitLen() != 0 {
+		stateDb, _, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
+		if err != nil {
+			return nil, err
+		}
+		balance := stateDb.GetBalance(*args.From) // from can't be nil
+		available := new(big.Int).Set(balance)
+		if args.Value != nil {
+			if args.Value.ToInt().Cmp(available) >= 0 {
+				return nil, errors.New("insufficient funds for transfer")
+			}
+			available.Sub(available, args.Value.ToInt())
+		}
+		allowance := new(big.Int).Div(available, feeCap)
+
+		// If the allowance is larger than maximum uint64, skip checking
+		if allowance.IsUint64() && hi > allowance.Uint64() {
+			transfer := args.Value
+			if transfer == nil {
+				transfer = new(hexutil.Big)
+			}
+			log.Warn("Gas estimation capped by limited funds", "original", hi, "balance", balance,
+				"sent", transfer.ToInt(), "maxFeePerGas", feeCap, "fundable", allowance)
+			hi = allowance.Uint64()
+		}
+	}
+	// Recap the highest gas allowance with specified gascap.
+	if gasCap != 0 && hi > gasCap {
+		log.Debug("Caller gas above allowance, capping", "requested", hi, "cap", gasCap)
+		hi = gasCap
+	}
+	cap = hi
+
+	// Create a helper to check if a gas allowance results in an executable transaction
+	expiedNodeCache := make(map[common.Address]map[string]bool)
+	executable := func(gas uint64) (bool, *core.ExecutionResult, bool, error) {
+		args.Gas = (*hexutil.Uint64)(&gas)
+
+		result, evmErrors, callState, err := DoCallExpired(ctx, b, args, blockNrOrHash, nil, 0, gasCap) // TODO (asyukii): Use a different call function to return EVM errors
+
+		// Create MPTProof
+		resolveWitness := false
+		if len(evmErrors) > 0 {
+			addressToProofMap := make(map[common.Address][]types.MPTProof)
+			for _, evmErr := range evmErrors {
+				if stateErr, ok := evmErr.Err.(*state.ExpiredStateError); ok {
+					if _, ec := expiedNodeCache[stateErr.Addr]; !ec {
+						expiedNodeCache[stateErr.Addr] = make(map[string]bool)
+					}
+					if expiedNodeCache[stateErr.Addr][string(stateErr.Path)] {
+						// revive not works, just return
+						return true, nil, resolveWitness, stateErr
+					}
+
+					expiedNodeCache[stateErr.Addr][string(stateErr.Path)] = true
+					proof, err := callState.GetStorageWitness(stateErr.Addr, stateErr.Path, stateErr.Key)
+					if err != nil {
+						return true, nil, false, err
+					}
+					if len(proof) == 0 {
+						continue
+					}
+					addressToProofMap[stateErr.Addr] = append(addressToProofMap[stateErr.Addr], types.MPTProof{
+						RootKeyHex: stateErr.Path,
+						Proof:      proof,
+					})
+				}
+			}
+
+			// Create a ReviveWitness object for each address and add it to witnessList
+			for addr, proofs := range addressToProofMap {
+				// Build a storageTrieWitness
+				storageTrieWitness := types.StorageTrieWitness{
+					Address:   addr,
+					ProofList: proofs,
+				}
+				// Encode StorageTrieWitness
+				enc, err := rlp.EncodeToBytes(storageTrieWitness)
+				if err != nil {
+					return true, nil, resolveWitness, err
+				}
+				// Create a ReviveWitness
+				reviveWitness := types.ReviveWitness{
+					WitnessType: types.StorageTrieWitnessType,
+					Data:        enc,
+				}
+				// Append to witness list
+				*args.WitnessList = append(*args.WitnessList, reviveWitness)
+				resolveWitness = true
+			}
+		}
+		if err != nil {
+			if errors.Is(err, core.ErrIntrinsicGas) {
+				return true, nil, resolveWitness, nil // Special case, raise gas limit
+			}
+			return true, nil, resolveWitness, err // Bail out
+		}
+		return result.Failed(), result, resolveWitness, nil
+	}
+	// Execute the binary search and hone in on an executable gas limit
+	for lo+1 < hi {
+		mid := (hi + lo) / 2
+		failed, _, resolveWitness, err := executable(mid)
+
+		if resolveWitness {
+			if witLen == len(*args.WitnessList) {
+				// If witnessList is not updated, it means that the proofs are not
+				// sufficient to revive the state.
+				return nil, fmt.Errorf("cannot generate enough proofs to revive the state")
+			}
+			witLen = len(*args.WitnessList)
+			continue
+		}
+
+		// If the error is not nil(consensus error), it means the provided message
+		// call or transaction will never be accepted no matter how much gas it is
+		// assigned. Return the error directly, don't struggle any more.
+		if err != nil {
+			return nil, err
+		}
+		if failed {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	// Reject the transaction as invalid if it still fails at the highest allowance
+	if hi == cap {
+		failed, result, _, err := executable(hi)
+		if err != nil {
+			return nil, err
+		}
+		if failed {
+			if result != nil && result.Err != vm.ErrOutOfGas {
+				if len(result.Revert()) > 0 {
+					return nil, newRevertError(result)
+				}
+				return nil, result.Err
+			}
+			// Otherwise, the specified gas cap is too low
+			return nil, fmt.Errorf("gas required exceeds allowance (%d)", cap)
+		}
+	}
+	result = EstimateGasAndReviveStateResult{
+		Hex:           hexutil.Uint64(hi),
+		ReviveWitness: *args.WitnessList,
+	}
+	return &result, nil
+}
+
+// EstimateGasAndReviveState returns an estimate of the amount of gas needed to execute the
+// given transaction against the current pending block. It will also revive the state
+// temporarily to estimate the gas.
+func (s *PublicBlockChainAPI) EstimateGasAndReviveState(ctx context.Context, args TransactionArgs, blockNrOrHash *rpc.BlockNumberOrHash) (*EstimateGasAndReviveStateResult, error) {
+	bNrOrHash := rpc.BlockNumberOrHashWithNumber(rpc.PendingBlockNumber)
+	if blockNrOrHash != nil {
+		bNrOrHash = *blockNrOrHash
+	}
+	return DoEstimateGasAndReviveState(ctx, s.b, args, bNrOrHash, s.b.RPCGasCap())
+}
+
 // GetDiffAccounts returns changed accounts in a specific block number.
 func (s *PublicBlockChainAPI) GetDiffAccounts(ctx context.Context, blockNr rpc.BlockNumber) ([]common.Address, error) {
 	if s.b.Chain() == nil {
@@ -1197,11 +1475,11 @@ func (s *PublicBlockChainAPI) needToReplay(ctx context.Context, block *types.Blo
 	if err != nil {
 		return false, fmt.Errorf("block not found for block number (%d): %v", block.NumberU64()-1, err)
 	}
-	parentState, err := s.b.Chain().StateAt(parent.Root())
+	parentState, err := s.b.Chain().StateAt(parent.Root(), parent.Number())
 	if err != nil {
 		return false, fmt.Errorf("statedb not found for block number (%d): %v", block.NumberU64()-1, err)
 	}
-	currentState, err := s.b.Chain().StateAt(block.Root())
+	currentState, err := s.b.Chain().StateAt(block.Root(), block.Number())
 	if err != nil {
 		return false, fmt.Errorf("statedb not found for block number (%d): %v", block.NumberU64(), err)
 	}
@@ -1227,7 +1505,7 @@ func (s *PublicBlockChainAPI) replay(ctx context.Context, block *types.Block, ac
 	if err != nil {
 		return nil, nil, fmt.Errorf("block not found for block number (%d): %v", block.NumberU64()-1, err)
 	}
-	statedb, err := s.b.Chain().StateAt(parent.Root())
+	statedb, err := s.b.Chain().StateAt(parent.Root(), block.Number())
 	if err != nil {
 		return nil, nil, fmt.Errorf("state not found for block number (%d): %v", block.NumberU64()-1, err)
 	}
@@ -1481,25 +1759,26 @@ func (s *PublicBlockChainAPI) rpcMarshalBlock(ctx context.Context, b *types.Bloc
 
 // RPCTransaction represents a transaction that will serialize to the RPC representation of a transaction
 type RPCTransaction struct {
-	BlockHash        *common.Hash      `json:"blockHash"`
-	BlockNumber      *hexutil.Big      `json:"blockNumber"`
-	From             common.Address    `json:"from"`
-	Gas              hexutil.Uint64    `json:"gas"`
-	GasPrice         *hexutil.Big      `json:"gasPrice"`
-	GasFeeCap        *hexutil.Big      `json:"maxFeePerGas,omitempty"`
-	GasTipCap        *hexutil.Big      `json:"maxPriorityFeePerGas,omitempty"`
-	Hash             common.Hash       `json:"hash"`
-	Input            hexutil.Bytes     `json:"input"`
-	Nonce            hexutil.Uint64    `json:"nonce"`
-	To               *common.Address   `json:"to"`
-	TransactionIndex *hexutil.Uint64   `json:"transactionIndex"`
-	Value            *hexutil.Big      `json:"value"`
-	Type             hexutil.Uint64    `json:"type"`
-	Accesses         *types.AccessList `json:"accessList,omitempty"`
-	ChainID          *hexutil.Big      `json:"chainId,omitempty"`
-	V                *hexutil.Big      `json:"v"`
-	R                *hexutil.Big      `json:"r"`
-	S                *hexutil.Big      `json:"s"`
+	BlockHash        *common.Hash       `json:"blockHash"`
+	BlockNumber      *hexutil.Big       `json:"blockNumber"`
+	From             common.Address     `json:"from"`
+	Gas              hexutil.Uint64     `json:"gas"`
+	GasPrice         *hexutil.Big       `json:"gasPrice"`
+	GasFeeCap        *hexutil.Big       `json:"maxFeePerGas,omitempty"`
+	GasTipCap        *hexutil.Big       `json:"maxPriorityFeePerGas,omitempty"`
+	Hash             common.Hash        `json:"hash"`
+	Input            hexutil.Bytes      `json:"input"`
+	Nonce            hexutil.Uint64     `json:"nonce"`
+	To               *common.Address    `json:"to"`
+	TransactionIndex *hexutil.Uint64    `json:"transactionIndex"`
+	Value            *hexutil.Big       `json:"value"`
+	Type             hexutil.Uint64     `json:"type"`
+	Accesses         *types.AccessList  `json:"accessList,omitempty"`
+	Witness          *types.WitnessList `json:"witnessList,omitempty"`
+	ChainID          *hexutil.Big       `json:"chainId,omitempty"`
+	V                *hexutil.Big       `json:"v"`
+	R                *hexutil.Big       `json:"r"`
+	S                *hexutil.Big       `json:"s"`
 }
 
 // newRPCTransaction returns a transaction that will serialize to the RPC
@@ -1528,6 +1807,10 @@ func newRPCTransaction(tx *types.Transaction, blockHash common.Hash, blockNumber
 		result.TransactionIndex = (*hexutil.Uint64)(&index)
 	}
 	switch tx.Type() {
+	case types.ReviveStateTxType:
+		wl := tx.WitnessList()
+		result.Witness = &wl
+		result.ChainID = (*hexutil.Big)(tx.ChainId())
 	case types.AccessListTxType:
 		al := tx.AccessList()
 		result.Accesses = &al
@@ -1862,7 +2145,7 @@ func (s *PublicTransactionPoolAPI) GetTransactionReceiptsByBlockNumber(ctx conte
 		tx := txs[idx]
 		var signer types.Signer = types.FrontierSigner{}
 		if tx.Protected() {
-			signer = types.NewEIP155Signer(tx.ChainId())
+			signer = types.NewBEP215Signer(tx.ChainId())
 		}
 		from, _ := types.Sender(signer, tx)
 

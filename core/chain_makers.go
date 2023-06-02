@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/trie"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc"
@@ -274,8 +276,13 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 		}
 		return nil, nil
 	}
+	tree, err := trie.NewShadowNodeSnapTree(db, false)
+	if err != nil {
+		panic(err)
+	}
 	for i := 0; i < n; i++ {
-		statedb, err := state.New(parent.Root(), state.NewDatabase(db), nil)
+		number := new(big.Int).Add(parent.Number(), common.Big1)
+		statedb, err := state.NewWithStateEpoch(config, number, parent.Root(), state.NewDatabase(db), nil, tree)
 		if err != nil {
 			panic(err)
 		}
@@ -283,6 +290,9 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 		blocks[i] = block
 		receipts[i] = receipt
 		parent = block
+	}
+	if err = tree.Journal(); err != nil {
+		panic(err)
 	}
 	return blocks, receipts
 }

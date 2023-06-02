@@ -63,6 +63,25 @@ func NewSecure(root common.Hash, db *Database) (*SecureTrie, error) {
 	return &SecureTrie{trie: *trie}, nil
 }
 
+// NewSecureWithShadowNodes it opens a trie with shadow nodes, it needs to know current epoch to check if expired
+// it uses sndb to query or store shadow nodes, if you using NewSecure, it opens storage trie at epoch0.
+func NewSecureWithShadowNodes(curEpoch types.StateEpoch, root common.Hash, db *Database, sndb ShadowNodeStorage) (*SecureTrie, error) {
+	if db == nil || sndb == nil {
+		panic("trie.NewSecure called without a database")
+	}
+
+	rn, err := resolveRootNodeTrieDb(db, root)
+	if err != nil {
+		return nil, err
+	}
+
+	trie, err := NewWithShadowNode(curEpoch, rn, db, sndb)
+	if err != nil {
+		return nil, err
+	}
+	return &SecureTrie{trie: *trie}, nil
+}
+
 // Get returns the value for key stored in the trie.
 // The value bytes must not be modified by the caller.
 func (t *SecureTrie) Get(key []byte) []byte {
@@ -77,7 +96,12 @@ func (t *SecureTrie) Get(key []byte) []byte {
 // The value bytes must not be modified by the caller.
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryGet(key []byte) ([]byte, error) {
-	return t.trie.TryGet(t.hashKey(key))
+	return t.trie.TryGet(t.HashKey(key))
+}
+
+func (t *SecureTrie) TryUpdateEpoch(key []byte) error {
+	_, err := t.trie.TryGetAndUpdateEpoch(t.HashKey(key))
+	return err
 }
 
 // TryGetNode attempts to retrieve a trie node by compact-encoded path. It is not
@@ -89,7 +113,7 @@ func (t *SecureTrie) TryGetNode(path []byte) ([]byte, int, error) {
 // TryUpdate account will abstract the write of an account to the
 // secure trie.
 func (t *SecureTrie) TryUpdateAccount(key []byte, acc *types.StateAccount) error {
-	hk := t.hashKey(key)
+	hk := t.HashKey(key)
 	data, err := rlp.EncodeToBytes(acc)
 	if err != nil {
 		return err
@@ -122,7 +146,7 @@ func (t *SecureTrie) Update(key, value []byte) {
 //
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryUpdate(key, value []byte) error {
-	hk := t.hashKey(key)
+	hk := t.HashKey(key)
 	err := t.trie.TryUpdate(hk, value)
 	if err != nil {
 		return err
@@ -141,7 +165,7 @@ func (t *SecureTrie) Delete(key []byte) {
 // TryDelete removes any existing value for key from the trie.
 // If a node was not found in the database, a MissingNodeError is returned.
 func (t *SecureTrie) TryDelete(key []byte) error {
-	hk := t.hashKey(key)
+	hk := t.HashKey(key)
 	delete(t.getSecKeyCache(), string(hk))
 	return t.trie.TryDelete(hk)
 }
@@ -153,6 +177,10 @@ func (t *SecureTrie) GetKey(shaKey []byte) []byte {
 		return key
 	}
 	return t.trie.db.preimage(common.BytesToHash(shaKey))
+}
+
+func (t *SecureTrie) Epoch() types.StateEpoch {
+	return t.trie.currentEpoch
 }
 
 // Commit writes all nodes and the secure hash pre-images to the trie's database.
@@ -205,10 +233,10 @@ func (t *SecureTrie) NodeIterator(start []byte) NodeIterator {
 	return t.trie.NodeIterator(start)
 }
 
-// hashKey returns the hash of key as an ephemeral buffer.
+// HashKey returns the hash of key as an ephemeral buffer.
 // The caller must not hold onto the return value because it will become
-// invalid on the next call to hashKey or secKey.
-func (t *SecureTrie) hashKey(key []byte) []byte {
+// invalid on the next call to HashKey or secKey.
+func (t *SecureTrie) HashKey(key []byte) []byte {
 	hash := make([]byte, common.HashLength)
 	h := newHasher(false)
 	h.sha.Reset()
@@ -227,4 +255,8 @@ func (t *SecureTrie) getSecKeyCache() map[string][]byte {
 		t.secKeyCache = make(map[string][]byte)
 	}
 	return t.secKeyCache
+}
+
+func (t *SecureTrie) ReviveTrie(proof []*MPTProofNub) []*MPTProofNub {
+	return t.trie.ReviveTrie(proof)
 }

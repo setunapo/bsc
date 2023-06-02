@@ -32,6 +32,10 @@ func (t *EmptyTrie) Prove(key []byte, fromLevel uint, proofDb ethdb.KeyValueWrit
 	return nil
 }
 
+func (t *EmptyTrie) ProveStorageWitness(key, from []byte, proofDb ethdb.KeyValueWriter) error {
+	return nil
+}
+
 // NewSecure creates a dummy trie
 func NewEmptyTrie() *EmptyTrie {
 	return &EmptyTrie{}
@@ -43,6 +47,10 @@ func (t *EmptyTrie) Get(key []byte) []byte {
 
 func (t *EmptyTrie) TryGet(key []byte) ([]byte, error) {
 	return nil, nil
+}
+
+func (t *EmptyTrie) TryUpdateEpoch(key []byte) error {
+	return nil
 }
 
 func (t *EmptyTrie) TryGetNode(path []byte) ([]byte, int, error) {
@@ -67,6 +75,14 @@ func (t *EmptyTrie) TryDelete(key []byte) error {
 }
 
 func (t *EmptyTrie) GetKey(shaKey []byte) []byte {
+	return nil
+}
+
+func (t *EmptyTrie) Epoch() types.StateEpoch {
+	return types.StateEpoch0
+}
+
+func (t *EmptyTrie) HashKey(key []byte) []byte {
 	return nil
 }
 
@@ -97,5 +113,9 @@ func (t *EmptyTrie) NodeIterator(start []byte) NodeIterator {
 
 // TryUpdateAccount abstract an account write in the trie.
 func (t *EmptyTrie) TryUpdateAccount(key []byte, account *types.StateAccount) error {
+	return nil
+}
+
+func (t *EmptyTrie) ReviveTrie(proof []*MPTProofNub) []*MPTProofNub {
 	return nil
 }

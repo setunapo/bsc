@@ -63,6 +63,9 @@ var (
 	// snapshotSyncStatusKey tracks the snapshot sync status across restarts.
 	snapshotSyncStatusKey = []byte("SnapshotSyncStatus")
 
+	// shadowNodeSnapshotJournalKey tracks the in-memory diff layers across restarts.
+	shadowNodeSnapshotJournalKey = []byte("ShadowNodeSnapshotJournalKey")
+
 	// txIndexTailKey tracks the oldest block whose transactions have been indexed.
 	txIndexTailKey = []byte("TransactionIndexTail")
 
@@ -93,6 +96,9 @@ var (
 	// transitionStatusKey tracks the eth2 transition status.
 	transitionStatusKey = []byte("eth2-transition")
 
+	// shadowNodePlainStateMeta save disk layer meta data
+	shadowNodePlainStateMeta = []byte("shadowNodePlainStateMeta")
+
 	// Data item prefixes (use single byte to avoid mixing data types, avoid `i`, used for indexes).
 	headerPrefix       = []byte("h") // headerPrefix + num (uint64 big endian) + hash -> header
 	headerTDSuffix     = []byte("t") // headerPrefix + num (uint64 big endian) + hash + headerTDSuffix -> td
@@ -107,6 +113,10 @@ var (
 	SnapshotAccountPrefix = []byte("a") // SnapshotAccountPrefix + account hash -> account trie value
 	SnapshotStoragePrefix = []byte("o") // SnapshotStoragePrefix + account hash + storage hash -> storage trie value
 	CodePrefix            = []byte("c") // CodePrefix + code hash -> account code
+
+	ShadowNodeHistoryPrefix    = []byte("sh") // ShadowNodeHistoryPrefix + addr hash + path + blockNr -> bitmap, default blockNr = math.MaxUint64
+	ShadowNodeChangeSetPrefix  = []byte("sc") // ShadowNodeChangeSetPrefix + addr hash + blockNr -> changeSet/prev val
+	ShadowNodePlainStatePrefix = []byte("sp") // ShadowNodePlainStatePrefix + addr hash + path -> val
 
 	// difflayer database
 	diffLayerPrefix = []byte("d") // diffLayerPrefix + hash  -> diffLayer
@@ -250,6 +260,13 @@ func IsCodeKey(key []byte) (bool, []byte) {
 		return true, key[len(CodePrefix):]
 	}
 	return false, nil
+}
+
+func IsSnapStorageKey(key []byte) (bool, []byte, []byte) {
+	if bytes.HasPrefix(key, SnapshotStoragePrefix) && len(key) == common.HashLength+common.HashLength+len(SnapshotStoragePrefix) {
+		return true, key[len(SnapshotStoragePrefix):], key[len(SnapshotStoragePrefix) : len(SnapshotStoragePrefix)+common.HashLength]
+	}
+	return false, nil, nil
 }
 
 // configKey = configPrefix + hash

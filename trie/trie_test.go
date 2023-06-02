@@ -19,6 +19,8 @@ package trie
 import (
 	"bytes"
 	"encoding/binary"
+
+	// "encoding/hex"
 	"errors"
 	"fmt"
 	"hash"
@@ -38,6 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/ethdb/memorydb"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -473,6 +476,560 @@ func TestRandom(t *testing.T) {
 	}
 }
 
+// TestExpireByPrefix tests that the trie is not corrupted after
+// expiring a key by prefix.
+func TestExpireByPrefix(t *testing.T) {
+	data := map[string]string{
+		"abcd": "A",
+		"abce": "B",
+		"abde": "C",
+		"abdf": "D",
+		"defg": "E",
+		"defh": "F",
+		"degh": "G",
+		"degi": "H",
+	}
+
+	trie := createCustomTrie(data, 0)
+	rootHash := trie.Hash()
+
+	for k := range data {
+		prefixKeys := getPrefixKeysHex(trie, []byte(k))
+		for _, prefixKey := range prefixKeys {
+			trie.ExpireByPrefix(prefixKey)
+			currHash := trie.Hash()
+			// Validate root hash
+			assert.Equal(t, rootHash, currHash, "Root hash mismatch, got %x, expected %x", currHash, rootHash)
+
+			// Reset trie
+			trie = createCustomTrie(data, 0)
+		}
+	}
+}
+
+func createCustomTrie(data map[string]string, epoch types.StateEpoch) *Trie {
+	trie := new(Trie)
+	trie.currentEpoch = epoch
+	for k, v := range data {
+		trie.Update([]byte(k), []byte(v))
+	}
+
+	return trie
+}
+
+type proofList [][]byte
+
+func (n *proofList) Put(key []byte, value []byte) error {
+	*n = append(*n, value)
+	return nil
+}
+
+func (n *proofList) Delete(key []byte) error {
+	panic("not supported")
+}
+
+func makeRawMPTProofCache(rootKeyHex []byte, proof [][]byte) MPTProofCache {
+	return MPTProofCache{
+		MPTProof: types.MPTProof{
+			RootKeyHex: rootKeyHex,
+			Proof:      proof,
+		},
+	}
+}
+
+func getFullNodePrefixKeys(t *Trie, key []byte) [][]byte {
+	var prefixKeys [][]byte
+	key = keybytesToHex(key)
+	tn := t.root
+	currPath := []byte{}
+	for len(key) > 0 && tn != nil {
+		switch n := tn.(type) {
+		case *shortNode:
+			if len(key) < len(n.Key) || !bytes.Equal(n.Key, key[:len(n.Key)]) {
+				// The trie doesn't contain the key.
+				tn = nil
+			} else {
+				tn = n.Val
+				prefixKeys = append(prefixKeys, currPath)
+				currPath = append(currPath, n.Key...)
+				key = key[len(n.Key):]
+			}
+		case *fullNode:
+			tn = n.Children[key[0]]
+			currPath = append(currPath, key[0])
+			key = key[1:]
+		case hashNode:
+			var err error
+			tn, err = t.resolveHash(n, nil)
+			if err != nil {
+				return nil
+			}
+		default:
+			return nil
+		}
+	}
+
+	// Remove the first item in prefixKeys, which is the empty key
+	if len(prefixKeys) > 0 {
+		prefixKeys = prefixKeys[1:]
+	}
+
+	return prefixKeys
+}
+
+// TestTryRevive tests that a trie can be revived from a proof
+func TestTryRevive(t *testing.T) {
+
+	trie, vals := nonRandomTrieWithShadowNodes(500)
+
+	oriRootHash := trie.Hash()
+
+	for _, kv := range vals {
+		key := kv.k
+		val := kv.v
+		prefixKeys := getFullNodePrefixKeys(trie, key)
+		for _, prefixKey := range prefixKeys {
+			// Generate proof
+			var proof proofList
+			err := trie.ProveStorageWitness(key, prefixKey, &proof)
+			assert.NoError(t, err)
+
+			// Expire trie
+			trie.ExpireByPrefix(prefixKey)
+
+			// Construct MPTProofCache
+			proofCache := makeRawMPTProofCache(prefixKey, proof)
+
+			// VerifyProof
+			err = proofCache.VerifyProof()
+			assert.NoError(t, err)
+
+			// Revive trie
+			_, err = trie.TryRevive(proofCache.cacheNubs)
+			assert.NoError(t, err, "TryRevive failed, key %x, prefixKey %x, val %x", key, prefixKey, val)
+
+			// Verify value exists after revive
+			v := trie.Get(key)
+			assert.Equal(t, val, v, "value mismatch, got %x, expected %x. key %x, prefixKey %x", v, val, key, prefixKey)
+
+			// Verify root hash
+			currRootHash := trie.Hash()
+			assert.Equal(t, oriRootHash, currRootHash, "Root hash mismatch, got %x, expected %x", currRootHash, oriRootHash)
+
+			// Reset trie
+			trie, _ = nonRandomTrieWithShadowNodes(500)
+		}
+	}
+}
+
+// TestTryReviveCustomData tests that a trie can be revived from a proof
+func TestTryReviveCustomData(t *testing.T) {
+
+	data := map[string]string{
+		"abcd": "A", "abce": "B", "abde": "C", "abdf": "D",
+		"defg": "E", "defh": "F", "degh": "G", "degi": "H",
+	}
+
+	trie := createCustomTrie(data, 10)
+
+	oriRootHash := trie.Hash()
+
+	for k, v := range data {
+		key := []byte(k)
+		val := []byte(v)
+		prefixKeys := getFullNodePrefixKeys(trie, key)
+		for _, prefixKey := range prefixKeys {
+			// Generate proof
+			var proof proofList
+			err := trie.ProveStorageWitness(key, prefixKey, &proof)
+			assert.NoError(t, err)
+
+			// Expire trie
+			trie.ExpireByPrefix(prefixKey)
+
+			// Construct MPTProofCache
+			proofCache := makeRawMPTProofCache(prefixKey, proof)
+
+			// VerifyProof
+			err = proofCache.VerifyProof()
+			assert.NoError(t, err, "verify proof failed, key %x, prefixKey %x", key, prefixKey)
+
+			// Revive trie
+			_, err = trie.TryRevive(proofCache.cacheNubs)
+			assert.NoError(t, err, "try revive failed, key %x, prefixKey %x", key, prefixKey)
+
+			// Verify value exists after revive
+			v := trie.Get(key)
+			assert.Equal(t, val, v)
+
+			// Verify root hash
+			currRootHash := trie.Hash()
+			assert.Equal(t, oriRootHash, currRootHash, "Root hash mismatch, got %x, expected %x, key %x, prefixKey %x", currRootHash, oriRootHash, key, prefixKey)
+
+			// Reset trie
+			trie = createCustomTrie(data, 10)
+		}
+	}
+}
+
+// TestReviveBadProof tests that a trie cannot be revived from a bad proof
+func TestReviveBadProof(t *testing.T) {
+
+	dataA := map[string]string{
+		"abcd": "A", "abce": "B", "abde": "C", "abdf": "D",
+		"defg": "E", "defh": "F", "degh": "G", "degi": "H",
+	}
+
+	dataB := map[string]string{
+		"qwer": "A", "qwet": "B", "qwrt": "C", "qwry": "D",
+		"abcd": "E", "abce": "F", "abde": "G", "abdf": "H",
+	}
+
+	trieA := createCustomTrie(dataA, 0)
+	trieB := createCustomTrie(dataB, 0)
+
+	var proofB proofList
+
+	err := trieB.ProveStorageWitness([]byte("abcd"), nil, &proofB)
+	assert.NoError(t, err)
+
+	// Expire trie A
+	trieA.ExpireByPrefix(nil)
+
+	// Construct MPTProofCache
+	proofCache := makeRawMPTProofCache(nil, proofB)
+
+	// VerifyProof
+	err = proofCache.VerifyProof()
+	assert.NoError(t, err)
+
+	// Revive trie
+	_, err = trieA.TryRevive(proofCache.cacheNubs)
+	assert.Error(t, err)
+
+	// Verify value does exists after revive
+	_, err = trieA.TryGet([]byte("abcd"))
+	assert.Error(t, err)
+
+}
+
+// TestReviveBadProofAfterUpdate tests that after reviving a path and
+// then update the value, old proof should be invalid
+func TestReviveBadProofAfterUpdate(t *testing.T) {
+	trie, vals := nonRandomTrieWithShadowNodes(500)
+	for _, kv := range vals {
+		key := kv.k
+		prefixKeys := getFullNodePrefixKeys(trie, key)
+		for _, prefixKey := range prefixKeys {
+			var proof proofList
+			err := trie.ProveStorageWitness(key, prefixKey, &proof)
+			assert.NoError(t, err)
+
+			// Expire trie
+			err = trie.ExpireByPrefix(prefixKey)
+			assert.NoError(t, err)
+
+			// Construct MPTProofCache
+			proofCache := makeRawMPTProofCache(prefixKey, proof)
+
+			err = proofCache.VerifyProof()
+			assert.NoError(t, err)
+
+			// Revive first
+			trie.TryRevive(proofCache.cacheNubs)
+
+			// Update value
+			trie.Update(key, []byte("new value"))
+
+			// Revive again with old proof
+			trie.TryRevive(proofCache.cacheNubs)
+
+			// Validate trie
+			resVal, err := trie.TryGet(key)
+			assert.NoError(t, err)
+			assert.Equal(t, []byte("new value"), resVal)
+		}
+	}
+}
+
+// TestPartialReviveFullProof tests that a path can be revived
+// with full proof even when the trie is partially expired
+func TestPartialReviveFullProof(t *testing.T) {
+	data := map[string]string{
+		"abcd": "A", "abce": "B", "abde": "C", "abdf": "D",
+		"defg": "E", "defh": "F", "degh": "G", "degi": "H",
+	}
+
+	trie := createCustomTrie(data, 10)
+
+	// Get proof
+	var proof proofList
+	err := trie.ProveStorageWitness([]byte("abcd"), nil, &proof)
+	assert.NoError(t, err)
+
+	// Expire trie
+	err = trie.ExpireByPrefix([]byte{6, 1})
+	assert.NoError(t, err)
+
+	// Construct MPTProofCache
+	proofCache := makeRawMPTProofCache(nil, proof)
+
+	// Verify proof
+	err = proofCache.VerifyProof()
+	assert.NoError(t, err)
+
+	// Revive trie
+	_, err = trie.TryRevive(proofCache.cacheNubs)
+	assert.NoError(t, err)
+
+	// Validate trie
+	resVal, err := trie.TryGet([]byte("abcd"))
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("A"), resVal)
+}
+
+// TestReviveValueAtFullNode tests that a value that is at
+// full node can be revived properly
+func TestReviveValueAtFullNode(t *testing.T) {
+	hexKeys := [][]byte{
+		{6, 1, 6, 2, 6, 3, 6, 4, 16},
+		{6, 1, 6, 2, 6, 3, 6, 5, 16},
+		{6, 1, 6, 2, 6, 4, 6, 5, 16},
+		{6, 1, 6, 2, 6, 4, 6, 6, 16},
+		{6, 4, 6, 5, 6, 6, 6, 7, 16},
+		{6, 4, 6, 5, 6, 6, 6, 8, 16},
+		{6, 4, 6, 5, 6, 7, 6, 8, 16},
+		{6, 4, 6, 5, 6, 7, 6, 9, 16},
+		{6, 1, 6, 2, 6, 3, 6, 4, 16},
+		{6, 1, 6, 2, 16}, // This is the key that has a value at a full node
+	}
+
+	byteKeys := make([][]byte, len(hexKeys))
+
+	vals := []string{
+		"A", "B", "C", "D", "E", "F", "G", "H", "I", "J",
+	}
+
+	for i, hexKey := range hexKeys {
+		hexKey = hexToKeybytes(hexKey)
+		byteKeys[i] = hexKey
+	}
+
+	// Insert keys into trie
+	trie := new(Trie)
+	trie.currentEpoch = 10
+	for i, hexKey := range byteKeys {
+		trie.Update(hexKey, []byte(vals[i]))
+	}
+
+	key := byteKeys[9]
+	val := vals[9]
+
+	prefixKeys := getFullNodePrefixKeys(trie, key)
+
+	for _, prefixKey := range prefixKeys {
+		var proof proofList
+		err := trie.ProveStorageWitness(key, prefixKey, &proof)
+		assert.NoError(t, err)
+
+		// Expire trie
+		err = trie.ExpireByPrefix(prefixKey)
+		assert.NoError(t, err)
+
+		// Construct MPTProofCache
+		proofCache := makeRawMPTProofCache(prefixKey, proof)
+
+		err = proofCache.VerifyProof()
+		assert.NoError(t, err)
+
+		_, err = trie.TryRevive(proofCache.cacheNubs)
+		assert.NoError(t, err)
+
+		// Validate trie
+		resVal, err := trie.TryGet(key)
+		assert.NoError(t, err)
+		assert.Equal(t, []byte(val), resVal)
+	}
+}
+
+// TODO add testing trie epoch update & expired
+// case1: when meet err, update do not update epoch
+// case2: when child is nil, do not check its epoch, default is 0
+// case3: when access/update/delete, update epoch correct, when node is not expired, then update it later
+// case3: when access/update/delete, check expired node correct
+// case4: root node epoch update and check correct
+// case5: when node is expired, do not resolve it, safe for revive
+
+func TestTrie_ShadowNodeRW_expired(t *testing.T) {
+	database, tree := makeStorageTrieDatabase(t)
+	storageDB, err := NewShadowNodeDatabase(tree, common.Big0, blockRoot0)
+	assert.NoError(t, err)
+
+	tr, err := NewSecureWithShadowNodes(types.StateEpoch(1), emptyRoot, database, storageDB.OpenStorage(contract1))
+	assert.NoError(t, err)
+	tr.Update(makeHash("k1").Bytes(), makeHash("v1").Bytes())
+	tr.Update(makeHash("k2").Bytes(), makeHash("v2").Bytes())
+	val, err := tr.TryGet(makeHash("k1").Bytes())
+	assert.NoError(t, err)
+	assert.Equal(t, makeHash("v1").Bytes(), val)
+	assert.NoError(t, tr.TryDelete(makeHash("k1").Bytes()))
+
+	// commit
+	nextRoot, _, err := tr.Commit(nil)
+	assert.NoError(t, err)
+	assert.NoError(t, storageDB.Commit(common.Big1, nextRoot))
+
+	// reload in epoch2
+	storageDB, err = NewShadowNodeDatabase(tree, common.Big1, nextRoot)
+	assert.NoError(t, err)
+	tr, err = NewSecureWithShadowNodes(types.StateEpoch(2), nextRoot, database, storageDB.OpenStorage(contract1))
+	assert.NoError(t, err)
+	val, err = tr.TryGet(makeHash("k2").Bytes())
+	assert.NoError(t, err)
+	assert.Equal(t, makeHash("v2").Bytes(), val)
+
+	// reload in epoch3, check expired
+	tr, err = NewSecureWithShadowNodes(types.StateEpoch(3), nextRoot, database, storageDB.OpenStorage(contract1))
+	assert.NoError(t, err)
+	_, err = tr.TryGet(makeHash("k2").Bytes())
+	assert.Error(t, err)
+}
+
+func TestTrie_ShadowNodeRW_accessStates(t *testing.T) {
+	database, tree := makeStorageTrieDatabase(t)
+	storageDB, err := NewShadowNodeDatabase(tree, common.Big0, blockRoot0)
+	assert.NoError(t, err)
+
+	tr, err := NewSecureWithShadowNodes(types.StateEpoch(1), emptyRoot, database, storageDB.OpenStorage(contract1))
+	assert.NoError(t, err)
+	tr.Update(makeHash("k1").Bytes(), makeHash("v1").Bytes())
+	tr.Update(makeHash("k2").Bytes(), makeHash("v2").Bytes())
+	val, err := tr.TryGet(makeHash("k1").Bytes())
+	assert.NoError(t, err)
+	assert.Equal(t, makeHash("v1").Bytes(), val)
+
+	// commit
+	nextRoot, _, err := tr.Commit(nil)
+	assert.NoError(t, err)
+	assert.NoError(t, storageDB.Commit(common.Big1, nextRoot))
+
+	// reload in epoch2, access K1, k2
+	storageDB, err = NewShadowNodeDatabase(tree, common.Big1, nextRoot)
+	assert.NoError(t, err)
+	tr, err = NewSecureWithShadowNodes(types.StateEpoch(2), nextRoot, database, storageDB.OpenStorage(contract1))
+	assert.NoError(t, err)
+	err = tr.TryUpdateEpoch(makeHash("k1").Bytes())
+	assert.NoError(t, err)
+	err = tr.TryUpdateEpoch(makeHash("k2").Bytes())
+	assert.NoError(t, err)
+
+	// commit
+	nextRoot, _, err = tr.Commit(nil)
+	assert.NoError(t, err)
+	assert.NoError(t, storageDB.Commit(common.Big2, nextRoot))
+
+	// reload in epoch3
+	storageDB, err = NewShadowNodeDatabase(tree, common.Big2, nextRoot)
+	assert.NoError(t, err)
+	tr, err = NewSecureWithShadowNodes(types.StateEpoch(3), nextRoot, database, storageDB.OpenStorage(contract1))
+	assert.NoError(t, err)
+	val, err = tr.TryGet(makeHash("k1").Bytes())
+	assert.NoError(t, err)
+	assert.Equal(t, makeHash("v1").Bytes(), val)
+	val, err = tr.TryGet(makeHash("k2").Bytes())
+	assert.NoError(t, err)
+	assert.Equal(t, makeHash("v2").Bytes(), val)
+}
+
+func TestTrie_ShadowHash(t *testing.T) {
+	database, tree := makeStorageTrieDatabase(t)
+	storageDB, err := NewShadowNodeDatabase(tree, common.Big0, emptyRoot)
+	assert.NoError(t, err)
+
+	tr, err := NewWithShadowNode(types.StateEpoch0, newEpoch0RootNode(emptyRoot), database, storageDB.OpenStorage(contract1))
+	assert.NoError(t, err)
+
+	batchUpdateTrie(t, tr, []string{"a711355", "450", "a77d337", "100", "a7f9365", "110", "a77d397", "012"})
+	sh1, err := tr.ShadowHash()
+	assert.NoError(t, err)
+	assert.Equal(t, common.HexToHash("0xc752578873185d8b97bdf9e59c8178719e30a03515c7a791e779d4823bbb3fa4"), *sh1)
+
+	// commit and shadow hash again
+	newRoot, _, err := tr.Commit(nil)
+	assert.NoError(t, err)
+	err = storageDB.Commit(common.Big1, newRoot)
+	assert.NoError(t, err)
+
+	storageDB, err = NewShadowNodeDatabase(tree, common.Big1, newRoot)
+	assert.NoError(t, err)
+	tr, err = NewWithShadowNode(types.StateEpoch(1), newEpoch0RootNode(newRoot), database, storageDB.OpenStorage(contract1))
+	assert.NoError(t, err)
+	sh1, err = tr.ShadowHash()
+	assert.NoError(t, err)
+	assert.Equal(t, common.HexToHash("0xc752578873185d8b97bdf9e59c8178719e30a03515c7a791e779d4823bbb3fa4"), *sh1)
+
+	err = tr.TryUpdate(common.Hex2Bytes("a711355"), common.Hex2Bytes("800"))
+	assert.NoError(t, err)
+	sh1, err = tr.ShadowHash()
+	assert.NoError(t, err)
+	assert.Equal(t, common.HexToHash("0xa88d96fa4e1b7b4421198f965230b85e153a6453d1f43b97c0ad89feafa73dd6"), *sh1)
+}
+
+func TestTrie_ShadowHash_case2(t *testing.T) {
+	database, tree := makeStorageTrieDatabase(t)
+	storageDB, err := NewShadowNodeDatabase(tree, common.Big0, emptyRoot)
+	assert.NoError(t, err)
+
+	tr, err := NewWithShadowNode(10, newRootNode(10, emptyRoot, emptyRoot), database, storageDB.OpenStorage(contract1))
+	assert.NoError(t, err)
+
+	batchUpdateTrie(t, tr, []string{"223dffac48c9ce11eb8dd110a36c55aa7f51fd1ab98b4c9b8ebe4decfd72f2288", "450", "224dffac48c9ce11eb8dd110a36c55aa7f51fd1ab98b4c9b8ebe4decfd72f2288", "100", "233dffac48c9ce11eb8dd110a36c55aa7f51fd1ab98b4c9b8ebe4decfd72f2288", "110", "253dffac48c9ce11eb8dd110a36c55aa7f51fd1ab98b4c9b8ebe4decfd72f2288", "012"})
+
+	// commit and shadow hash again
+	newRoot, _, err := tr.Commit(nil)
+	assert.NoError(t, err)
+	err = storageDB.Commit(common.Big1, newRoot)
+	assert.NoError(t, err)
+
+	storageDB, err = NewShadowNodeDatabase(tree, common.Big2, newRoot)
+	assert.NoError(t, err)
+
+	sndb := storageDB.OpenStorage(contract1)
+	rn := tr.db.node(newRoot)
+	// enc, err := sndb.Get(ShadowTreeRootNodePath)
+	// assert.NoError(t, err)
+	// r1, err := decodeRootNode(enc)
+	// assert.NoError(t, err)
+	tr, err = NewWithShadowNode(11, rn.(*rootNode), database, sndb)
+	assert.NoError(t, err)
+	_, err = tr.TryGet(common.Hex2Bytes("223dffac48c9ce11eb8dd110a36c55aa7f51fd1ab98b4c9b8ebe4decfd72f2288"))
+	assert.NoError(t, err)
+	_, err = tr.TryGet(common.Hex2Bytes("224dffac48c9ce11eb8dd110a36c55aa7f51fd1ab98b4c9b8ebe4decfd72f2288"))
+	assert.NoError(t, err)
+	_, err = tr.TryGet(common.Hex2Bytes("233dffac48c9ce11eb8dd110a36c55aa7f51fd1ab98b4c9b8ebe4decfd72f2288"))
+	assert.NoError(t, err)
+	_, err = tr.TryGet(common.Hex2Bytes("253dffac48c9ce11eb8dd110a36c55aa7f51fd1ab98b4c9b8ebe4decfd72f2288"))
+	assert.NoError(t, err)
+}
+
+func batchUpdateTrie(t *testing.T, tr *Trie, kvs []string) {
+	if len(kvs)%2 != 0 {
+		panic("wrong kvs")
+	}
+	for i := 0; i < len(kvs); i += 2 {
+		err := tr.TryUpdate(common.Hex2Bytes(kvs[i]), common.Hex2Bytes(kvs[i+1]))
+		assert.NoError(t, err)
+	}
+}
+
+func makeStorageTrieDatabase(t *testing.T) (*Database, *ShadowNodeSnapTree) {
+	diskdb := memorydb.New()
+	database := NewDatabase(diskdb)
+	tree, err := NewShadowNodeSnapTree(diskdb, true)
+	assert.NoError(t, err)
+	return database, tree
+}
+
 func BenchmarkGet(b *testing.B)      { benchGet(b, false) }
 func BenchmarkGetDB(b *testing.B)    { benchGet(b, true) }
 func BenchmarkUpdateBE(b *testing.B) { benchUpdate(b, binary.BigEndian) }
@@ -893,6 +1450,14 @@ func TestCommitSequenceSmallRoot(t *testing.T) {
 	}
 }
 
+func TestSafeAppendBytes(t *testing.T) {
+	assert.Equal(t, safeAppendBytes(nil, []byte{1}...), append([]byte(nil), 1))
+	assert.Equal(t, safeAppendBytes(nil, []byte{1, 2, 3, 5}...), append([]byte(nil), []byte{1, 2, 3, 5}...))
+	assert.Equal(t, safeAppendBytes([]byte{1, 2, 3, 5}, []byte{5, 4, 3, 2, 1}...), append([]byte{1, 2, 3, 5}, []byte{5, 4, 3, 2, 1}...))
+	assert.Equal(t, safeAppendBytes([]byte{1, 2, 3, 5}, []byte(nil)...), append([]byte{1, 2, 3, 5}, []byte(nil)...))
+	assert.Equal(t, safeAppendBytes([]byte{1, 2, 3, 5}), append([]byte{1, 2, 3, 5}))
+}
+
 // BenchmarkCommitAfterHashFixedSize benchmarks the Commit (after Hash) of a fixed number of updates to a trie.
 // This benchmark is meant to capture the difference on efficiency of small versus large changes. Typically,
 // storage tries are small (a couple of entries), whereas the full post-block account trie update is large (a couple
@@ -1048,7 +1613,7 @@ func benchmarkDerefRootFixedSize(b *testing.B, addresses [][20]byte, accounts []
 	h := trie.Hash()
 	trie.Commit(nil)
 	b.StartTimer()
-	trie.db.Dereference(h)
+	trie.db.Dereference(h, 0) // TODO(asyukii): set epoch to 0 temporary, might need to fix
 	b.StopTimer()
 }
 

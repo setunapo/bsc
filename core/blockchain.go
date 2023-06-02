@@ -148,6 +148,7 @@ type CacheConfig struct {
 	NoTries             bool          // Insecure settings. Do not have any tries in databases if enabled.
 
 	SnapshotWait bool // Wait for snapshot construction on startup. TODO(karalabe): This is a dirty hack for testing, nuke it
+	NoPruning    bool
 }
 
 // To avoid cycle import
@@ -191,6 +192,8 @@ type BlockChain struct {
 	triegc     *prque.Prque   // Priority queue mapping block numbers to tries to gc
 	gcproc     time.Duration  // Accumulates canonical block processing for trie dumping
 	commitLock sync.Mutex     // CommitLock is used to protect above field from being modified concurrently
+
+	shadowNodeTree *trie.ShadowNodeSnapTree
 
 	// txLookupLimit is the maximum number of blocks from head whose tx indices
 	// are reserved:
@@ -362,9 +365,14 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		return nil, err
 	}
 
+	// load shadow node tree to R&W
+	if bc.shadowNodeTree, err = trie.NewShadowNodeSnapTree(db, cacheConfig.NoPruning); err != nil {
+		return nil, err
+	}
+
 	// Make sure the state associated with the block is available
 	head := bc.CurrentBlock()
-	if _, err := state.New(head.Root(), bc.stateCache, bc.snaps); err != nil {
+	if _, err := state.NewWithStateEpoch(chainConfig, head.Number(), head.Root(), bc.stateCache, bc.snaps, bc.shadowNodeTree); err != nil {
 		// Head state is missing, before the state recovery, find out the
 		// disk layer point of snapshot(if it's enabled). Make sure the
 		// rewound point is lower than disk layer.
@@ -715,7 +723,7 @@ func (bc *BlockChain) setHeadBeyondRoot(head uint64, root common.Hash, repair bo
 
 					enoughBeyondCount = beyondCount > maxBeyondBlocks
 
-					if _, err := state.New(newHeadBlock.Root(), bc.stateCache, bc.snaps); err != nil {
+					if _, err := state.NewWithStateEpoch(bc.chainConfig, newHeadBlock.Number(), newHeadBlock.Root(), bc.stateCache, bc.snaps, bc.shadowNodeTree); err != nil {
 						log.Trace("Block state missing, rewinding further", "number", newHeadBlock.NumberU64(), "hash", newHeadBlock.Hash())
 						if pivot == nil || newHeadBlock.NumberU64() > *pivot {
 							parent := bc.GetBlock(newHeadBlock.ParentHash(), newHeadBlock.NumberU64()-1)
@@ -1074,6 +1082,11 @@ func (bc *BlockChain) Stop() {
 			log.Error("Failed to journal state snapshot", "err", err)
 		}
 	}
+	if bc.shadowNodeTree != nil {
+		if err := bc.shadowNodeTree.Journal(); err != nil {
+			log.Error("Failed to journal shadow node snapshot", "err", err)
+		}
+	}
 
 	// Ensure the state of a recent block is also stored to disk before exiting.
 	// We're writing three different states to catch different restart scenarios:
@@ -1103,8 +1116,9 @@ func (bc *BlockChain) Stop() {
 				rawdb.WriteSafePointBlockNumber(bc.db, bc.CurrentBlock().NumberU64())
 			}
 		}
+		currentEpoch := types.GetStateEpoch(bc.chainConfig, bc.CurrentBlock().Number())
 		for !bc.triegc.Empty() {
-			go triedb.Dereference(bc.triegc.PopItem().(common.Hash))
+			go triedb.Dereference(bc.triegc.PopItem().(common.Hash), currentEpoch)
 		}
 		if size, _ := triedb.Size(); size != 0 {
 			log.Error("Dangling trie nodes after full cleanup")
@@ -1546,13 +1560,14 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 					}
 				}
 				// Garbage collect anything below our required write retention
+				currentEpoch := types.GetStateEpoch(bc.chainConfig, bc.CurrentBlock().Number())
 				for !bc.triegc.Empty() {
 					root, number := bc.triegc.Pop()
 					if uint64(-number) > chosen {
 						bc.triegc.Push(root, number)
 						break
 					}
-					go triedb.Dereference(root.(common.Hash))
+					go triedb.Dereference(root.(common.Hash), currentEpoch)
 				}
 			}
 		}
@@ -1826,6 +1841,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 	}
 
 	for ; block != nil && err == nil || errors.Is(err, ErrKnownBlock); block, err = it.next() {
+		log.Info("Try import new chain segment", "number", block.NumberU64(), "hash", block.Hash(), "from", block.Coinbase())
 		// If the chain is terminating, stop processing blocks
 		if bc.insertStopped() {
 			log.Debug("Abort during block processing")
@@ -1882,7 +1898,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		if parent == nil {
 			parent = bc.GetHeader(block.ParentHash(), block.NumberU64()-1)
 		}
-		statedb, err := state.NewWithSharedPool(parent.Root, bc.stateCache, bc.snaps)
+		statedb, err := state.NewWithStateEpoch(bc.chainConfig, block.Number(), parent.Root, bc.stateCache, bc.snaps, bc.ShadowNodeTree())
 		if err != nil {
 			return it.index, err
 		}
@@ -1932,7 +1948,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		substart = time.Now()
 		if !statedb.IsLightProcessed() {
 			if err := bc.validator.ValidateState(block, statedb, receipts, usedGas); err != nil {
-				log.Error("validate state failed", "error", err)
+				log.Error("validate state failed", "number", block.NumberU64(), "hash", block.Hash(), "proposer", block.Coinbase(), "error", err)
 				bc.reportBlock(block, receipts, err)
 				statedb.StopPrefetcher()
 				return it.index, err

@@ -148,7 +148,7 @@ var (
 type SignerFn func(accounts.Account, string, []byte) ([]byte, error)
 type SignerTxFn func(accounts.Account, *types.Transaction, *big.Int) (*types.Transaction, error)
 
-func isToSystemContract(to common.Address) bool {
+func IsToSystemContract(to common.Address) bool {
 	return systemContracts[to]
 }
 
@@ -230,6 +230,10 @@ func New(
 	if parliaConfig != nil && parliaConfig.Epoch == 0 {
 		parliaConfig.Epoch = defaultEpochLength
 	}
+	if parliaConfig != nil && parliaConfig.StateEpochPeriod == 0 {
+		parliaConfig.StateEpochPeriod = types.DefaultStateEpochPeriod
+	}
+	log.Info("instance parlia with config", "period", parliaConfig.Period, "epoch", parliaConfig.Epoch, "stateEpochPeriod", parliaConfig.StateEpochPeriod)
 
 	// Allocate the snapshot caches and create the engine
 	recentSnaps, err := lru.NewARC(inMemorySnapshots)
@@ -258,7 +262,7 @@ func New(
 		signatures:      signatures,
 		validatorSetABI: vABI,
 		slashABI:        sABI,
-		signer:          types.NewEIP155Signer(chainConfig.ChainID),
+		signer:          types.NewBEP215Signer(chainConfig.ChainID),
 	}
 
 	return c
@@ -273,7 +277,7 @@ func (p *Parlia) IsSystemTransaction(tx *types.Transaction, header *types.Header
 	if err != nil {
 		return false, errors.New("UnAuthorized transaction")
 	}
-	if sender == header.Coinbase && isToSystemContract(*tx.To()) && tx.GasPrice().Cmp(big.NewInt(0)) == 0 {
+	if sender == header.Coinbase && IsToSystemContract(*tx.To()) && tx.GasPrice().Cmp(big.NewInt(0)) == 0 {
 		return true, nil
 	}
 	return false, nil
@@ -283,7 +287,7 @@ func (p *Parlia) IsSystemContract(to *common.Address) bool {
 	if to == nil {
 		return false
 	}
-	return isToSystemContract(*to)
+	return IsToSystemContract(*to)
 }
 
 // Author implements consensus.Engine, returning the SystemAddress

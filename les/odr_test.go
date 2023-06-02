@@ -100,7 +100,7 @@ func odrAccounts(ctx context.Context, db ethdb.Database, config *params.ChainCon
 			st, err = state.New(header.Root, state.NewDatabase(db), nil)
 		} else {
 			header := lc.GetHeaderByHash(bhash)
-			st = light.NewState(ctx, header, lc.Odr())
+			st = light.NewState(ctx, config, header, lc.Odr())
 		}
 		if err == nil {
 			bal := st.GetBalance(addr)
@@ -135,7 +135,7 @@ func odrContractCall(ctx context.Context, db ethdb.Database, config *params.Chai
 				from := statedb.GetOrNewStateObject(bankAddr)
 				from.SetBalance(math.MaxBig256)
 
-				msg := callmsg{types.NewMessage(from.Address(), &testContractAddr, 0, new(big.Int), 100000, big.NewInt(params.InitialBaseFee), big.NewInt(params.InitialBaseFee), new(big.Int), data, nil, true)}
+				msg := callmsg{types.NewMessage(from.Address(), &testContractAddr, 0, new(big.Int), 100000, big.NewInt(params.InitialBaseFee), big.NewInt(params.InitialBaseFee), new(big.Int), data, nil, nil, true)}
 
 				context := core.NewEVMBlockContext(header, bc, nil)
 				txContext := core.NewEVMTxContext(msg)
@@ -148,9 +148,9 @@ func odrContractCall(ctx context.Context, db ethdb.Database, config *params.Chai
 			}
 		} else {
 			header := lc.GetHeaderByHash(bhash)
-			state := light.NewState(ctx, header, lc.Odr())
+			state := light.NewState(ctx, config, header, lc.Odr())
 			state.SetBalance(bankAddr, math.MaxBig256)
-			msg := callmsg{types.NewMessage(bankAddr, &testContractAddr, 0, new(big.Int), 100000, big.NewInt(params.InitialBaseFee), big.NewInt(params.InitialBaseFee), new(big.Int), data, nil, true)}
+			msg := callmsg{types.NewMessage(bankAddr, &testContractAddr, 0, new(big.Int), 100000, big.NewInt(params.InitialBaseFee), big.NewInt(params.InitialBaseFee), new(big.Int), data, nil, nil, true)}
 			context := core.NewEVMBlockContext(header, lc, nil)
 			txContext := core.NewEVMTxContext(msg)
 			vmenv := vm.NewEVM(context, txContext, state, config, vm.Config{NoBaseFee: true})

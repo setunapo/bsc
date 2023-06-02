@@ -119,6 +119,13 @@ func (c *committer) commit(n node, db *Database) (node, int, error) {
 			return hn, childCommitted + 1, nil
 		}
 		return collapsed, childCommitted, nil
+	case *rootNode:
+		collapsed := cn.copy()
+		hashedNode := c.store(collapsed, db)
+		if hn, ok := hashedNode.(hashNode); ok {
+			return hn, 1, nil
+		}
+		return collapsed, 0, nil
 	case hashNode:
 		return cn, 0, nil
 	default:
@@ -250,6 +257,8 @@ func estimateSize(n node) int {
 		return 1 + len(n)
 	case hashNode:
 		return 1 + len(n)
+	case *rootNode:
+		return 5 + len(n.TrieRoot) + len(n.ShadowTreeRoot)
 	default:
 		panic(fmt.Sprintf("node type %T", n))
 	}

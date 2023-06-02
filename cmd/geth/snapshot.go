@@ -563,6 +563,7 @@ func traverseState(ctx *cli.Context) error {
 			return err
 		}
 		if acc.Root != emptyRoot {
+			// TODO default using epoch0 trie, but need sndb to query shadow nodes
 			storageTrie, err := trie.NewSecure(acc.Root, triedb)
 			if err != nil {
 				log.Error("Failed to open storage trie", "root", acc.Root, "err", err)
@@ -667,6 +668,7 @@ func traverseRawState(ctx *cli.Context) error {
 				return errors.New("invalid account")
 			}
 			if acc.Root != emptyRoot {
+				// TODO default using epoch0 trie, but need sndb to query shadow nodes
 				storageTrie, err := trie.NewSecure(acc.Root, triedb)
 				if err != nil {
 					log.Error("Failed to open storage trie", "root", acc.Root, "err", err)
@@ -728,7 +730,7 @@ func dumpState(ctx *cli.Context) error {
 	stack, _ := makeConfigNode(ctx)
 	defer stack.Close()
 
-	conf, db, root, err := parseDumpConfig(ctx, stack)
+	conf, db, root, _, err := parseDumpConfig(ctx, stack)
 	if err != nil {
 		return err
 	}

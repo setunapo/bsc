@@ -26,6 +26,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/params"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/gopool"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -87,6 +89,7 @@ type StateDB struct {
 	fullProcessed  bool
 	pipeCommit     bool
 
+	shadowNodeDB   trie.ShadowNodeDatabase
 	snaps          *snapshot.Tree
 	snap           snapshot.Snapshot
 	snapAccountMux sync.Mutex // Mutex for snap account access
@@ -128,6 +131,9 @@ type StateDB struct {
 	validRevisions []revision
 	nextRevisionId int
 
+	targetEpoch types.StateEpoch
+	targetBlk   *big.Int
+
 	// Measurements gathered during execution for debugging purposes
 	MetricsMux           sync.Mutex
 	AccountReads         time.Duration
@@ -148,14 +154,34 @@ type StateDB struct {
 	StorageDeleted int
 }
 
-// New creates a new state from a given trie.
+// NewWithStateEpoch creates a new state from a given trie.
+func NewWithStateEpoch(config *params.ChainConfig, targetBlock *big.Int, root common.Hash, db Database, snaps *snapshot.Tree, sntree *trie.ShadowNodeSnapTree) (*StateDB, error) {
+	targetEpoch := types.GetStateEpoch(config, targetBlock)
+	stateDB, err := newStateDB(root, db, snaps, targetEpoch)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Debug("NewWithStateEpoch", "targetBlock", targetBlock, "targetEpoch", targetEpoch, "root", root)
+	// init target block and shadowNodeRW
+	stateDB.targetBlk = targetBlock
+	stateDB.shadowNodeDB, err = trie.NewShadowNodeDatabase(sntree, targetBlock, root)
+	if err != nil {
+		return nil, err
+	}
+	return stateDB, nil
+}
+
+// New creates a new state from a given trie, it inits at Epoch0
 func New(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) {
-	return newStateDB(root, db, snaps)
+	return newStateDB(root, db, snaps, types.StateEpoch0)
 }
 
 // NewWithSharedPool creates a new state with sharedStorge on layer 1.5
+// Deprecated: disable in state expiry, it inits at Epoch0
+// TODO(0xbundler) cannot use share pool in state revive now, need optimise later
 func NewWithSharedPool(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) {
-	statedb, err := newStateDB(root, db, snaps)
+	statedb, err := newStateDB(root, db, snaps, types.StateEpoch0)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +189,7 @@ func NewWithSharedPool(root common.Hash, db Database, snaps *snapshot.Tree) (*St
 	return statedb, nil
 }
 
-func newStateDB(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) {
+func newStateDB(root common.Hash, db Database, snaps *snapshot.Tree, targetEpoch types.StateEpoch) (*StateDB, error) {
 	sdb := &StateDB{
 		db:                  db,
 		originalRoot:        root,
@@ -175,6 +201,7 @@ func newStateDB(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, 
 		preimages:           make(map[common.Hash][]byte),
 		journal:             newJournal(),
 		hasher:              crypto.NewKeccakState(),
+		targetEpoch:         targetEpoch,
 	}
 
 	if sdb.snaps != nil {
@@ -473,12 +500,12 @@ func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
 }
 
 // GetState retrieves a value from the given account's storage trie.
-func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
+func (s *StateDB) GetState(addr common.Address, hash common.Hash) (common.Hash, error) {
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.GetState(s.db, hash)
 	}
-	return common.Hash{}
+	return common.Hash{}, nil
 }
 
 // GetProof returns the Merkle proof for a given account.
@@ -496,7 +523,18 @@ func (s *StateDB) GetProofByHash(addrHash common.Hash) ([][]byte, error) {
 	return proof, err
 }
 
-// GetStorageProof returns the Merkle proof for given storage slot.
+// GetStorageWitness returns only the Merkle proof for given storage slot.
+func (s *StateDB) GetStorageWitness(a common.Address, prefixKeyHex []byte, key common.Hash) ([][]byte, error) {
+	var proof proofList
+	trie := s.StorageReviveTrie(a)
+	if trie == nil {
+		return proof, errors.New("storage trie for requested address does not exist")
+	}
+	err := trie.ProveStorageWitness(crypto.Keccak256(key.Bytes()), prefixKeyHex, &proof) // TODO (asyukii): Might not need the Keccak256 hash, revisit this
+	return proof, err
+}
+
+// TODO: GetStorageProof returns the combined Merkle proof and Shadow Tree proof for given storage slot.
 func (s *StateDB) GetStorageProof(a common.Address, key common.Hash) ([][]byte, error) {
 	var proof proofList
 	trie := s.StorageTrie(a)
@@ -508,12 +546,12 @@ func (s *StateDB) GetStorageProof(a common.Address, key common.Hash) ([][]byte, 
 }
 
 // GetCommittedState retrieves a value from the given account's committed storage trie.
-func (s *StateDB) GetCommittedState(addr common.Address, hash common.Hash) common.Hash {
+func (s *StateDB) GetCommittedState(addr common.Address, hash common.Hash) (common.Hash, error) {
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.GetCommittedState(s.db, hash)
 	}
-	return common.Hash{}
+	return common.Hash{}, nil
 }
 
 // Database retrieves the low level database supporting the lower level trie ops.
@@ -531,6 +569,16 @@ func (s *StateDB) StorageTrie(addr common.Address) Trie {
 	cpy := stateObject.deepCopy(s)
 	cpy.updateTrie(s.db)
 	return cpy.getTrie(s.db)
+}
+
+func (s *StateDB) StorageReviveTrie(addr common.Address) Trie {
+	stateObject := s.getStateObject(addr)
+	if stateObject == nil {
+		return nil
+	}
+	cpy := stateObject.deepCopy(s)
+	cpy.updateTrie(s.db)
+	return cpy.getPendingReviveTrie(s.db)
 }
 
 func (s *StateDB) HasSuicided(addr common.Address) bool {
@@ -582,11 +630,12 @@ func (s *StateDB) SetCode(addr common.Address, code []byte) {
 	}
 }
 
-func (s *StateDB) SetState(addr common.Address, key, value common.Hash) {
+func (s *StateDB) SetState(addr common.Address, key, value common.Hash) error {
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
-		stateObject.SetState(s.db, key, value)
+		return stateObject.SetState(s.db, key, value)
 	}
+	return nil
 }
 
 // SetStorage replaces the entire storage for the specified account with given
@@ -847,6 +896,8 @@ func (s *StateDB) copyInternal(doPrefetch bool) *StateDB {
 		preimages:           make(map[common.Hash][]byte, len(s.preimages)),
 		journal:             newJournal(),
 		hasher:              crypto.NewKeccakState(),
+		targetEpoch:         s.targetEpoch,
+		targetBlk:           s.targetBlk,
 	}
 	// Copy the dirty states, logs, and preimages
 	for addr := range s.journal.dirties {
@@ -906,6 +957,11 @@ func (s *StateDB) copyInternal(doPrefetch bool) *StateDB {
 		// know that they need to explicitly terminate an active copy).
 		state.prefetcher = state.prefetcher.copy()
 	}
+
+	if s.shadowNodeDB != nil {
+		state.shadowNodeDB = s.shadowNodeDB
+	}
+
 	if s.snaps != nil {
 		// In order for the miner to be able to use and make additions
 		// to the snapshot tree, we need to copy that aswell.
@@ -1365,6 +1421,10 @@ func (s *StateDB) LightCommit() (common.Hash, *types.DiffLayer, error) {
 
 // Commit writes the state to the underlying in-memory trie database.
 func (s *StateDB) Commit(failPostCommitFunc func(), postCommitFuncs ...func() error) (common.Hash, *types.DiffLayer, error) {
+	if s.targetEpoch > 0 && s.shadowNodeDB == nil {
+		return common.Hash{}, nil, errors.New("cannot commit shadow node")
+	}
+
 	if s.dbErr != nil {
 		s.StopPrefetcher()
 		return common.Hash{}, nil, fmt.Errorf("commit aborted due to earlier error: %v", s.dbErr)
@@ -1557,6 +1617,7 @@ func (s *StateDB) Commit(failPostCommitFunc func(), postCommitFuncs ...func() er
 				diffLayer.Destructs, diffLayer.Accounts, diffLayer.Storages = s.SnapToDiffLayer()
 				// Only update if there's a state transition (skip empty Clique blocks)
 				if parent := s.snap.Root(); parent != s.expectedRoot {
+					// TODO snap support epoch index
 					err := s.snaps.Update(s.expectedRoot, parent, s.snapDestructs, s.snapAccounts, s.snapStorage, verified)
 
 					if err != nil {
@@ -1599,6 +1660,13 @@ func (s *StateDB) Commit(failPostCommitFunc func(), postCommitFuncs ...func() er
 	root := s.stateRoot
 	if s.pipeCommit {
 		root = s.expectedRoot
+	}
+
+	log.Debug("statedb commit", "originalRoot", s.originalRoot, "root", root, "targetBlk", s.targetBlk, "targetEpoch", s.targetEpoch)
+	if s.shadowNodeDB != nil {
+		if err := s.shadowNodeDB.Commit(s.targetBlk, root); err != nil {
+			return common.Hash{}, nil, err
+		}
 	}
 
 	return root, diffLayer, nil
@@ -1741,4 +1809,98 @@ func (s *StateDB) GetDirtyAccounts() []common.Address {
 
 func (s *StateDB) GetStorage(address common.Address) *sync.Map {
 	return s.storagePool.getStorage(address)
+}
+
+// ReviveTrie revive a trie with a given witness list
+func (s *StateDB) ReviveStorageTrie(witnessList types.WitnessList) error {
+	if !s.enableStateEpoch(true) {
+		return errors.New("cannot revive any state before epoch2")
+	}
+	for i := range witnessList {
+		wit := witnessList[i]
+		// got specify witness, verify proof and check if revive success
+		switch wit.WitnessType {
+		case types.StorageTrieWitnessType:
+			data, err := wit.WitnessData()
+			if err != nil {
+				return err
+			}
+			stWit, ok := data.(*types.StorageTrieWitness)
+			if !ok {
+				return errors.New("got StorageTrieWitnessType data error")
+			}
+			proofCaches := make([]trie.MPTProofCache, len(stWit.ProofList))
+			for j := range stWit.ProofList {
+				proofCaches[j] = trie.MPTProofCache{
+					MPTProof: stWit.ProofList[j],
+				}
+				if err := proofCaches[j].VerifyProof(); err != nil {
+					return err
+				}
+
+				stateObject := s.getStateObject(stWit.Address)
+				if stateObject == nil {
+					return errors.New("contract object not found")
+				}
+				if err := stateObject.ReviveStorageTrie(proofCaches[j]); err != nil {
+					return err
+				}
+			}
+		default:
+			return errors.New("unsupported WitnessType")
+		}
+	}
+
+	return nil
+}
+
+func (s *StateDB) openShadowStorage(addr common.Hash) trie.ShadowNodeStorage {
+	return trie.NewShadowNodeStorage4Trie(addr, s.shadowNodeDB)
+}
+
+// enableStateEpoch return if enable state expiry hard fork, if inExpired, return if after epoch1
+func (s *StateDB) enableStateEpoch(inExpired bool) bool {
+	if !inExpired {
+		return s.targetEpoch > types.StateEpoch0
+	}
+
+	return s.targetEpoch > types.StateEpoch1
+}
+
+// enableAccStateEpoch return if enable account state expiry hard fork, if inExpired, return if after epoch1
+func (s *StateDB) enableAccStateEpoch(inExpired bool, addr common.Address) bool {
+	// TODO(0xbundler): temporary code, add IsToSystemContract in whitelist for avoid expiry system contract,
+	// it uses in testnet, because there no crossChain msg to update them
+	if systemContracts[addr] {
+		return false
+	}
+	return s.enableStateEpoch(inExpired)
+}
+
+// TODO(0xbundler): temporary code, remove in release version
+const (
+	// genesis contracts
+	ValidatorContract          = "0x0000000000000000000000000000000000001000"
+	SlashContract              = "0x0000000000000000000000000000000000001001"
+	SystemRewardContract       = "0x0000000000000000000000000000000000001002"
+	LightClientContract        = "0x0000000000000000000000000000000000001003"
+	TokenHubContract           = "0x0000000000000000000000000000000000001004"
+	RelayerIncentivizeContract = "0x0000000000000000000000000000000000001005"
+	RelayerHubContract         = "0x0000000000000000000000000000000000001006"
+	GovHubContract             = "0x0000000000000000000000000000000000001007"
+	TokenManagerContract       = "0x0000000000000000000000000000000000001008"
+	CrossChainContract         = "0x0000000000000000000000000000000000002000"
+	StakingContract            = "0x0000000000000000000000000000000000002001"
+)
+
+var systemContracts = map[common.Address]bool{
+	common.HexToAddress(ValidatorContract):          true,
+	common.HexToAddress(SlashContract):              true,
+	common.HexToAddress(SystemRewardContract):       true,
+	common.HexToAddress(LightClientContract):        true,
+	common.HexToAddress(RelayerHubContract):         true,
+	common.HexToAddress(GovHubContract):             true,
+	common.HexToAddress(TokenHubContract):           true,
+	common.HexToAddress(RelayerIncentivizeContract): true,
+	common.HexToAddress(CrossChainContract):         true,
 }

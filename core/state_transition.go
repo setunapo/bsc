@@ -17,6 +17,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -80,6 +81,7 @@ type Message interface {
 	IsFake() bool
 	Data() []byte
 	AccessList() types.AccessList
+	WitnessList() types.WitnessList
 }
 
 // ExecutionResult includes all output after executing given evm
@@ -118,7 +120,7 @@ func (result *ExecutionResult) Revert() []byte {
 }
 
 // IntrinsicGas computes the 'intrinsic gas' for a message with the given data.
-func IntrinsicGas(data []byte, accessList types.AccessList, isContractCreation bool, isHomestead, isEIP2028 bool) (uint64, error) {
+func IntrinsicGas(data []byte, accessList types.AccessList, witnessList types.WitnessList, isContractCreation bool, isHomestead, isEIP2028 bool) (uint64, error) {
 	// Set the starting gas for the raw transaction
 	var gas uint64
 	if isContractCreation && isHomestead {
@@ -154,6 +156,17 @@ func IntrinsicGas(data []byte, accessList types.AccessList, isContractCreation b
 	if accessList != nil {
 		gas += uint64(len(accessList)) * params.TxAccessListAddressGas
 		gas += uint64(accessList.StorageKeys()) * params.TxAccessListStorageKeyGas
+	}
+
+	if witnessList != nil {
+		witGas, err := types.WitnessIntrinsicGas(witnessList)
+		if err != nil {
+			return 0, err
+		}
+		if (math.MaxUint64 - gas) < witGas {
+			return 0, ErrGasUintOverflow
+		}
+		gas += witGas
 	}
 	return gas, nil
 }
@@ -259,6 +272,20 @@ func (st *StateTransition) preCheck() error {
 			}
 		}
 	}
+
+	// check witness and hard fork
+	if st.msg.WitnessList() != nil {
+		if !st.evm.ChainConfig().IsElwood(st.evm.Context.BlockNumber) {
+			return errors.New("cannot allow witness before Elwood fork")
+		}
+		witnessList := st.msg.WitnessList()
+		for i := range witnessList {
+			if err := witnessList[i].VerifyWitness(); err != nil {
+				return err
+			}
+		}
+	}
+
 	return st.buyGas()
 }
 
@@ -315,7 +342,7 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		}
 	}
 	// Check clauses 4-5, subtract intrinsic gas if everything is correct
-	gas, err := IntrinsicGas(st.data, st.msg.AccessList(), contractCreation, rules.IsHomestead, rules.IsIstanbul)
+	gas, err := IntrinsicGas(st.data, st.msg.AccessList(), st.msg.WitnessList(), contractCreation, rules.IsHomestead, rules.IsIstanbul)
 	if err != nil {
 		return nil, err
 	}
@@ -333,6 +360,12 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	if rules.IsBerlin {
 		st.state.PrepareAccessList(msg.From(), msg.To(), vm.ActivePrecompiles(rules), msg.AccessList())
 	}
+
+	// revive state before execution
+	if rules.IsElwood {
+		st.state.ReviveStorageTrie(msg.WitnessList())
+	}
+
 	var (
 		ret   []byte
 		vmerr error // vm errors do not effect consensus and are therefore not assigned to err

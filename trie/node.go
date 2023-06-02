@@ -22,7 +22,23 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
+)
+
+const (
+	BranchNodeLength = 17
+)
+
+const (
+	shortNodeType = iota
+	fullNodeType
+	hashNodeType
+	valueNodeType
+	rawNodeType
+	rawShortNodeType
+	rawFullNodeType
+	rootNodeType
 )
 
 var indices = []string{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f", "[17]"}
@@ -31,17 +47,22 @@ type node interface {
 	cache() (hashNode, bool)
 	encode(w rlp.EncoderBuffer)
 	fstring(string) string
+	nodeType() int
 }
 
 type (
 	fullNode struct {
-		Children [17]node // Actual trie node data to encode/decode (needs custom encoder)
-		flags    nodeFlag
+		Children   [BranchNodeLength]node // Actual trie node data to encode/decode (needs custom encoder)
+		flags      nodeFlag
+		epoch      types.StateEpoch `rlp:"-" json:"-"`
+		shadowNode shadowBranchNode `rlp:"-" json:"-"`
 	}
 	shortNode struct {
-		Key   []byte
-		Val   node
-		flags nodeFlag
+		Key        []byte
+		Val        node
+		flags      nodeFlag
+		epoch      types.StateEpoch    `rlp:"-" json:"-"`
+		shadowNode shadowExtensionNode `rlp:"-" json:"-"`
 	}
 	hashNode  []byte
 	valueNode []byte
@@ -56,6 +77,38 @@ func (n *fullNode) EncodeRLP(w io.Writer) error {
 	eb := rlp.NewEncoderBuffer(w)
 	n.encode(eb)
 	return eb.Flush()
+}
+
+func (n *fullNode) GetShadowNode() *shadowBranchNode {
+	return &n.shadowNode
+}
+
+func (n *fullNode) GetChildEpoch(index int) types.StateEpoch {
+	if index < 16 {
+		return n.GetShadowNode().EpochMap[index]
+	}
+	return n.epoch
+}
+
+func (n *fullNode) UpdateChildEpoch(index int, epoch types.StateEpoch) {
+	if index < 16 {
+		n.GetShadowNode().EpochMap[index] = epoch
+	}
+}
+
+func (n *fullNode) ChildExpired(prefix []byte, index int, currentEpoch types.StateEpoch) (bool, error) {
+	childEpoch := n.GetChildEpoch(index)
+	if types.EpochExpired(childEpoch, currentEpoch) {
+		return true, &ExpiredNodeError{
+			Path:  prefix,
+			Epoch: childEpoch,
+		}
+	}
+	return false, nil
+}
+
+func (n *shortNode) GetShadowNode() *shadowExtensionNode {
+	return &n.shadowNode
 }
 
 func (n *fullNode) copy() *fullNode   { copy := *n; return &copy }
@@ -78,6 +131,11 @@ func (n *shortNode) String() string { return n.fstring("") }
 func (n hashNode) String() string   { return n.fstring("") }
 func (n valueNode) String() string  { return n.fstring("") }
 
+func (n *fullNode) setEpoch(epoch types.StateEpoch)  { n.epoch = epoch }
+func (n *shortNode) setEpoch(epoch types.StateEpoch) { n.epoch = epoch }
+func (n *fullNode) getEpoch() types.StateEpoch       { return n.epoch }
+func (n *shortNode) getEpoch() types.StateEpoch      { return n.epoch }
+
 func (n *fullNode) fstring(ind string) string {
 	resp := fmt.Sprintf("[\n%s  ", ind)
 	for i, node := range &n.Children {
@@ -97,6 +155,22 @@ func (n hashNode) fstring(ind string) string {
 }
 func (n valueNode) fstring(ind string) string {
 	return fmt.Sprintf("%x ", []byte(n))
+}
+
+func (n *shortNode) nodeType() int {
+	return shortNodeType
+}
+
+func (n *fullNode) nodeType() int {
+	return fullNodeType
+}
+
+func (n hashNode) nodeType() int {
+	return hashNodeType
+}
+
+func (n valueNode) nodeType() int {
+	return valueNodeType
 }
 
 // mustDecodeNode is a wrapper of decodeNode and panic if any error is encountered.
@@ -145,6 +219,9 @@ func decodeNodeUnsafe(hash, buf []byte) (node, error) {
 	case 17:
 		n, err := decodeFull(hash, elems)
 		return n, wrapError(err, "full")
+	case 3:
+		n, err := DecodeRootNode(buf)
+		return n, wrapError(err, "root")
 	default:
 		return nil, fmt.Errorf("invalid number of list elements: %v", c)
 	}
@@ -155,21 +232,24 @@ func decodeShort(hash, elems []byte) (node, error) {
 	if err != nil {
 		return nil, err
 	}
-	flag := nodeFlag{hash: hash}
+	n := &shortNode{flags: nodeFlag{hash: hash}}
 	key := compactToHex(kbuf)
+	n.Key = key
 	if hasTerm(key) {
 		// value node
 		val, _, err := rlp.SplitString(rest)
 		if err != nil {
 			return nil, fmt.Errorf("invalid value node: %v", err)
 		}
-		return &shortNode{key, valueNode(val), flag}, nil
+		n.Val = valueNode(val)
+		return n, nil
 	}
 	r, _, err := decodeRef(rest)
 	if err != nil {
 		return nil, wrapError(err, "val")
 	}
-	return &shortNode{key, r, flag}, nil
+	n.Val = r
+	return n, nil
 }
 
 func decodeFull(hash, elems []byte) (*fullNode, error) {

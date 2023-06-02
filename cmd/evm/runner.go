@@ -138,8 +138,8 @@ func runCmd(ctx *cli.Context) error {
 		genesisConfig = gen
 		db := rawdb.NewMemoryDatabase()
 		genesis := gen.ToBlock(db)
-		statedb, _ = state.New(genesis.Root(), state.NewDatabase(db), nil)
 		chainConfig = gen.Config
+		statedb, _ = state.New(genesis.Root(), state.NewDatabase(db), nil)
 	} else {
 		statedb, _ = state.New(common.Hash{}, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
 		genesisConfig = new(core.Genesis)

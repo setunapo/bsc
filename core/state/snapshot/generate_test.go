@@ -42,6 +42,7 @@ func TestGeneration(t *testing.T) {
 		diskdb = memorydb.New()
 		triedb = trie.NewDatabase(diskdb)
 	)
+	// TODO default using epoch0 trie, but need sndb to query shadow nodes
 	stTrie, _ := trie.NewSecure(common.Hash{}, triedb)
 	stTrie.Update([]byte("key-1"), []byte("val-1")) // 0x1314700b81afc49f94db3623ef1df38f3ed18b73a1b7ea2f6c095118cf6118a0
 	stTrie.Update([]byte("key-2"), []byte("val-2")) // 0x18a0f4d79cff4459642dd7604f303886ad9d77c30cf3d7d7cedb3a693ab6d371
@@ -99,6 +100,7 @@ func TestGenerateExistentState(t *testing.T) {
 		diskdb = memorydb.New()
 		triedb = trie.NewDatabase(diskdb)
 	)
+	// TODO default using epoch0 trie, but need sndb to query shadow nodes
 	stTrie, _ := trie.NewSecure(common.Hash{}, triedb)
 	stTrie.Update([]byte("key-1"), []byte("val-1")) // 0x1314700b81afc49f94db3623ef1df38f3ed18b73a1b7ea2f6c095118cf6118a0
 	stTrie.Update([]byte("key-2"), []byte("val-2")) // 0x18a0f4d79cff4459642dd7604f303886ad9d77c30cf3d7d7cedb3a693ab6d371
@@ -211,6 +213,7 @@ func (t *testHelper) addSnapStorage(accKey string, keys []string, vals []string)
 }
 
 func (t *testHelper) makeStorageTrie(keys []string, vals []string) []byte {
+	// TODO default using epoch0 trie, but need sndb to query shadow nodes
 	stTrie, _ := trie.NewSecure(common.Hash{}, t.triedb)
 	for i, k := range keys {
 		stTrie.Update([]byte(k), []byte(vals[i]))
@@ -428,6 +431,7 @@ func TestGenerateMissingStorageTrie(t *testing.T) {
 		diskdb = memorydb.New()
 		triedb = trie.NewDatabase(diskdb)
 	)
+	// TODO default using epoch0 trie, but need sndb to query shadow nodes
 	stTrie, _ := trie.NewSecure(common.Hash{}, triedb)
 	stTrie.Update([]byte("key-1"), []byte("val-1")) // 0x1314700b81afc49f94db3623ef1df38f3ed18b73a1b7ea2f6c095118cf6118a0
 	stTrie.Update([]byte("key-2"), []byte("val-2")) // 0x18a0f4d79cff4459642dd7604f303886ad9d77c30cf3d7d7cedb3a693ab6d371
@@ -487,6 +491,8 @@ func TestGenerateCorruptStorageTrie(t *testing.T) {
 		diskdb = memorydb.New()
 		triedb = trie.NewDatabase(diskdb)
 	)
+
+	// TODO default using epoch0 trie, but need sndb to query shadow nodes
 	stTrie, _ := trie.NewSecure(common.Hash{}, triedb)
 	stTrie.Update([]byte("key-1"), []byte("val-1")) // 0x1314700b81afc49f94db3623ef1df38f3ed18b73a1b7ea2f6c095118cf6118a0
 	stTrie.Update([]byte("key-2"), []byte("val-2")) // 0x18a0f4d79cff4459642dd7604f303886ad9d77c30cf3d7d7cedb3a693ab6d371
@@ -537,6 +543,7 @@ func TestGenerateCorruptStorageTrie(t *testing.T) {
 }
 
 func getStorageTrie(n int, triedb *trie.Database) *trie.SecureTrie {
+	// TODO default using epoch0 trie, but need sndb to query shadow nodes
 	stTrie, _ := trie.NewSecure(common.Hash{}, triedb)
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("key-%d", i)

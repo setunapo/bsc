@@ -55,6 +55,9 @@ type Database interface {
 	// OpenStorageTrie opens the storage trie of an account.
 	OpenStorageTrie(addrHash, root common.Hash) (Trie, error)
 
+	// OpenStorageTrieWithShadowNode opens the storage trie of an account and allow rw shadow nodes.
+	OpenStorageTrieWithShadowNode(addrHash, root common.Hash, curEpoch types.StateEpoch, sndb trie.ShadowNodeStorage) (Trie, error)
+
 	// CopyTrie returns an independent copy of the given trie.
 	CopyTrie(Trie) Trie
 
@@ -93,6 +96,9 @@ type Trie interface {
 	// trie.MissingNodeError is returned.
 	TryGet(key []byte) ([]byte, error)
 
+	// TryUpdateEpoch just update key's epoch, only using in storage trie
+	TryUpdateEpoch(key []byte) error
+
 	// TryUpdateAccount abstract an account write in the trie.
 	TryUpdateAccount(key []byte, account *types.StateAccount) error
 
@@ -110,6 +116,9 @@ type Trie interface {
 	// can be used even if the trie doesn't have one.
 	Hash() common.Hash
 
+	// HashKey return trie key hash result
+	HashKey(key []byte) []byte
+
 	// Commit writes all nodes to the trie's memory database, tracking the internal
 	// and external (for account tries) references.
 	Commit(onleaf trie.LeafCallback) (common.Hash, int, error)
@@ -126,6 +135,12 @@ type Trie interface {
 	// nodes of the longest existing prefix of the key (at least the root), ending
 	// with the node that proves the absence of the key.
 	Prove(key []byte, fromLevel uint, proofDb ethdb.KeyValueWriter) error
+
+	ProveStorageWitness(key []byte, prefixKey []byte, proofDb ethdb.KeyValueWriter) error
+
+	ReviveTrie(proof []*trie.MPTProofNub) []*trie.MPTProofNub
+
+	Epoch() types.StateEpoch
 }
 
 // NewDatabase creates a backing store for state. The returned database is safe for
@@ -232,7 +247,23 @@ func (db *cachingDB) OpenStorageTrie(addrHash, root common.Hash) (Trie, error) {
 		}
 	}
 
+	// TODO default using epoch0 trie, but need sndb to query shadow nodes
 	tr, err := trie.NewSecure(root, db.db)
+	if err != nil {
+		return nil, err
+	}
+	return tr, nil
+}
+
+// OpenStorageTrieWithShadowNode opens the storage trie of an account.
+func (db *cachingDB) OpenStorageTrieWithShadowNode(addrHash, root common.Hash, curEpoch types.StateEpoch, sndb trie.ShadowNodeStorage) (Trie, error) {
+	if db.noTries {
+		return trie.NewEmptyTrie(), nil
+	}
+
+	// StorageTrie with ShadowNode cannot use trie cache,
+	// because of its sndb need update in every block, just reinit it
+	tr, err := trie.NewSecureWithShadowNodes(curEpoch, root, db.db, sndb)
 	if err != nil {
 		return nil, err
 	}
@@ -251,6 +282,12 @@ func (db *cachingDB) CacheStorage(addrHash common.Hash, root common.Hash, t Trie
 	if db.storageTrieCache == nil {
 		return
 	}
+
+	// do not cache trie with shadow nodes
+	if t.Epoch() > types.StateEpoch0 {
+		return
+	}
+
 	tr := t.(*trie.SecureTrie)
 	if tries, exist := db.storageTrieCache.Get(addrHash); exist {
 		triesArray := tries.([3]*triePair)

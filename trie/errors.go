@@ -19,6 +19,8 @@ package trie
 import (
 	"fmt"
 
+	"github.com/ethereum/go-ethereum/core/types"
+
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -32,4 +34,20 @@ type MissingNodeError struct {
 
 func (err *MissingNodeError) Error() string {
 	return fmt.Sprintf("missing trie node %x (path %x)", err.NodeHash, err.Path)
+}
+
+type ExpiredNodeError struct {
+	Path  []byte // hex-encoded path to the expired node
+	Epoch types.StateEpoch
+}
+
+func NewExpiredNodeError(path []byte, epoch types.StateEpoch) error {
+	return &ExpiredNodeError{
+		Path:  path,
+		Epoch: epoch,
+	}
+}
+
+func (err *ExpiredNodeError) Error() string {
+	return "expired trie node"
 }

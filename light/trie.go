@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ethereum/go-ethereum/params"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -35,8 +37,9 @@ var (
 	sha3Nil = crypto.Keccak256Hash(nil)
 )
 
-func NewState(ctx context.Context, head *types.Header, odr OdrBackend) *state.StateDB {
-	state, _ := state.New(head.Root, NewStateDatabase(ctx, head, odr), nil)
+func NewState(ctx context.Context, config *params.ChainConfig, head *types.Header, odr OdrBackend) *state.StateDB {
+	tree, _ := trie.NewShadowNodeSnapTree(odr.Database(), true)
+	state, _ := state.NewWithStateEpoch(config, head.Number, head.Root, NewStateDatabase(ctx, head, odr), nil, tree)
 	return state
 }
 
@@ -60,6 +63,10 @@ func (db *odrDatabase) OpenTrie(root common.Hash) (state.Trie, error) {
 
 func (db *odrDatabase) OpenStorageTrie(addrHash, root common.Hash) (state.Trie, error) {
 	return &odrTrie{db: db, id: StorageTrieID(db.id, addrHash, root)}, nil
+}
+
+func (db *odrDatabase) OpenStorageTrieWithShadowNode(addrHash, root common.Hash, curEpoch types.StateEpoch, sndb trie.ShadowNodeStorage) (state.Trie, error) {
+	return db.OpenStorageTrie(addrHash, root)
 }
 
 func (db *odrDatabase) CopyTrie(t state.Trie) state.Trie {
@@ -112,6 +119,10 @@ type odrTrie struct {
 	trie *trie.Trie
 }
 
+func (t *odrTrie) ProveStorageWitness(key []byte, prefixKey []byte, proofDb ethdb.KeyValueWriter) error {
+	panic("implement me")
+}
+
 func (t *odrTrie) TryGet(key []byte) ([]byte, error) {
 	key = crypto.Keccak256(key)
 	var res []byte
@@ -138,6 +149,10 @@ func (t *odrTrie) TryUpdate(key, value []byte) error {
 	return t.do(key, func() error {
 		return t.trie.TryUpdate(key, value)
 	})
+}
+
+func (t *odrTrie) TryUpdateEpoch(key []byte) error {
+	return nil
 }
 
 func (t *odrTrie) TryDelete(key []byte) error {
@@ -169,6 +184,14 @@ func (t *odrTrie) GetKey(sha []byte) []byte {
 	return nil
 }
 
+func (t *odrTrie) HashKey(key []byte) []byte {
+	return nil
+}
+
+func (t *odrTrie) Epoch() types.StateEpoch {
+	return types.StateEpoch0
+}
+
 func (t *odrTrie) Prove(key []byte, fromLevel uint, proofDb ethdb.KeyValueWriter) error {
 	return errors.New("not implemented, needs client/server interface split")
 }
@@ -196,6 +219,10 @@ func (t *odrTrie) do(key []byte, fn func() error) error {
 
 func (db *odrTrie) NoTries() bool {
 	return false
+}
+
+func (t *odrTrie) ReviveTrie(proof []*trie.MPTProofNub) []*trie.MPTProofNub {
+	return t.trie.ReviveTrie(proof)
 }
 
 type nodeIterator struct {

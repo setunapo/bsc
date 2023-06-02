@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ethereum/go-ethereum/core/types"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/ethdb/memorydb"
@@ -39,32 +41,11 @@ func (t *Trie) Prove(key []byte, fromLevel uint, proofDb ethdb.KeyValueWriter) e
 	key = keybytesToHex(key)
 	var nodes []node
 	tn := t.root
-	for len(key) > 0 && tn != nil {
-		switch n := tn.(type) {
-		case *shortNode:
-			if len(key) < len(n.Key) || !bytes.Equal(n.Key, key[:len(n.Key)]) {
-				// The trie doesn't contain the key.
-				tn = nil
-			} else {
-				tn = n.Val
-				key = key[len(n.Key):]
-			}
-			nodes = append(nodes, n)
-		case *fullNode:
-			tn = n.Children[key[0]]
-			key = key[1:]
-			nodes = append(nodes, n)
-		case hashNode:
-			var err error
-			tn, err = t.resolveHash(n, nil)
-			if err != nil {
-				log.Error(fmt.Sprintf("Unhandled trie error: %v", err))
-				return err
-			}
-		default:
-			panic(fmt.Sprintf("%T: invalid node: %v", tn, tn))
-		}
+	_, err := t.traverseNodes(tn, key, &nodes)
+	if err != nil {
+		return err
 	}
+
 	hasher := newHasher(false)
 	defer returnHasherToPool(hasher)
 
@@ -99,6 +80,58 @@ func (t *SecureTrie) Prove(key []byte, fromLevel uint, proofDb ethdb.KeyValueWri
 	return t.trie.Prove(key, fromLevel, proofDb)
 }
 
+// ProveStorageWitness constructs a merkle proof for a storage key. If the prefix key is specified,
+// the proof will start from the node that contains the prefix key to get the partial proof.
+// The result contains all encoded nodes from the starting node to the node that contains
+// the value. The value itself is also included in the last node and can be retrieved by
+// verifying the proof.
+func (t *Trie) ProveStorageWitness(key []byte, prefixKeyHex []byte, proofDb ethdb.KeyValueWriter) error {
+
+	if len(key) == 0 {
+		return fmt.Errorf("key is empty")
+	}
+
+	key = keybytesToHex(key)
+
+	// traverse down using the prefixKeyHex
+	var nodes []node
+	tn := t.root
+	startNode, err := t.traverseNodes(tn, prefixKeyHex, nil) // obtain the node that contains the prefixKeyHex
+	if err != nil {
+		return err
+	}
+
+	key = key[len(prefixKeyHex):] // obtain the suffix key
+
+	// traverse through the suffix key
+	_, err = t.traverseNodes(startNode, key, &nodes)
+	if err != nil {
+		return err
+	}
+
+	hasher := newHasher(false)
+	defer returnHasherToPool(hasher)
+
+	// construct the proof
+	for _, n := range nodes {
+		var hn node
+		n, hn = hasher.proofHash(n)
+		if hash, ok := hn.(hashNode); ok {
+			enc := nodeToBytes(n)
+			if !ok {
+				hash = hasher.hashData(enc)
+			}
+			proofDb.Put(hash, enc)
+		}
+	}
+
+	return nil
+}
+
+func (t *SecureTrie) ProveStorageWitness(key []byte, prefixKeyHex []byte, proofDb ethdb.KeyValueWriter) error {
+	return t.trie.ProveStorageWitness(key, prefixKeyHex, proofDb)
+}
+
 // VerifyProof checks merkle proofs. The given proof must contain the value for
 // key in a trie with the given root hash. VerifyProof returns an error if the
 // proof contains invalid trie nodes or the wrong value.
@@ -126,6 +159,328 @@ func VerifyProof(rootHash common.Hash, key []byte, proofDb ethdb.KeyValueReader)
 			return cld, nil
 		}
 	}
+}
+
+// MPTProofNub include fullNode shortNode, revive n1 first if exist,
+// revive n2 later if exist, include node hash
+type MPTProofNub struct {
+	n1PrefixKey []byte // n1's prefix hex key, max 64bytes
+	n1          node
+	n2PrefixKey []byte // n2's prefix hex key, max 64bytes
+	n2          node
+}
+
+// ResolveKV revive state could revive KV from fullNode[0-15] or fullNode[16] or shortNode.Val, return KVs for cache & snap
+func (m *MPTProofNub) ResolveKV() (map[string][]byte, error) {
+	kvMap := make(map[string][]byte)
+	if err := resolveKV(m.n1, m.n1PrefixKey, kvMap); err != nil {
+		return nil, err
+	}
+	if err := resolveKV(m.n2, m.n2PrefixKey, kvMap); err != nil {
+		return nil, err
+	}
+
+	return kvMap, nil
+}
+
+func resolveKV(origin node, prefixKey []byte, kvWriter map[string][]byte) error {
+	switch n := origin.(type) {
+	case nil, hashNode:
+		return nil
+	case valueNode:
+		kvWriter[string(hexToKeybytes(prefixKey))] = n
+		return nil
+	case *shortNode:
+		return resolveKV(n.Val, append(prefixKey, n.Key...), kvWriter)
+	case *fullNode:
+		for i := 0; i < BranchNodeLength-1; i++ {
+			if err := resolveKV(n.Children[i], append(prefixKey, byte(i)), kvWriter); err != nil {
+				return err
+			}
+		}
+		return resolveKV(n.Children[BranchNodeLength-1], prefixKey, kvWriter)
+	default:
+		panic(fmt.Sprintf("invalid node: %v", origin))
+	}
+}
+
+type MPTProofCache struct {
+	types.MPTProof
+
+	cacheHexPath [][]byte       // cache path for performance
+	cacheHashes  [][]byte       // cache hash for performance
+	cacheNodes   []node         // cache node for performance
+	cacheNubs    []*MPTProofNub // cache proof nubs to check revive duplicate
+}
+
+// VerifyProof verify proof in MPT witness
+// 1. calculate hash
+// 2. decode trie node
+// 3. verify partial merkle proof of the witness
+// 4. split to partial witness
+func (m *MPTProofCache) VerifyProof() error {
+	m.cacheHashes = make([][]byte, len(m.Proof))
+	m.cacheNodes = make([]node, len(m.Proof))
+	m.cacheHexPath = make([][]byte, len(m.Proof))
+	hasher := newHasher(false)
+	defer returnHasherToPool(hasher)
+
+	var child []byte
+	for i := len(m.Proof) - 1; i >= 0; i-- {
+		m.cacheHashes[i] = hasher.hashData(m.Proof[i])
+		n, err := decodeNode(m.cacheHashes[i], m.Proof[i])
+		if err != nil {
+			return err
+		}
+		m.cacheNodes[i] = n
+
+		switch t := n.(type) {
+		case *shortNode:
+			m.cacheHexPath[i] = t.Key
+			if err := matchHashNodeInShortNode(child, t); err != nil {
+				return err
+			}
+		case *fullNode:
+			index, err := matchHashNodeInFullNode(child, t)
+			if err != nil {
+				return err
+			}
+			if index >= 0 {
+				m.cacheHexPath[i] = []byte{byte(index)}
+			}
+		case valueNode:
+			if child != nil {
+				return errors.New("proof wrong child in valueNode")
+			}
+		default:
+			return fmt.Errorf("proof got wrong trie node: %v", t.nodeType())
+		}
+
+		child = m.cacheHashes[i]
+	}
+
+	// cache proof nubs
+	m.cacheNubs = make([]*MPTProofNub, 0, len(m.Proof))
+	prefix := m.RootKeyHex
+	for i := 0; i < len(m.cacheNodes); i++ {
+		if i-1 >= 0 {
+			prefix = copyNewSlice(prefix, m.cacheHexPath[i-1])
+		}
+		// prefix = append(prefix, m.cacheHexPath[i]...)
+		n1 := m.cacheNodes[i]
+		nub := MPTProofNub{
+			n1PrefixKey: prefix,
+			n1:          n1,
+			n2:          nil,
+			n2PrefixKey: nil,
+		}
+
+		// check if satisfy partial witness rules,
+		// that short node must with its child, may full node or valueNode
+		merge, err := mergeNextNode(m.cacheNodes, i)
+		if err != nil {
+			return err
+		}
+		if merge {
+			i++
+			prefix = copyNewSlice(prefix, m.cacheHexPath[i-1])
+			nub.n2 = m.cacheNodes[i]
+			nub.n2PrefixKey = prefix
+		}
+		m.cacheNubs = append(m.cacheNubs, &nub)
+	}
+
+	return nil
+}
+
+func copyNewSlice(s1, s2 []byte) []byte {
+	ret := make([]byte, len(s1)+len(s2))
+	copy(ret, s1)
+	copy(ret[len(s1):], s2)
+	return ret
+}
+
+func (m *MPTProofCache) CacheNubs() []*MPTProofNub {
+	return m.cacheNubs
+}
+
+// mergeNextNode check short node must with child in same nub
+func mergeNextNode(nodes []node, i int) (bool, error) {
+	if i >= len(nodes) {
+		return false, errors.New("mergeNextNode input outbound index")
+	}
+
+	n1 := nodes[i]
+	switch n := n1.(type) {
+	case *shortNode:
+		need, err := needNextProofNode(n, n.Val)
+		if err != nil {
+			return false, err
+		}
+		if need && i+1 >= len(nodes) {
+			return false, errors.New("mergeNextNode short node must with its child")
+		}
+		return need, nil
+	case valueNode:
+		return false, errors.New("mergeNextNode value node need merge with prev node")
+	}
+
+	if i+1 >= len(nodes) {
+		return false, nil
+	}
+	return nodes[i+1].nodeType() == valueNodeType, nil
+}
+
+// needNextProofNode check if node need merge next node into a proofNub, because TrieExtendNode must with its child to revive together
+func needNextProofNode(parent, origin node) (bool, error) {
+	switch n := origin.(type) {
+	case *fullNode:
+		for i := 0; i < BranchNodeLength-1; i++ {
+			need, err := needNextProofNode(n, n.Children[i])
+			if err != nil {
+				return false, err
+			}
+			if need {
+				return true, nil
+			}
+		}
+		return false, nil
+	case *shortNode:
+		if parent.nodeType() == shortNodeType {
+			return false, errors.New("needNextProofNode cannot short node's child is short node")
+		}
+		return needNextProofNode(n, n.Val)
+	case valueNode:
+		return false, nil
+	case hashNode:
+		if parent.nodeType() == fullNodeType {
+			return false, nil
+		}
+		return true, nil
+	default:
+		return false, errors.New("needNextProofNode unsupported node")
+	}
+}
+
+func matchHashNodeInFullNode(child []byte, n *fullNode) (int, error) {
+	if child == nil {
+		return -1, nil
+	}
+
+	for i := 0; i < BranchNodeLength-1; i++ {
+		switch v := n.Children[i].(type) {
+		case hashNode:
+			if bytes.Equal(child, v) {
+				return i, nil
+			}
+		}
+	}
+	return -1, errors.New("proof cannot find target child in fullNode")
+}
+
+func matchHashNodeInShortNode(child []byte, n *shortNode) error {
+	if child == nil {
+		return nil
+	}
+
+	switch v := n.Val.(type) {
+	case hashNode:
+		if !bytes.Equal(child, v) {
+			return errors.New("proof wrong child in shortNode")
+		}
+	default:
+		return errors.New("proof must hashNode when meet shortNode")
+	}
+	return nil
+}
+
+// VerifyStorageWitness checks a merkle proof for a storage key. If the prefix key is specified,
+// it will traverse down to the node that contains the prefix key. From there, proof will be verified.
+// VerifyStorageProof returns an error if the proof contains invalid trie nodes.
+func (t *Trie) VerifyStorageWitness(key []byte, prefixKeyHex []byte, proofDb ethdb.KeyValueReader) (value []byte, err error) {
+
+	if len(key) == 0 {
+		return nil, fmt.Errorf("empty key provided")
+	}
+
+	key = keybytesToHex(key)
+
+	tn := t.root
+	startNode, err := t.traverseNodes(tn, prefixKeyHex, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	key = key[len(prefixKeyHex):] // obtain the suffix key
+
+	hasher := newHasher(false)
+	defer returnHasherToPool(hasher)
+
+	_, hn := hasher.proofHash(startNode)
+	wantHash, ok := hn.(hashNode)
+
+	if !ok { // node is not hashed
+		return nil, nil
+	}
+	for i := 0; ; i++ {
+		buf, _ := proofDb.Get(wantHash[:])
+		if buf == nil {
+			return nil, fmt.Errorf("proof node %d (hash %064x) missing", i, wantHash)
+		}
+		n, err := decodeNode(wantHash[:], buf)
+		if err != nil {
+			return nil, fmt.Errorf("bad proof node %d: %v", i, err)
+		}
+		keyrest, cld := get(n, key, true)
+		switch cld := cld.(type) {
+		case nil:
+			return nil, nil
+		case hashNode:
+			key = keyrest
+			copy(wantHash[:], cld)
+		case valueNode:
+			return cld, nil
+		}
+	}
+}
+
+// traverseNodes traverses the trie with the given key starting at the given node.
+// If the trie contains the key, the returned node is the node that contains the
+// value for the key. If nodes is specified, the traversed nodes are appended to
+// it.
+func (t *Trie) traverseNodes(tn node, key []byte, nodes *[]node) (node, error) {
+	for len(key) > 0 && tn != nil {
+		switch n := tn.(type) {
+		case *shortNode:
+			if len(key) < len(n.Key) || !bytes.Equal(n.Key, key[:len(n.Key)]) {
+				// The trie doesn't contain the key.
+				tn = nil
+			} else {
+				tn = n.Val
+				key = key[len(n.Key):]
+			}
+			if nodes != nil {
+				*nodes = append(*nodes, n)
+			}
+		case *fullNode:
+			tn = n.Children[key[0]]
+			key = key[1:]
+			if nodes != nil {
+				*nodes = append(*nodes, n)
+			}
+		case hashNode:
+			var err error
+			tn, err = t.resolveHash(n, nil)
+			if err != nil {
+				log.Error(fmt.Sprintf("Unhandled trie error: %v", err))
+				return tn, err
+			}
+		default:
+			panic(fmt.Sprintf("%T: invalid node: %v", tn, tn))
+		}
+	}
+
+	return tn, nil
 }
 
 // proofToPath converts a merkle proof to trie node path. The main purpose of
